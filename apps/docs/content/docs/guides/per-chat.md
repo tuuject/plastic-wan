@@ -51,7 +51,7 @@ description: 配置 Chat 或 Topic allowlist、每群模型覆盖，以及恢复
 
 ## 何时生效
 
-已有 Chat 的 `provider`、`model`、`thinking_level` 覆盖属于热更新，下一次 Invocation 使用新值，正在运行的 Invocation 继续使用启动时快照。allowlist、Topic 范围以及新增/删除 Chat 修改后必须重启。配置文件没有 watcher，手改后要在 Settings 点击 **Apply config file**，再按面板提示重启。
+已有 Chat 的 `provider`、`model`、`thinking_level` 覆盖属于热更新，下一次 Invocation 使用新值，正在运行的 Invocation 继续使用启动时快照。新增 Chat 同样热应用、立即生效；删除 Chat 与 Topic 范围修改后必须重启。配置文件没有 watcher，手改后要在 Settings 点击 **Apply config file**，再按面板提示重启。
 
 ## 如何确认
 

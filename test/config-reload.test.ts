@@ -70,6 +70,19 @@ function textUpdate(updateId: number, messageId: number, text: string): Update {
   };
 }
 
+function groupUpdate(updateId: number, messageId: number, chatId: number, senderId = 42): Update {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: messageId,
+      date: 1_700_000_000 + messageId,
+      chat: { id: chatId, type: 'supergroup', title: 'Group' },
+      from: { id: senderId, is_bot: false, first_name: `User ${senderId}` },
+      text: `message from ${senderId}`,
+    },
+  };
+}
+
 async function until(predicate: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -625,13 +638,15 @@ test('a model switch refused before writing leaves the apply status alone', asyn
   }
 });
 
-test('treats a new chat as restart-only and an instructions edit as hot', async () => {
-  const fixture = await setup();
+test('treats a new chat as hot, a timezone edit as restart-only and an instructions edit as hot', async () => {
+  const fixture = await setup({
+    files: { 'other-instructions.md': 'other chat' },
+  });
   try {
     await fixture.patch((config) => {
       config.telegram.chats = [
         { id: CHAT_ID, instructions_file: 'chat-instructions.md' },
-        { id: 111, instructions_file: 'chat-instructions.md' },
+        { id: 111, instructions_file: 'other-instructions.md' },
       ];
     });
     const added = await fixture.reloader.reloadFromFile();
@@ -639,10 +654,11 @@ test('treats a new chat as restart-only and an instructions edit as hot', async 
     if (!added.ok) {
       throw new Error(added.message);
     }
-    expect(added.restartRequired).toEqual(['telegram.chats[111]']);
-    expect(added.applied).toEqual([]);
-    expect(fixture.configStore.current().config.telegram.chats.map((chat) => chat.id)).toEqual([CHAT_ID]);
-    expect(fixture.reloader.status().generation).toBe(1);
+    // Adding a chat is hot: the running process adopts it immediately.
+    expect(added.applied).toEqual(['telegram.chats[111]']);
+    expect(added.restartRequired).toEqual([]);
+    expect(fixture.configStore.current().config.telegram.chats.map((chat) => chat.id)).toEqual([CHAT_ID, 111]);
+    expect(fixture.reloader.status().generation).toBe(2);
 
     await fixture.patch((config) => {
       config.telegram.chats[0]!.timezone = 'Asia/Tokyo';
@@ -652,7 +668,7 @@ test('treats a new chat as restart-only and an instructions edit as hot', async 
     if (!chatField.ok) {
       throw new Error(chatField.message);
     }
-    expect(chatField.restartRequired).toEqual(['telegram.chats[111]', 'telegram.chats[123456789].timezone']);
+    expect(chatField.restartRequired).toEqual(['telegram.chats[123456789].timezone']);
     expect(fixture.configStore.current().config.telegram.chats[0]?.timezone).toBeUndefined();
 
     // Only the instructions file changes; the configuration file is untouched.
@@ -2101,6 +2117,87 @@ test('Chat switches reject missing file IDs without writing', async () => {
     expect(missing).toMatchObject({ ok: false, code: 'config_invalid', fileWritten: false });
     expect(await fixture.readText()).toBe(removed);
     expect(fixture.configStore.current()).toBe(before);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test('addChat appends a bare allowlist entry and hot-applies it', async () => {
+  const newChatId = -100999;
+  const fixture = await setup();
+  try {
+    const result = await fixture.reloader.addChat(newChatId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
+    expect(result.applied).toEqual([`telegram.chats[${newChatId}]`]);
+    expect(result.restartRequired).toEqual([]);
+    const written = await loadConfig(fixture.configPath);
+    expect(written.fileConfig.telegram.chats.at(-1)).toEqual({ id: newChatId });
+    const active = fixture.configStore.current();
+    expect(active.config.telegram.chats.at(-1)?.id).toBe(newChatId);
+    expect(active.generation).toBe(2);
+    expect(logEvents('config_reloaded').at(-1)?.applied).toContain(`telegram.chats[${newChatId}]`);
+    // Hot adoption is observable in the ingestion allowlist without a restart.
+    const ingested = fixture.ingestion.ingest(groupUpdate(1, 10, newChatId));
+    expect(ingested.messageId).toBeDefined();
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test('addChat adopts a file that already names the chat instead of writing again', async () => {
+  const newChatId = -100999;
+  const fixture = await setup();
+  try {
+    await fixture.patch((config) => {
+      config.telegram.chats.push({ id: newChatId });
+    });
+    const before = fixture.configStore.current();
+    expect(before.config.telegram.chats.some((chat) => chat.id === newChatId)).toBe(false);
+    const result = await fixture.reloader.addChat(newChatId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
+    expect(result.applied).toEqual([`telegram.chats[${newChatId}]`]);
+    expect(fixture.configStore.current().config.telegram.chats.some((chat) => chat.id === newChatId)).toBe(true);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test('addChat rejects invalid IDs without touching file or active state', async () => {
+  const fixture = await setup();
+  try {
+    const before = fixture.configStore.current();
+    const original = await fixture.readText();
+    for (const invalid of [0, 1.5]) {
+      const result = await fixture.reloader.addChat(invalid);
+      expect(result).toMatchObject({ ok: false, code: 'config_invalid', fileWritten: false });
+    }
+    expect(await fixture.readText()).toBe(original);
+    expect(fixture.configStore.current()).toBe(before);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test('/allowlist allowlists the chat it is sent from and the next message ingests', async () => {
+  const newChatId = -100999;
+  const fixture = await setup();
+  try {
+    const reply = await fixture.commands.run({ name: 'allowlist' }, BigInt(newChatId), ADMIN);
+    expect(reply).toBe('已将本群加入白名单，配置已立即生效。');
+    expect(fixture.configStore.current().config.telegram.chats.some((chat) => chat.id === newChatId)).toBe(true);
+    expect(await loadConfig(fixture.configPath).then((loaded) => loaded.fileConfig.telegram.chats.at(-1))).toEqual({
+      id: newChatId,
+    });
+    const ingested = fixture.ingestion.ingest(groupUpdate(1, 10, newChatId));
+    expect(ingested.messageId).toBeDefined();
+    const again = await fixture.commands.run({ name: 'allowlist' }, BigInt(newChatId), ADMIN);
+    expect(again).toBe('本群已在白名单中。');
   } finally {
     fixture.store.close();
   }

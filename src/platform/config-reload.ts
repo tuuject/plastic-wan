@@ -185,6 +185,38 @@ export class ConfigReloader {
     return this.#withLock(() => this.#writeChatSettings(configuredChatId, null));
   }
 
+  /**
+   * Appends a bare allowlist entry `{ id }` for the chat to the configuration
+   * file and applies it. Adding a chat is a hot change (see `config-diff.ts`),
+   * so a successful apply lets the running process accept the chat immediately.
+   * A chat the file already allowlists is not written again; applying the file
+   * then covers a previously written but unapplied add.
+   */
+  addChat(configuredChatId: number): Promise<ConfigApplyResult> {
+    return this.#withLock(() => this.#addChat(configuredChatId));
+  }
+
+  async #addChat(configuredChatId: number): Promise<ConfigApplyResult> {
+    if (!Number.isSafeInteger(configuredChatId) || configuredChatId === 0) {
+      return this.#rejected('config_invalid', `Invalid Telegram chat ID: ${configuredChatId}`);
+    }
+    let revision: string;
+    let loaded: LoadedConfig;
+    try {
+      revision = await readConfigRevision(this.#configPath);
+      loaded = await loadConfig(this.#configPath);
+    } catch (error) {
+      return this.#rejected('config_invalid', messageOf(error));
+    }
+    if (loaded.fileConfig.telegram.chats.some((chat) => chat.id === configuredChatId)) {
+      return await this.#applyFile();
+    }
+    const edits: ConfigEdit[] = [
+      { path: ['telegram', 'chats', loaded.fileConfig.telegram.chats.length], value: { id: configuredChatId } },
+    ];
+    return await this.#writeAndApply(edits, revision);
+  }
+
   async #setModel(
     provider: string,
     model: string,

@@ -123,15 +123,28 @@ test('reports prompt content and path changes on the prompt field', async () => 
   expect(diff.candidate.raw.agent.system_prompt).toBe('A different prompt.');
 });
 
-test('aligns chats by id and keeps an active-only chat in the candidate', async () => {
+test('aligns chats by id: additions are hot while removals wait for a restart', async () => {
   const { active, file } = await loadBoth(undefined, (config) => {
-    config.telegram.chats = [{ id: 111, instructions_file: 'chat-instructions.md' }];
+    config.telegram.chats = [{ id: 111 }];
   });
   const diff = diffConfig({ file: active.fileConfig, raw: active.config }, { file: file.fileConfig, raw: file.config });
-  expect(paths(diff.changes, 'restart')).toEqual(['telegram.chats[111]', 'telegram.chats[123456789]']);
-  // The removed chat waits for a restart, so it keeps the active instructions.
-  expect(diff.candidate.file.telegram.chats.map((chat) => chat.id)).toEqual([123456789]);
-  expect(diff.candidate.raw.telegram.chats.map((chat) => chat.instructions)).toEqual(['private']);
+  expect(paths(diff.changes, 'restart')).toEqual(['telegram.chats[123456789]']);
+  expect(paths(diff.changes, 'hot')).toEqual(['telegram.chats[111]']);
+  // The removed chat waits for a restart and keeps the active instructions; the
+  // added chat is adopted immediately with its file instructions ('' here).
+  expect(diff.candidate.file.telegram.chats.map((chat) => chat.id)).toEqual([123456789, 111]);
+  expect(diff.candidate.raw.telegram.chats.map((chat) => chat.instructions)).toEqual(['private', '']);
+});
+
+test('adding a chat is hot and the candidate adopts it in file order', async () => {
+  const { active, file } = await loadBoth(undefined, (config) => {
+    config.telegram.chats.push({ id: -987654321 });
+  });
+  const diff = diffConfig({ file: active.fileConfig, raw: active.config }, { file: file.fileConfig, raw: file.config });
+  expect(paths(diff.changes, 'hot')).toEqual(['telegram.chats[-987654321]']);
+  expect(paths(diff.changes, 'restart')).toEqual([]);
+  expect(diff.candidate.file.telegram.chats.map((chat) => chat.id)).toEqual([123456789, -987654321]);
+  expect(diff.candidate.raw.telegram.chats.map((chat) => chat.id)).toEqual([123456789, -987654321]);
 });
 
 test('treats a chat field other than instructions as restart-only', async () => {

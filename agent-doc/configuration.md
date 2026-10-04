@@ -9,7 +9,7 @@ Plastic Wan 使用严格 JSONC 配置。Schema 位于 `src/platform/config.ts`�
 - CLI 必须显式传入 `--config <path>`。
 - 配置在 `serve` 启动时读取一次；只有[运行时配置热更新](#运行时配置热更新)列出的白名单字段可以在运行中应用，其余字段修改后必须重启。
 - 配置哈希是原始 JSONC 文本与所有 Prompt 文件内容的 SHA-256，写入 Invocation 并打印在 `serve_started` 日志中。
-- 修改 allowlist、Bucket 窗口、Sticker Set 或 MCP 后必须重启；Prompt、Provider（含连接字段与模型列表）、agent 模型与 vision 模型、已有 Chat 的 `provider`/`model`/`thinking_level` 覆盖等白名单字段可用 Admin「Apply config file」或 `/model` 热应用。
+- 修改 Bucket 窗口、Sticker Set 或 MCP 后必须重启；Prompt、Provider（含连接字段与模型列表）、agent 模型与 vision 模型、已有 Chat 的 `provider`/`model`/`thinking_level` 覆盖、**新增 Chat** 等白名单字段可用 Admin「Apply config file」或 `/model` 热应用；删除 Chat 与修改 Topic 范围仍需重启。
 - 相对 `data_dir`/`paths` 按服务当前工作目录解释；Docker 镜像的工作目录是 `/app`。
 - Prompt 文件路径（`system_prompt_file`、`instructions_file`）相对于配置文件所在目录解释；修改文件内容同样会改变 `config_hash`。
 - Prompt 文件按原始字节参与哈希：剔除 HTML 注释只影响进入模型上下文的文本，纯注释改动仍然改变 `config_hash`。
@@ -33,16 +33,17 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 | `agent.system_prompt_file` | 路径或文件内容变化都算；内容变化会重建每个 Conversation 的 Context |
 | `developer`、`developer.record_model_payloads` | 可选节/字段的增删都热应用，缺省为 `false`；每次模型调用读取当前开关，关闭时后续快照回调停止写入 |
 | 其余 agent 字段：`thinking_level`、`context_stop_ratio`、`send_max_text_length`、`send_disallow_blank_lines`、`send_nudge_enabled`、`send_barrier_enabled`、`daily_budget.max_tokens`、`max_concurrency`、`history_messages`、`context.max_wall_clock_seconds`、`context.idle_grace_seconds`、`rate_limits.*` | 下一次 Invocation 使用新值；运行中的 Invocation 继续用它启动时的快照。唯一例外是 `daily_budget.max_tokens`：日预算在运行期实时读取，调低后下一次模型调用立即被拦截 |
+| `telegram.chats`（**新增** Chat，整项 `{ id, … }`） | 立即生效：ingestion 白名单、参与策略注册表与 `resolveChatConfig` 都读发布后的配置并按代数重建/直读，无需重启。删除 Chat、已有 Chat 的其它字段修改与 Topic 范围仍是 restart |
 | `telegram.chats[<id>].instructions_file` | 仅限两边都存在的 Chat；路径或内容变化都算 |
-| `telegram.chats[<id>].provider` / `.model` / `.thinking_level` | 仅限两边都存在的 Chat 的按群模型覆盖（语义与校验见「Telegram Chat 与 Topic」）；新增/删除 Chat 仍是 restart |
-| `telegram.admins` | Bot 管理员白名单（`/pause`、`/resume`、`/model`、`/cut_topic` 的唯一事实源）；运行期判定直接读运行中的配置，下一次命令执行就用新列表 |
+| `telegram.chats[<id>].provider` / `.model` / `.thinking_level` | 仅限两边都存在的 Chat 的按群模型覆盖（语义与校验见「Telegram Chat 与 Topic」）；删除 Chat 仍是 restart |
+| `telegram.admins` | Bot 管理员白名单（`/pause`、`/resume`、`/model`、`/cut_topic`、`/allowlist` 的唯一事实源）；运行期判定直接读运行中的配置，下一次命令执行就用新列表 |
 | `providers.<alias>`（新增、删除、改 kind）与 `providers.<alias>.*`（连接字段、模型列表） | Provider 的每个字段都热更新：reload 按新定义重建注册表。模型列表变化只替换该 Provider 的模型；连接字段变化会重新解析它的 SecretRef |
 | `vision.provider`、`vision.model`、`vision.max_output_tokens` | 下一次 vision 分析使用新模型；`max_output_tokens` 在构建注册表时与新模型的上限一起校验，并和模型一起在分析开始时从同一份快照取出，等待中发布的新值只影响之后的分析 |
 | `image`（整段：存在性、`credentials`、`models` 及所有子字段） | 图片功能启停与配置都热应用：reload 重新解析 image SecretRef 并原子发布新的图片快照，下一次提交生效；进行中的生成继续用它开始时的凭据快照。段被剥离（结构不合法）或删除都等于禁用，Agent 与 Admin 同步失去图片工具与页面能力，不需要重启 |
 
 `outside_serve` 字段（`serve` 从不读取，下一次 `backup` 生效，既不算已应用也不算待重启）：`paths.backups`、`retention.online_days`、`retention.backup_copies`。
 
-其它所有路径都是 restart：改动会写进文件，但要重启才生效，包括 `telegram.token`、`data_dir`、`paths.database`、`admin.*`、`mcp.servers`、`telegram.sticker_sets`、Chat allowlist，以及 `instructions_file`、`provider`、`model`、`thinking_level` 以外的 Chat 字段，以及 `vision` 的 `max_concurrency`、`background_sticker_concurrency`、`prompt_version`、`daily_budget`。
+其它所有路径都是 restart：改动会写进文件，但要重启才生效，包括 `telegram.token`、`data_dir`、`paths.database`、`admin.*`、`mcp.servers`、`telegram.sticker_sets`、Chat allowlist 的删除与已有 Chat 的修改（新增 Chat 是热变更），以及 `instructions_file`、`provider`、`model`、`thinking_level` 以外的 Chat 字段，以及 `vision` 的 `max_concurrency`、`background_sticker_concurrency`、`prompt_version`、`daily_budget`。
 
 应用流程与语义：
 

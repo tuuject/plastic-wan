@@ -14,7 +14,7 @@ import type { ConversationRuntime } from './conversation-runtime.ts';
 import type { BucketScheduler } from './scheduler.ts';
 
 export interface ParsedCommand {
-  readonly name: 'pause' | 'resume' | 'status' | 'model' | 'cut_topic' | 'whoami';
+  readonly name: 'pause' | 'resume' | 'status' | 'model' | 'cut_topic' | 'whoami' | 'allowlist';
   readonly argument?: string;
   /** Telegram message ID of the command message itself; used by cut_topic. */
   readonly messageId?: bigint;
@@ -67,6 +67,7 @@ const COMMAND_NAMES: Record<string, true> = {
   model: true,
   cut_topic: true,
   whoami: true,
+  allowlist: true,
 } satisfies Record<ParsedCommand['name'], true>;
 const DENIED_REPLY = '该命令仅对本 Bot 的管理员可用。';
 const MODEL_PAGE_SIZE = 20;
@@ -85,6 +86,7 @@ export const BOT_COMMANDS: readonly BotCommandRegistration[] = [
   { command: 'model', description: '查看或切换 agent 模型（仅管理员）' },
   { command: 'cut_topic', description: '切掉此消息及更早的历史，仅对新会话生效（仅管理员）' },
   { command: 'whoami', description: '查看你的 Telegram 数字 ID' },
+  { command: 'allowlist', description: '将本群加入白名单，立即生效（仅管理员）' },
 ];
 
 export interface CommandRegistrationApi {
@@ -161,7 +163,7 @@ export class BotCommandService {
     this.#scheduler = scheduler;
     this.#modelSwitcher = modelSwitcher;
     this.#configReloader = configReloader;
-    this.#participation = new ParticipationRegistry(configStore.current().config);
+    this.#participation = new ParticipationRegistry(configStore);
     this.#contexts = new ConversationContextStore(store);
     this.#conversationRuntime = conversationRuntime;
   }
@@ -187,6 +189,8 @@ export class BotCommandService {
           : DENIED_REPLY;
       case 'whoami':
         return sender === null ? '无法识别发送者。' : sender.id.toString();
+      case 'allowlist':
+        return this.#adminGate(sender) ? await this.#allowlist(telegramChatId) : DENIED_REPLY;
     }
   }
 
@@ -307,6 +311,35 @@ export class BotCommandService {
       this.#conversationRuntime?.forget(conversationId);
     }
     return '已切掉此消息及更早的历史，并清空该话题的连续 Context。';
+  }
+
+  // The one command that may run in a chat the allowlist does not yet name:
+  // ingestion passes it through for admins precisely so it can extend the
+  // allowlist itself. The entry is appended to `telegram.chats` as `{ id }` and
+  // hot-applied, so the chat joins the normal ingestion path without a restart.
+  async #allowlist(telegramChatId: bigint): Promise<string> {
+    if (resolveChatConfig(this.#configStore.current().config, this.#store.orm, telegramChatId) !== undefined) {
+      return '本群已在白名单中。';
+    }
+    const reloader = this.#configReloader;
+    if (reloader === undefined) {
+      return '运行时配置应用不可用。';
+    }
+    const chatId = Number(telegramChatId);
+    if (!Number.isSafeInteger(chatId) || chatId === 0) {
+      return `无效的 Chat ID: ${telegramChatId.toString()}`;
+    }
+    const result = await reloader.addChat(chatId);
+    if (!result.ok) {
+      return result.fileWritten
+        ? `已写入 config.jsonc，但应用失败: ${result.message}`
+        : `加入白名单失败: ${result.message}`;
+    }
+    const lines = ['已将本群加入白名单，配置已立即生效。'];
+    if (result.restartRequired.length > 0) {
+      lines.push(`另有 ${result.restartRequired.length} 项配置需要重启后生效。`);
+    }
+    return lines.join('\n');
   }
 
   async #modelSwitch(argument: string | undefined, telegramChatId: bigint): Promise<string> {

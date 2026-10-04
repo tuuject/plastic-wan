@@ -89,7 +89,8 @@ export const pages: typeof pagesEn = {
     thinkingUnsupported: '请选择所选模型支持的思考强度。',
     addChat: '添加会话',
     editChat: '编辑会话',
-    dialogDescription: '会话与话题白名单需要重启才能生效。模型设置应用于活跃会话的下一次 Invocation，覆盖其所有话题。',
+    dialogDescription:
+      '新增会话立即生效；修改话题范围或删除会话需重启生效。模型设置应用于活跃会话的下一次 Invocation，覆盖其所有话题。',
     chatIdLabel: 'Telegram Chat ID',
     chatIdPlaceholder: '例如 -1001234567890',
     chatIdHint: '群组和超级群组为负数；私聊为正数。ID 不可重命名。',

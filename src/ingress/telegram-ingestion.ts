@@ -66,7 +66,8 @@ export class TelegramIngestion {
   readonly #store: SqliteStore;
   readonly #configStore: RuntimeConfigurationStore;
   readonly #participation: ParticipationRegistry;
-  readonly #allowedChats = new Map<string, ReadonlySet<bigint> | undefined>();
+  #allowedChats = new Map<string, ReadonlySet<bigint> | undefined>();
+  #configGeneration = 0;
   readonly #botId: bigint;
   readonly #botUsername: string | null;
 
@@ -79,14 +80,8 @@ export class TelegramIngestion {
     this.#configStore = configStore;
     this.#botId = BigInt(bot.id);
     this.#botUsername = bot.username ?? null;
-    const config = configStore.current().config;
-    this.#participation = new ParticipationRegistry(config);
-    for (const chat of config.telegram.chats) {
-      this.#allowedChats.set(
-        String(chat.id),
-        chat.topic_ids === undefined ? undefined : new Set(chat.topic_ids.map((topicId) => BigInt(topicId))),
-      );
-    }
+    this.#syncAllowedChats();
+    this.#participation = new ParticipationRegistry(configStore);
   }
 
   ingest(update: Update, receivedAt = new Date()): IngestResult {
@@ -98,6 +93,7 @@ export class TelegramIngestion {
   }
 
   #ingestTransaction(update: Update, receivedAt: Date, schedule: boolean): IngestResult {
+    this.#syncAllowedChats();
     const message = update.edited_message ?? update.message;
     const membership = update.my_chat_member;
     const chat = message?.chat ?? membership?.chat;
@@ -111,7 +107,20 @@ export class TelegramIngestion {
     this.#recordMigration(message, receivedAt);
     const topics = chatId === undefined ? null : this.#topicsFor(chatId);
     const topicAllowed = topics !== null && (topics === undefined || topics.has(threadId));
-    const allowed = chat !== undefined && chat.type !== 'channel' && topicAllowed;
+    const edited = update.edited_message !== undefined;
+    // Chat control commands are handled by the bot itself: they are audited
+    // but never stored as messages, so they cannot trigger or taint buckets.
+    const command = schedule && !edited && message !== undefined ? parseBotCommand(message, this.#botUsername) : null;
+    // A chat the allowlist does not name still reaches the bot through exactly
+    // one command: an admin allowlisting it. Every other command or message
+    // from such a chat stays rejected, so the bot never talks where it is not
+    // configured.
+    const senderIsAdmin =
+      message?.from !== undefined &&
+      (this.#configStore.current().config.telegram.admins ?? []).includes(message.from.id);
+    const adminCommand =
+      topics === null && command !== null && command.name === 'allowlist' && senderIsAdmin ? command : null;
+    const allowed = adminCommand !== null || (chat !== undefined && chat.type !== 'channel' && topicAllowed);
     const rejectionReason = allowed
       ? null
       : chat === undefined
@@ -139,6 +148,15 @@ export class TelegramIngestion {
     if (inserted.changes === 0) {
       return {};
     }
+    if (adminCommand !== null) {
+      // adminCommand implies a message, so the chat is present; record the row
+      // like the allowed command path does, so `/status` works before the
+      // first stored message arrives.
+      if (chat !== undefined && chatId !== undefined) {
+        this.#upsertChat(chat, chatId, receivedAt);
+      }
+      return { command: adminCommand };
+    }
     if (!allowed || chat === undefined || chatId === undefined || topics === null) {
       return {};
     }
@@ -153,10 +171,8 @@ export class TelegramIngestion {
       return {};
     }
     const internalChatId = this.#upsertChat(chat, chatId, receivedAt);
-    const edited = update.edited_message !== undefined;
-    // Chat control commands are handled by the bot itself: they are audited
-    // but never stored as messages, so they cannot trigger or taint buckets.
-    const command = schedule && !edited ? parseBotCommand(message, this.#botUsername) : null;
+    // Ignored users are dropped before command dispatch: their commands never
+    // reach the bot, exactly like their messages never reach a bucket.
     if (command !== null) {
       return { command };
     }
@@ -187,6 +203,22 @@ export class TelegramIngestion {
       messageId: stored.id,
       ...(bucketId === undefined ? {} : { bucketId }),
     };
+  }
+
+  // Chat additions are hot-applied configuration changes: rebuild the
+  // allowlist whenever the published configuration generation moved on.
+  #syncAllowedChats(): void {
+    const snapshot = this.#configStore.current();
+    if (snapshot.generation === this.#configGeneration) {
+      return;
+    }
+    this.#configGeneration = snapshot.generation;
+    this.#allowedChats = new Map(
+      snapshot.config.telegram.chats.map((chat) => [
+        String(chat.id),
+        chat.topic_ids === undefined ? undefined : new Set(chat.topic_ids.map((topicId) => BigInt(topicId))),
+      ]),
+    );
   }
 
   /** `null` when the chat is not allowed; `undefined` when allowed for all topics. */

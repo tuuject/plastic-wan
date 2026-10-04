@@ -19,7 +19,7 @@ description: 按症状检查无法启动、Bot 不回复、模型或管理面板
 沉默可能是正常行为。依次检查：
 
 1. Telegram 是否把普通消息投递给 Bot，群隐私模式是否符合预期。
-2. Chat/Topic 是否在 allowlist；变更后是否已重启。
+2. Chat/Topic 是否在 allowlist；新增 Chat 是否已热应用，删除/Topic 变更后是否已重启。
 3. 是否还在 Bucket 窗口，或同群前一个 Invocation 正在运行。
 4. participation、暂停状态和全局预算是否拦截了触发。
 5. Invocation 是否 completed；`sends_used = 0` 表示模型选择不发言。

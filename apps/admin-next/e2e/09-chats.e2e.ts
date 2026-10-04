@@ -34,6 +34,9 @@ async function editElsewhere(page: Page, settings: ChatSettings): Promise<void> 
  * The suite shares one server, so each test starts from the fixture allowlist:
  * only ACTIVE_CHAT, inheriting everything. A failed test may have left extra
  * Chats, removed ACTIVE_CHAT or armed an apply failure that still has to fire.
+ * Chats removed after a hot add stay in the running allowlist as
+ * "Removal pending" until a restart, and the fixture server never restarts, so
+ * such pending rows are expected residue for the rest of the suite.
  */
 async function restoreBaseline(page: Page): Promise<void> {
   await page.evaluate(
@@ -103,9 +106,7 @@ test.beforeEach(async ({ page }) => {
   await expect(chatRow(page)).toBeVisible();
 });
 
-test('navigation, exact string IDs and pending add/remove work without changing the running allowlist', async ({
-  page,
-}) => {
+test('navigation, exact string IDs and hot add work; removal waits for a restart', async ({ page }) => {
   const finish = watchPageIssues(page);
   await page.getByLabel('Chats', { exact: true }).click();
   await page.getByRole('button', { name: 'Add Chat', exact: true }).click();
@@ -120,16 +121,24 @@ test('navigation, exact string IDs and pending add/remove work without changing 
   await saveDialog(page);
   const added = chatRow(page, '9007199254740991');
   await expect(added).toContainText('Private');
-  await expect(added).toContainText('Addition pending');
-  expect((await viewOf(page)).items.find((chat) => chat.id === '9007199254740991')).toMatchObject({
+  // The addition is hot: the running allowlist adopts it without a restart.
+  await expect(added).toContainText('Active');
+  const view = await viewOf(page);
+  expect(view.items.find((chat) => chat.id === '9007199254740991')).toMatchObject({
     saved: inherited,
-    active: null,
+    active: inherited,
   });
+  // The fixture's in-memory admin port override keeps a permanent restart
+  // entry, so only assert the added chat is not among the pending paths.
+  expect(view.restart_required).not.toContain('telegram.chats[9007199254740991]');
 
   await added.getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(page.getByRole('alertdialog')).toContainText('Stored history is kept');
   await page.getByRole('button', { name: 'Remove Chat', exact: true }).click();
-  await expect(added).toHaveCount(0);
+  // The chat just hot-applied stays in the running allowlist: the removal is
+  // only written to the file and waits for a restart.
+  await expect(added).toContainText('Removal pending');
+  expect((await viewOf(page)).restart_required).toContain('telegram.chats[9007199254740991]');
   await expect(chatRow(page).getByRole('button', { name: 'Remove', exact: true })).toBeDisabled();
   const issues = finish();
   expect(issues.pageErrors).toEqual([]);
@@ -234,7 +243,9 @@ test('remove confirmation retains its original revision and shows removed active
   await saveDialog(page);
   await chatRow(page, '-1009876543210').getByRole('button', { name: 'Remove', exact: true }).click();
   await page.getByRole('button', { name: 'Remove Chat', exact: true }).click();
-  await expect(chatRow(page, '-1009876543210')).toHaveCount(0);
+  // The hot-added Chat stays in the running allowlist: removal waits for a
+  // restart and the row remains visible as pending.
+  await expect(chatRow(page, '-1009876543210')).toContainText('Removal pending');
 });
 
 test('saved-but-not-applied errors refresh both views and Settings can apply the saved model', async ({ page }) => {

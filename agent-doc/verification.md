@@ -68,10 +68,10 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `operations.test.ts` | Retention、备份轮换、Scheduler 关闭 |
 | `admin.test.ts` | Admin 首次设置、登录、登录锁定（不受 `X-Forwarded-For` 与用户名轮换影响、并发失败计数、过期后重新计数）、请求体按字节流式限长、HTTPS 下 Cookie 带 `Secure`、Session、只读审计 API（含 Conversation Context 列表/详情与写入尝试被拒）、静态托管 |
 | `admin-providers.test.ts` | Provider/模型管理、SecretRef 只写不读、修订冲突、全局模型端点保留 Chat 覆盖、阻止删除 Chat 引用（含待重启移除的运行中 Chat）的 Provider/模型且不落盘 |
-| `admin-chats.test.ts` | Chat 管理鉴权与 Origin、字符串 ID 与安全整数边界、Topic/模型严格校验、模型覆盖必须显式带 thinking、revision 先于 body 解析与并发写入保护、JSONC 注释及未管理字段保留、增删/Topic 待重启与历史保留、模型热应用/恢复继承、迁移 ID、保存后应用失败的状态与脱敏审计 |
+| `admin-chats.test.ts` | Chat 管理鉴权与 Origin、字符串 ID 与安全整数边界、Topic/模型严格校验、模型覆盖必须显式带 thinking、revision 先于 body 解析与并发写入保护、JSONC 注释及未管理字段保留、新增 Chat 热应用而删除/Topic 待重启与历史保留、模型热应用/恢复继承、迁移 ID、保存后应用失败的状态与脱敏审计 |
 | `model-switch.test.ts` | 可切换模型仅列 text 能力、当前模型取配置值、`option()` 只校验不应用（未知 provider/model 与 image-only 拒绝）、`current()` 跟随 `store.publish` 变化 |
-| `bot-commands.test.ts` | 命令解析与 mention 匹配、`setMyCommands` 注册一致性、`/pause` 中止与阻断、`/resume` 恢复、`/status` 用量与 Context 行口径、`/model` 分页与切换（写配置文件并 reload）、管理员鉴权与匿名拒绝、`/whoami` 回显发送者 ID 且不限管理员、命令只审计不入库 |
-| `config-diff.test.ts` | 热更新白名单分类（hot/restart/outside_serve）、candidate 构造、Provider 的增删/改 kind/连接字段/模型定义全部取文件值、custom Provider `models[]` 对齐、新增 Chat 与 Prompt 内容比较 |
+| `bot-commands.test.ts` | 命令解析与 mention 匹配、`setMyCommands` 注册一致性、`/pause` 中止与阻断、`/resume` 恢复、`/status` 用量与 Context 行口径、`/model` 分页与切换（写配置文件并 reload）、管理员鉴权与匿名拒绝、`/whoami` 回显发送者 ID 且不限管理员、`/allowlist` 仅管理员且在未允许 Chat 由 ingestion 放行并热应用、命令只审计不入库 |
+| `config-diff.test.ts` | 热更新白名单分类（hot/restart/outside_serve）、candidate 构造、Provider 的增删/改 kind/连接字段/模型定义全部取文件值、custom Provider `models[]` 对齐、新增 Chat 热应用与删除仍 restart、Prompt 内容比较 |
 | `config-reload.test.ts` | `ConfigReloader` 外部契约：generation 与两个 hash、`config_reloaded`/`config_reload_failed`/`model_switch_failed` 日志、待重启字段撤销与只改注释后 active hash 跟上文件 hash、两遍校验与 `candidate_invalid`、`secret_unresolved` 的整次拒绝、待重启列表、运行中 Invocation 钉住模型与 Provider 连接（两个本地端点验证换地址后的下一轮仍走旧地址）、`/model` 写入文件（保留注释、`0600`、符号链接拒绝）、`invocations.config_hash` 在 `queued → running` 写入、Admin `POST /config/apply` 与 `PUT /model` 的响应体；Chat 覆盖切换按文件 ID 定位（reorder 后仍解析正确、保留其它 Chat 与全局默认、文件里缺该 Chat 时拒绝写入不落盘）、并发 Chat 切换互不覆盖、发布前对全局与每个选中 Chat 模型逐一校验（删除在用 Chat 模型被拒、全局换模型拒绝继承不兼容的 thinking） |
 | `memory.test.ts` | 记忆持久化与 TTL、Conversation 隔离、Tool 审计、注入批次内 `<memory_list>` 的顺序与作用域、Admin 记忆 CRUD |
 | `long-tasks.test.ts` | 任务/receipt 的 JSON 边界、终态 CAS 与唯一 receipt、plugin/Conversation/caller scope、quota（含取消记录）及外部 completion handle |
@@ -155,7 +155,7 @@ node src/cli.ts serve --config dev-data/config.jsonc
 12. Conversation Contexts 页面按 chat 过滤，列表按最近活跃倒序并可用 Load more 翻页；详情显示 head/next seq、保留消息数与 capability refs，展开消息看到 `payload_preview` 与截断标记，且不出现已 GC 的行。
 13. 登出后访问深链接回落登录页；重新登录恢复访问。
 14. `admin_users.password_hash` 使用 Argon2id 格式，`admin_sessions` 只有 64 位十六进制摘要。
-15. Manage → Chats 并排显示 Saved settings 与 Running settings：新增/删除 Chat、修改 Topic 白名单后文件已保存但运行态不变；已有 active Chat 切换模型/thinking 后运行列同步，恢复 Global default 清除两种覆盖。删除需确认且保留历史，最后一个配置 Chat 禁止删除。并发编辑/删除冲突不能覆盖新文件；保存后应用失败要显示两种状态，Settings 应用成功后刷新 Chats。待重启横幅列出字段，只在有 supervisor 时提供 Restart now。
+15. Manage → Chats 并排显示 Saved settings 与 Running settings：新增 Chat 后文件保存且运行态立即生效（状态为 Active，无待重启项）；删除 Chat、修改 Topic 白名单后文件已保存但运行态不变；已有 active Chat 切换模型/thinking 后运行列同步，恢复 Global default 清除两种覆盖。删除需确认且保留历史，最后一个配置 Chat 禁止删除。并发编辑/删除冲突不能覆盖新文件；保存后应用失败要显示两种状态，Settings 应用成功后刷新 Chats。待重启横幅列出字段，只在有 supervisor 时提供 Restart now。
 
 未构建 bundle 时静态路由返回 503 `admin_bundle_missing`，API 仍可用；这不是启动失败。
 
@@ -208,7 +208,7 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
   8. 信任边界（直接发 API 请求）：无 Session 访问受保护路由返回 401
      `unauthenticated`；对只读审计路由发 POST/PUT 返回 405 `method_not_allowed`；
      跨站 Origin 的写请求返回 403 `bad_origin`。
-  9. Chats：字符串 ID 安全整数边界、增删与 Topic 范围的保存/运行态分离、模型/thinking 热切与恢复继承、
+  9. Chats：字符串 ID 安全整数边界、新增 Chat 热应用、删除与 Topic 范围的保存/运行态分离、模型/thinking 热切与恢复继承、
      后台 refetch 不升级编辑和删除确认的原始 revision、保存后应用失败的双视图刷新与 Settings 恢复、移动端暗色布局。
 
 - 首次运行 E2E 前需要 `pnpm --filter plasticwan-admin-next exec playwright install chromium`；浏览器安装失败时套件无法

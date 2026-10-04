@@ -183,7 +183,7 @@ test('model changes apply hot while Topic scopes wait for restart, preserving ot
   expect(await readFile(f.path, 'utf8')).toBe(bytes);
 });
 
-test('add and remove stay pending until restart, keep removed active Chats visible and never delete stored history', async () => {
+test('adding a Chat hot-applies while removal waits for restart, keeps removed active Chats visible and never deletes stored history', async () => {
   const f = await fixture();
   const now = new Date().toISOString();
   f.store.orm
@@ -200,8 +200,13 @@ test('add and remove stay pending until restart, keep removed active Chats visib
   const added = await f.write('/chats', 'POST', { id: '-9007199254740991', ...inherited }, view.revision);
   expect(added.status).toBe(200);
   view = (await added.json()) as ChatWriteResponse;
-  expect(view.items.find((chat) => chat.id === '-9007199254740991')).toMatchObject({ saved: inherited, active: null });
-  expect(f.configStore.current().config.telegram.chats).toHaveLength(2);
+  // The addition is hot: saved and active agree and nothing waits for a restart.
+  expect(view.items.find((chat) => chat.id === '-9007199254740991')).toMatchObject({
+    saved: inherited,
+    active: { ...inherited, effective: view.defaults },
+  });
+  expect(view.restart_required).toEqual([]);
+  expect(f.configStore.current().config.telegram.chats).toHaveLength(3);
   const removed = await f.write('/chats/-100100', 'DELETE', null, view.revision);
   expect(removed.status).toBe(200);
   view = (await removed.json()) as ChatWriteResponse;
@@ -210,16 +215,22 @@ test('add and remove stay pending until restart, keep removed active Chats visib
     saved: null,
     active: { topic_ids: ['12'] },
   });
-  expect(view.restart_required).toEqual(
-    expect.arrayContaining(['telegram.chats[-100100]', 'telegram.chats[-9007199254740991]']),
-  );
+  expect(view.restart_required).toEqual(['telegram.chats[-100100]']);
   expect(f.store.orm.select().from(chats).all()).toHaveLength(1);
   const restarted = await loadConfig(f.path);
   expect(restarted.config.telegram.chats.map((chat) => chat.id)).toEqual([123456789, -9007199254740991]);
+  // Removing a hot-added Chat also waits for a restart: the running allowlist
+  // keeps serving it, so the row stays visible as pending.
   const removePending = await f.write('/chats/-9007199254740991', 'DELETE', null, view.revision);
   expect(removePending.status).toBe(200);
   view = (await removePending.json()) as ChatWriteResponse;
-  expect(view.items.some((chat) => chat.id === '-9007199254740991')).toBe(false);
+  expect(view.items.find((chat) => chat.id === '-9007199254740991')).toMatchObject({
+    saved: null,
+    active: { ...inherited, effective: view.defaults },
+  });
+  expect(view.restart_required).toEqual(
+    expect.arrayContaining(['telegram.chats[-100100]', 'telegram.chats[-9007199254740991]']),
+  );
   const last = await f.write('/chats/123456789', 'DELETE', null, view.revision);
   expect(last.status).toBe(409);
   expect(await last.json()).toMatchObject({ error: 'last_chat_required' });

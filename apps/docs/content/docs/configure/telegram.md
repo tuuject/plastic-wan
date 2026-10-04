@@ -35,11 +35,13 @@ Telegram 官方 FAQ 指引开发者通过 [@BotFather](https://t.me/BotFather) �
 - 写入非空 `topic_ids` 时只允许列出的正整数 Topic ID。
 - Forum Topic 的对话与记忆按 Chat + Topic 隔离；模型与参与策略仍是 Chat 级配置。
 
-修改 allowlist、Topic 或增删 Chat 后运行 `check-config` 并重启服务。Chat 变更未重启前仍可能出现 `chat_not_allowed`。
+修改 allowlist 后运行 `check-config`。新增 Chat 立即生效，无需重启；删除 Chat 与修改 Topic 范围后需要重启服务，变更未重启前仍可能出现 `chat_not_allowed`。
 
 ## 管理员命令与验证
 
-`telegram.admins` 中的 Telegram 用户可以使用 `/pause`、`/resume`、`/model`、`/cut_topic`。名单由 `config.jsonc` 的 `telegram.admins` 字段管理，修改后可热应用，无需重启。先在目标 Chat 发送一条测试消息，检查 `serve_started` 后的审计记录；“Bot 在线”不等于消息被允许，也不等于模型一定发言。
+`telegram.admins` 中的 Telegram 用户可以使用 `/pause`、`/resume`、`/model`、`/cut_topic`、`/allowlist`。名单由 `config.jsonc` 的 `telegram.admins` 字段管理，修改后可热应用，无需重启。先在目标 Chat 发送一条测试消息，检查 `serve_started` 后的审计记录；“Bot 在线”不等于消息被允许，也不等于模型一定发言。
+
+`/allowlist` 把 Bot 当前所在的 Chat（通常是刚把它拉进的新群）追加进 `telegram.chats` 并立即生效，无需重启。它是唯一能在未列入 allowlist 的 Chat 里使用的命令，且仅限 `telegram.admins` 中的用户：非管理员的 `/allowlist` 会被静默忽略。
 
 任何成员都可以发送 `/whoami`，Bot 会回复发送者的 Telegram 数字 ID，可直接用于填写 `telegram.admins`。
 

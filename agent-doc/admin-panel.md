@@ -84,7 +84,7 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 | `POST` / `PUT` / `DELETE /memories[/:id]` | 创建时若 `(chat_id, message_thread_id)` 的 Conversation 不存在会自动建；`PUT` 至少要提供 `content` 或 `ttl_seconds` 之一 |
 | `POST` / `DELETE /admins[/:id]` | 增删 `telegram.admins` 白名单并热应用；`:id` 是 Telegram 用户 ID 不是行 ID；添加幂等，删除不存在的 ID 返回 404 `not_found`；If-Match revision 规则同其它配置写端点 |
 | `PUT /model` | 切换全局 agent 模型：把 `agent.provider` / `agent.model` 写入 `config.jsonc`，同时把 `agent.thinking_level` 重置为新模型接受的最弱级别，然后重新加载，重启后仍然生效，只影响后续 Invocation。该端点仍是**全局**语义：只写 `agent.*`，不改动任何 `telegram.chats[]` 的按群覆盖（每群覆盖通过 Chats 页、配置文件或 Telegram `/model` 维护）。响应的 `current.thinking_level` 是重置后的级别。必须带 `If-Match`（revision 来自 `GET /providers`），缺失返回 400 `revision_required`，过期返回 409 `config_conflict`。未知 provider/model、模型无 text 能力或模型不可用返回 400（`unknown_provider`/`unknown_model`/`not_text_capable`/`model_unusable`），新增或连接字段变化的 Provider 无法解析 SecretRef 返回 422 `secret_unresolved`，其它失败（配置权限、文件校验、candidate 校验等）返回 409；body 为 `{ error, message }`，文件已写入但应用失败时 message 以 `config.jsonc was updated but not applied: ` 开头。`GET /model` 与 `DELETE /model` 已删除，落到 405 `method_not_allowed` |
-| `POST /chats` / `PUT /chats/:id` / `DELETE /chats/:id` | Chat/Topic 白名单与按 Chat 的模型/thinking 覆盖，见「Chats 页端点」；白名单增删与 Topic 范围等待重启，已有 active Chat 的模型覆盖热应用，删除不清除历史 |
+| `POST /chats` / `PUT /chats/:id` / `DELETE /chats/:id` | Chat/Topic 白名单与按 Chat 的模型/thinking 覆盖，见「Chats 页端点」；新增 Chat 热应用，删除与 Topic 范围等待重启，已有 active Chat 的模型覆盖热应用，删除不清除历史 |
 | `POST` / `PUT` / `DELETE /providers[...]` | Provider 与模型管理，见「Models 页写端点」 |
 | `PUT /thinking-level` | body `{ thinking_level }`，设置全局 `agent.thinking_level`，热应用，响应同「Models 页写端点」。只写全局默认并保留 Chat 覆盖：有 `thinking_level` 覆盖的 Chat 保持自己的值；没有覆盖的 Chat 继承新值，若与文件中该 Chat 选用的模型不兼容则在写入前返回 422 `config_invalid`。覆盖可经 Chats 页或配置文件调整，也可用 Telegram `/model default` 连同模型覆盖一起清除。取值不是 Pi 级别返回 400 `invalid_body`；文件里的 agent 模型不接受该级别返回 422 `unsupported_thinking_level`，message 列出可选级别（规则见 [configuration.md](configuration.md#模型-thinking-级别)）；`If-Match` 规则同其它写端点 |
 | `PUT /vision` | 切换 vision 模型。写入前预检：模型在文件的该 Provider 下存在、支持 image 输入、且 `vision.max_output_tokens ≤ 该模型的 max_tokens`，不满足返回 400（`unknown_provider`/`unknown_model`/`not_image_capable`/`max_output_tokens_exceeded`）。`vision.provider`、`vision.model` 与 `vision.max_output_tokens` 热应用：下一次 vision 分析就用新模型，旧模型写的 `media_analyses` 行不会被命中；`vision` 的其它字段仍是 restart 字段 |
@@ -111,13 +111,13 @@ Invocation 列表与详情的统计按 `invocation_id` 查询 `model_calls` / `t
 
 | 端点 | Body / 语义 |
 | --- | --- |
-| `POST /chats` | `{ id, topic_ids, provider, model, thinking_level }`，追加一个白名单 Chat；配置 ID 已存在返回 409 `chat_exists` |
+| `POST /chats` | `{ id, topic_ids, provider, model, thinking_level }`，追加一个白名单 Chat（热应用，立即生效）；配置 ID 已存在返回 409 `chat_exists` |
 | `PUT /chats/:id` | `{ topic_ids, provider, model, thinking_level }`，四字段必填，仅替换这些字段；保留 `instructions_file`、参与策略、忽略用户等其它设置与 JSONC 注释。ID 不可改名，body 不接受 `id` 或其它字段 |
 | `DELETE /chats/:id` | 从文件删除整项 Chat（含该项的其它设置），不删除消息、Context、记忆或审计；删除最后一个配置 Chat 返回 409 `last_chat_required` |
 
 Chat/Topic ID 在 HTTP 中必须是十进制字符串：不接受 0、前导零、指数记法或超出 JS 安全整数范围的值；Chat 允许负数，Topic 只允许正数。`topic_ids: null` 表示不限制 Topic，否则须为非空、无重复的 ID 数组。`provider` 与 `model` 必须同时为字符串或同时为 `null`；`null` 删除相应覆盖并继承全局。设置模型覆盖时 `thinking_level` 必须同时给出，否则返回 400 `thinking_level_required`——继承的 thinking 会把全局默认绑到该 Chat 的模型上，之后调整全局设置可能被这个 Chat 拒绝；不覆盖模型时 `thinking_level` 可独立覆盖或为 `null`。模型存在性、text 能力与最终继承后的 thinking 兼容性由完整配置校验保证，不兼容不落盘。缺少配置项返回 404 `chat_not_found`。
 
-写入需认证与同源 Origin，并携带 `If-Match: <revision>`：缺失返回 400 `revision_required`，过期返回 409 `config_conflict`。revision 检查先于 body 解析；读文件前后核对 revision，在 `writeAndApply` 锁内再次核对，避免其它写者重排数组后编辑错项。请求体上限 8 KiB。成功响应为完整 Chats 视图加 `apply: { applied, restart_required, outside_serve }`；新增/删除 Chat、Topic 范围等 restart 字段仍保留旧运行值，已有 active Chat 的模型/thinking 供下一次 Invocation 使用。
+写入需认证与同源 Origin，并携带 `If-Match: <revision>`：缺失返回 400 `revision_required`，过期返回 409 `config_conflict`。revision 检查先于 body 解析；读文件前后核对 revision，在 `writeAndApply` 锁内再次核对，避免其它写者重排数组后编辑错项。请求体上限 8 KiB。成功响应为完整 Chats 视图加 `apply: { applied, restart_required, outside_serve }`；新增 Chat 热应用并立即进入运行中的 ingestion 白名单，删除 Chat 与 Topic 范围等 restart 字段仍保留旧运行值，已有 active Chat 的模型/thinking 供下一次 Invocation 使用。
 
 校验失败返回 400 `invalid_body` / `invalid_chat_id` / `invalid_topic_id` / `invalid_model_reference` 或 422 `config_invalid`；其它写入与应用错误沿用 Models 页的错误码。文件已写入但应用失败时，message 以 `config.jsonc was updated but not applied: ` 开头，active 不变且 `GET /config/status.last_error` 记录错误，不把失败伪装成回滚。
 

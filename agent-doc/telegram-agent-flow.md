@@ -21,7 +21,7 @@
 7. Message/Edited Message 结构是否可归一化。
 8. 配置了 `participation` 的 Chat 在活跃时段外是否被这类消息命中触发，见「定时活跃与注意力窗口」。
 
-拒绝的 Update 不进入 Bucket，但保留稳定 `rejection_reason`，例如 `chat_not_allowed`、`topic_not_allowed`。允许 Chat 内被 `ignored_user_ids` 命中的用户消息仍保留 Update 审计，但在 Message、命令和 Bucket 边界之前直接丢弃；其文本、媒体及后续编辑不会进入实时或启动追赶 Context，其他成员回复该用户时也不保存对应 Reply 快照。该过滤只匹配 Telegram user，不匹配 `sender_chat`，且不追溯删除配置生效前已入库的历史。排查 allowlist 时同时比较配置哈希；allowlist 与 Chat 字段的修改仍需重启（只有已有 Chat 的 `instructions_file` 属于热更新白名单，见 [configuration.md](configuration.md#运行时配置热更新)）。
+拒绝的 Update 不进入 Bucket，但保留稳定 `rejection_reason`，例如 `chat_not_allowed`、`topic_not_allowed`。唯一例外是管理员在未允许 Chat 发送的 `/allowlist`：它按已允许入库审计并直接作为命令处理（见 [Bot Commands](#bot-commands)）。允许 Chat 内被 `ignored_user_ids` 命中的用户消息仍保留 Update 审计，但在 Message、命令和 Bucket 边界之前直接丢弃；其文本、媒体及后续编辑不会进入实时或启动追赶 Context，其他成员回复该用户时也不保存对应 Reply 快照。该过滤只匹配 Telegram user，不匹配 `sender_chat`，且不追溯删除配置生效前已入库的历史。排查 allowlist 时同时比较配置哈希；删除 Chat 与已有 Chat 字段的修改仍需重启（新增 Chat 与已有 Chat 的 `instructions_file`、模型覆盖属于热更新白名单，见 [configuration.md](configuration.md#运行时配置热更新)）。
 
 ## Chat、Conversation 与 Topic
 
@@ -386,14 +386,16 @@ Sticker 视觉元数据通过严格 Tool Call 返回：中文描述、情绪、�
 
 ## Bot Commands
 
-`/pause`、`/resume`、`/status` 与 `/model` 是 Chat 级控制命令，作用于发送命令的 Chat（含 Forum 全部 Topic），不按 Topic 隔离——`/model` 读写的就是该 Chat 的模型覆盖，Topic 共用 Chat 设置。`/cut_topic` 是 Conversation 级命令：切点与 Context 清空都只作用于命令所在的 Topic。
+`/pause`、`/resume`、`/status` 与 `/model` 是 Chat 级控制命令，作用于发送命令的 Chat（含 Forum 全部 Topic），不按 Topic 隔离——`/model` 读写的就是该 Chat 的模型覆盖，Topic 共用 Chat 设置。`/cut_topic` 是 Conversation 级命令：切点与 Context 清空都只作用于命令所在的 Topic。`/allowlist` 把命令所在的 Chat 追加进 `telegram.chats` 白名单。
 
 - 判定：`message.entities` 中 offset 为 0 的 `bot_command`；命令名大小写不敏感；带 `@用户名` 后缀时必须匹配当前 Bot；Bot 发送者的消息不触发命令。未知命令与非命令消息照常入库。
-- 启动时（`getMe` 后）调用 `setMyCommands` 自动注册 `/pause`、`/resume`、`/status`、`/model`、`/cut_topic`、`/whoami` 及中文描述（`BOT_COMMANDS` 是唯一事实来源，注册前校验每个命令都能被 `parseBotCommand` 解析）；注册失败只记 `command_registration_failed`，不阻塞启动——命令菜单是便利设施，文本解析不依赖它。
+- 启动时（`getMe` 后）调用 `setMyCommands` 自动注册 `/pause`、`/resume`、`/status`、`/model`、`/cut_topic`、`/whoami`、`/allowlist` 及中文描述（`BOT_COMMANDS` 是唯一事实来源，注册前校验每个命令都能被 `parseBotCommand` 解析）；注册失败只记 `command_registration_failed`，不阻塞启动——命令菜单是便利设施，文本解析不依赖它。
 - 命令消息只写 `telegram_updates` 审计，不写入 `messages`，因此不会创建 Bucket 或进入 Agent 历史。`parseBotCommand` 返回的命令附带 `messageId`（命令消息自身的 Telegram message ID）与 `threadId`（命令所在 Forum Topic），供 `/cut_topic` 记录切点并定位要清空的 Conversation Context。`threadId` 与入库共用 `conversationThreadId` 规则：只有 forum supergroup 的 topic 消息才取 `message_thread_id`，其余一律视为 thread 0，包括私聊（开启话题模式后消息会带 `message_thread_id`）和普通 supergroup 里 Reply 链自带的 `message_thread_id`。两边规则不一致时，带这类 thread id 的 `/cut_topic` 会找不到 Conversation、只写切点不清 Context，却仍回复「已清空」。
 - 回复是确定性 Bot 输出（不经模型），直接通过 Bot API 发送并 Reply 原命令消息，不经过 `send` Tool；发送失败只记 `command_reply_failed` 事件，不重试。
 
 `/pause` 与 `/resume` 仅对 Bot 管理员开放（`telegram.admins` 配置，见下文）；`/status` 对任何成员开放。`/whoami` 同样对任何成员开放：回复发送者的 Telegram 数字 ID，发送者身份无法识别（`message.from` 缺失）时回复「无法识别发送者。」。非管理员或匿名身份执行受限命令会收到拒绝回复，不产生任何状态变更。
+
+`/allowlist` 同样仅限管理员，是唯一能在**未列入白名单的 Chat** 里生效的命令：ingestion 在按 allowlist 拒绝 Update 之前单独放行「管理员发送的 `/allowlist`」（其余命令与普通消息在未允许 Chat 一律照旧拒绝，Bot 不回复陌生人），因此管理员把 Bot 拉进新群后可以直接用它开白。命令把 `{ id }` 追加进 `config.jsonc` 的 `telegram.chats` 并热应用（新增 Chat 是热变更，ingestion 白名单与参与策略注册表按发布代数重建，无需重启）；已配置的 Chat 回复「本群已在白名单中」。命令消息本身不进入消息流，该 Chat 的正常入库从下一条普通消息开始。删除 Chat、修改 Topic 范围仍是 restart，见 [configuration.md](configuration.md#运行时配置热更新)。
 
 `/model` 同样仅限管理员，在当前 Chat 上运行时切换 agent 模型（与 Admin Panel「Models」页共享同一 `AgentModelSwitcher` 与 `ConfigReloader`，但只写当前 Chat 的 `telegram.chats[<id>]` 覆盖，不碰全局 `agent.*`；全局切换仍走 Admin `PUT /api/model` 或配置文件）：`/model` 按每页 20 条列出该 Chat 生效的模型与思考强度（未覆盖的项标注「继承全局」）与第一页可切换序号；`/model page 页码` 翻页，所有页面保留全局序号；`/model 纯数字序号` 把序号对应的 `provider` / `model` 写入 `config.jsonc` 中该 Chat 的覆盖，同时把该 Chat 的 `thinking_level` 重置为目标模型接受的最弱级别，再重新加载配置，成功回复「已为本群切换: …，已写入 config.jsonc，将在下一次 agent session 生效。」与「思考强度已重置为该模型最弱的一档: <级别>」两行，因此重启后仍然生效。`/model default` 删除该 Chat 的 `provider`/`model`/`thinking_level` 三项覆盖，恢复继承全局；文件中已无覆盖时不重写文件，但仍应用文件里的其它热更新并报告待重启项。写入与加载共用同一把锁，两个并发切换不会交错；配置文件是符号链接、权限不允许或写后校验失败时回复错误，文件与当前配置都不变；文件已写入但应用失败时回复「已写入 config.jsonc，但应用失败: …」。越界页码、无效参数与 `/model reset` 都按无效序号处理。切换只对该 Chat 后续启动的 Invocation 生效，不影响进行中的会话；清单与语义见 [configuration.md](configuration.md#运行时配置热更新)。
 
@@ -416,7 +418,7 @@ Sticker 视觉元数据通过严格 Tool Call 返回：中文描述、情绪、�
 
 ## Bot 管理员列表
 
-`/pause`、`/resume`、`/model`、`/cut_topic` 的白名单是配置文件里的 `telegram.admins`（Telegram User ID 数组），Bot 全局共享，它是唯一事实源：
+`/pause`、`/resume`、`/model`、`/cut_topic`、`/allowlist` 的白名单是配置文件里的 `telegram.admins`（Telegram User ID 数组），Bot 全局共享，它是唯一事实源：
 
 - 旧版 `bot_admins` 表已删除（迁移 `026_drop_bot_admins.sql`）；旧表内容用 `scripts/migrate-admins.ts` 搬进配置（须在升级启动前运行）。
 - 权限判定在 `BotCommandService`：命令发送者的 `message.from.id` 命中运行中配置的 `telegram.admins` 才放行；`sender_chat` 匿名身份一律拒绝。

@@ -9,6 +9,7 @@ import {
   type ParticipationRule,
   type TriggerKind,
 } from '../platform/participation.ts';
+import type { RuntimeConfigurationStore } from '../platform/runtime-config.ts';
 import { isChatPaused, type Orm, resolveChatConfig } from './database.ts';
 import { conversationAttention } from './schema.ts';
 
@@ -21,28 +22,23 @@ export interface ParticipationDecision {
 }
 
 /**
- * Participation rules compiled once per configured chat. The rule only gates
+ * Participation rules compiled per configured chat. The rule only gates
  * bucket creation: messages are always stored, so a quiet chat keeps filling
  * the history that the next triggered invocation reads.
+ *
+ * Chat additions are hot-applied configuration changes, so the registry holds
+ * the configuration store and recompiles whenever the published generation
+ * moves; a snapshot taken before a publish keeps serving the run it started
+ * with until the next `ruleFor` call.
  */
 export class ParticipationRegistry {
-  readonly #config: RawConfig;
-  readonly #rules: ReadonlyMap<string, ParticipationRule | undefined>;
+  readonly #configStore: RuntimeConfigurationStore;
+  #generation = 0;
+  #config: RawConfig | undefined;
+  #rules: ReadonlyMap<string, ParticipationRule | undefined> = new Map();
 
-  constructor(config: RawConfig) {
-    this.#config = config;
-    const rules = new Map<string, ParticipationRule | undefined>();
-    for (const chat of config.telegram.chats) {
-      rules.set(
-        String(chat.id),
-        compileParticipation({
-          global: config.telegram.participation,
-          chat: chat.participation,
-          timezone: chat.timezone ?? config.timezone,
-        }),
-      );
-    }
-    this.#rules = rules;
+  constructor(configStore: RuntimeConfigurationStore) {
+    this.#configStore = configStore;
   }
 
   /**
@@ -55,7 +51,27 @@ export class ParticipationRegistry {
     if (chatType === 'private') {
       return undefined;
     }
-    const chatConfig = resolveChatConfig(this.#config, orm, telegramChatId);
+    const snapshot = this.#configStore.current();
+    let config = this.#config;
+    if (config === undefined || snapshot.generation !== this.#generation) {
+      // Chat additions are hot-applied configuration changes: recompile the
+      // rules whenever the published generation moved on.
+      const rules = new Map<string, ParticipationRule | undefined>();
+      for (const chat of snapshot.config.telegram.chats) {
+        rules.set(
+          String(chat.id),
+          compileParticipation({
+            global: snapshot.config.telegram.participation,
+            chat: chat.participation,
+            timezone: chat.timezone ?? snapshot.config.timezone,
+          }),
+        );
+      }
+      this.#generation = snapshot.generation;
+      this.#config = config = snapshot.config;
+      this.#rules = rules;
+    }
+    const chatConfig = resolveChatConfig(config, orm, telegramChatId);
     return chatConfig === undefined ? undefined : this.#rules.get(String(chatConfig.id));
   }
 }

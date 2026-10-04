@@ -48,6 +48,7 @@ async function setup(
   scheduler: BucketScheduler;
   commands: BotCommandService;
   configPath: string;
+  directory: string;
 }> {
   const directory = await mkdtemp(join(tmpdir(), 'plasticwan-commands-'));
   directories.push(directory);
@@ -65,6 +66,7 @@ async function setup(
     scheduler,
     commands: new BotCommandService(store, configStore, scheduler),
     configPath,
+    directory,
   };
 }
 
@@ -703,6 +705,88 @@ describe('bot command service', () => {
     expect(await commands.run({ name: 'whoami' }, 123456789n, null, FIXED_NOW)).toBe('无法识别发送者。');
     store.close();
   });
+
+  describe('allowlist command', () => {
+    async function allowlistSetup(transform?: ConfigTransform): Promise<{
+      store: SqliteStore;
+      commands: BotCommandService;
+      configStore: RuntimeConfigurationStore;
+      configPath: string;
+      directory: string;
+    }> {
+      const { store, loaded, scheduler, configStore, configPath, directory } = await setup(transform);
+      const switcher = new AgentModelSwitcher(configStore);
+      const reloader = new ConfigReloader({
+        loaded,
+        store: configStore,
+        modelSwitcher: switcher,
+        secrets: new SecretStore(),
+        validateAgentModel: () => undefined,
+        onPublished: () => undefined,
+      });
+      const commands = new BotCommandService(store, configStore, scheduler, switcher, undefined, reloader);
+      return { store, commands, configStore, configPath, directory };
+    }
+
+    test('is denied for non-admins without touching the configuration', async () => {
+      const { store, commands, configStore, configPath } = await allowlistSetup();
+      const before = configStore.current();
+      const stranger: CommandSender = { id: 99n, name: 'Mallory', username: 'mallory' };
+      expect(await commands.run({ name: 'allowlist' }, 987654321n, stranger, FIXED_NOW)).toBe(
+        '该命令仅对本 Bot 的管理员可用。',
+      );
+      expect(configStore.current()).toBe(before);
+      expect(await loadConfig(configPath).then((loaded) => loaded.fileConfig.telegram.chats)).toHaveLength(1);
+      store.close();
+    });
+
+    test('replies that a configured chat is already allowlisted', async () => {
+      const { store, commands, configStore } = await allowlistSetup();
+      const before = configStore.current();
+      expect(await commands.run({ name: 'allowlist' }, 123456789n, ALICE, FIXED_NOW)).toBe('本群已在白名单中。');
+      expect(configStore.current()).toBe(before);
+      store.close();
+    });
+
+    test('reports an unavailable runtime without a reloader', async () => {
+      const { store, scheduler, configStore } = await setup();
+      const commands = new BotCommandService(store, configStore, scheduler);
+      expect(await commands.run({ name: 'allowlist' }, 987654321n, ALICE, FIXED_NOW)).toBe('运行时配置应用不可用。');
+      store.close();
+    });
+
+    test('appends the chat to the file, hot-applies it and reports success', async () => {
+      const { store, commands, configStore, configPath } = await allowlistSetup();
+      expect(await commands.run({ name: 'allowlist' }, 987654321n, ALICE, FIXED_NOW)).toBe(
+        '已将本群加入白名单，配置已立即生效。',
+      );
+      expect(await loadConfig(configPath).then((loaded) => loaded.fileConfig.telegram.chats.at(-1))).toEqual({
+        id: 987654321,
+      });
+      expect(configStore.current().config.telegram.chats.at(-1)?.id).toBe(987654321);
+      expect(configStore.current().generation).toBe(2);
+      store.close();
+    });
+
+    test('reports a rejected add and leaves the file untouched', async () => {
+      const { store, commands, configStore, configPath, directory } = await allowlistSetup();
+      // A duplicate chat ID makes the file unloadable, so the add is refused
+      // before anything is written.
+      await writeTestConfig(
+        directory,
+        configPath,
+        testConfigJsonc(directory, (config) => {
+          config.telegram.admins = [42];
+          config.telegram.chats.push({ id: 123456789 });
+        }),
+      );
+      const before = configStore.current();
+      const reply = await commands.run({ name: 'allowlist' }, 987654321n, ALICE, FIXED_NOW);
+      expect(reply).toContain('加入白名单失败');
+      expect(configStore.current()).toBe(before);
+      store.close();
+    });
+  });
 });
 
 describe('ingestion command interception', () => {
@@ -744,6 +828,79 @@ describe('ingestion command interception', () => {
     expect(audit?.allowed).toBe(0n);
     expect(audit?.rejection_reason).toBe('chat_not_allowed');
     expect(result.command).toBeUndefined();
+    store.close();
+  });
+
+  test('an admin /allowlist passes through for a disallowed chat and is audited as allowed', async () => {
+    const { store, ingestion } = await setup();
+    const result = ingestion.ingest(commandUpdate(1, 10, '/allowlist', 987654321), FIXED_NOW);
+    expect(result.command).toEqual({ name: 'allowlist', messageId: 10n });
+    expect(result.messageId).toBeUndefined();
+    expect(result.bucketId).toBeUndefined();
+    // The command is processed but never stored as a message or a bucket.
+    expect(store.db.prepare<[], { count: bigint }>('SELECT COUNT(*) AS count FROM messages').get()?.count).toBe(0n);
+    const audit = store.db
+      .prepare<[], { allowed: bigint; rejection_reason: string | null }>(
+        'SELECT allowed, rejection_reason FROM telegram_updates',
+      )
+      .get();
+    expect(audit?.allowed).toBe(1n);
+    expect(audit?.rejection_reason).toBeNull();
+    store.close();
+  });
+
+  test('a non-admin /allowlist stays rejected for a disallowed chat', async () => {
+    const { store, ingestion } = await setup((config) => {
+      config.telegram.admins = [7];
+    });
+    const result = ingestion.ingest(commandUpdate(1, 10, '/allowlist', 987654321), FIXED_NOW);
+    expect(result.command).toBeUndefined();
+    const audit = store.db
+      .prepare<[], { allowed: bigint; rejection_reason: string }>(
+        'SELECT allowed, rejection_reason FROM telegram_updates',
+      )
+      .get();
+    expect(audit?.allowed).toBe(0n);
+    expect(audit?.rejection_reason).toBe('chat_not_allowed');
+    store.close();
+  });
+});
+
+describe('hot allowlist adoption', () => {
+  test('a chat added by a publish ingests without reconstructing the ingestion', async () => {
+    const { store, configStore, ingestion } = await setup();
+    const before = ingestion.ingest(textUpdate(1, 10, 'first', 987654321), FIXED_NOW);
+    expect(before.messageId).toBeUndefined();
+    const snapshot = configStore.current();
+    const next = structuredClone(snapshot.config);
+    next.telegram.chats.push({ id: 987654321, instructions: '' });
+    configStore.publish({
+      config: next,
+      hash: 'published',
+      models: snapshot.models,
+      visionModel: snapshot.visionModel,
+    });
+    const after = ingestion.ingest(textUpdate(2, 11, 'second', 987654321), FIXED_NOW);
+    expect(after.messageId).toBeDefined();
+    store.close();
+  });
+
+  test('an allowlisted chat returns to the normal command path after the add', async () => {
+    const { store, configStore, ingestion } = await setup();
+    expect(ingestion.ingest(commandUpdate(1, 10, '/status', 987654321), FIXED_NOW).command).toBeUndefined();
+    const snapshot = configStore.current();
+    const next = structuredClone(snapshot.config);
+    next.telegram.chats.push({ id: 987654321, instructions: '' });
+    configStore.publish({
+      config: next,
+      hash: 'published',
+      models: snapshot.models,
+      visionModel: snapshot.visionModel,
+    });
+    expect(ingestion.ingest(commandUpdate(2, 11, '/status', 987654321), FIXED_NOW).command).toEqual({
+      name: 'status',
+      messageId: 11n,
+    });
     store.close();
   });
 });

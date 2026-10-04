@@ -106,7 +106,7 @@ export class InvocationQueueService {
   ) {
     this.#store = store;
     this.#configStore = configStore;
-    this.#participation = new ParticipationRegistry(configStore.current().config);
+    this.#participation = new ParticipationRegistry(configStore);
     this.#attachment = attachment;
     this.#tasks = tasks;
   }

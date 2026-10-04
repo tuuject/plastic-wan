@@ -221,9 +221,14 @@ function mergeChats(active: ConfigSource, file: ConfigSource, recorder: ChangeRe
     }
     result.push(mergeChat(chat, fromFile, activeRaw.get(id), fileRaw.get(id), recorder));
   }
-  for (const id of fileChats.keys()) {
+  for (const [id, chat] of fileChats) {
     if (!activeChats.has(id)) {
-      recorder.add(`telegram.chats[${id}]`, 'restart');
+      // Adding a chat is hot: the ingestion allowlist, the participation
+      // registry and `resolveChatConfig` all read the published configuration,
+      // and a brand-new chat has no stored history to protect. Removal and
+      // edits to an existing chat's restart-only fields stay restart-only.
+      recorder.add(`telegram.chats[${id}]`, 'hot');
+      result.push(structuredClone(chat));
     }
   }
   return result;

@@ -95,7 +95,7 @@ export const pages = {
     addChat: 'Add Chat',
     editChat: 'Edit Chat',
     dialogDescription:
-      'Chat and Topic allowlists require a restart. Model settings apply to the next invocation in an active Chat, across all its Topics.',
+      'Adding a Chat applies immediately; changing its Topic scope or removing it waits for a restart. Model settings apply to the next invocation in an active Chat, across all its Topics.',
     chatIdLabel: 'Telegram Chat ID',
     chatIdPlaceholder: 'e.g. -1001234567890',
     chatIdHint: 'Negative for groups and supergroups; positive for private Chats. IDs cannot be renamed.',

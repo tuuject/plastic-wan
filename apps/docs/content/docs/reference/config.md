@@ -35,4 +35,4 @@ Conversation、短期记忆和注意力窗口按 Chat + Topic 隔离；预算硬
 
 ## 生效规则
 
-配置只在显式启动或应用时读取。Provider、模型、Prompt 与部分 Agent 字段可热应用；allowlist、MCP、Admin、路径和大多数结构变化要重启。详细操作见 [配置文件与密钥](../configure/config-file.md)，逐字段请下载 Schema。
+配置只在显式启动或应用时读取。Provider、模型、Prompt、新增 Chat 与部分 Agent 字段可热应用；删除 allowlist Chat、MCP、Admin、路径和大多数结构变化要重启。详细操作见 [配置文件与密钥](../configure/config-file.md)，逐字段请下载 Schema。
