@@ -179,6 +179,9 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
   401 回落登录页并重新登录。
 - 用例文件名以 `.e2e.ts` 结尾、目录独立，Playwright `testMatch` 单独声明，**不会**被
   vitest 与 `pnpm test` 发现；`workers: 1` 串行执行，端口随机，不与固定端口冲突。
+- `01-routes.e2e.ts` 与多个套件按路由断言可见文案（英文 locale）：修改面板文案或
+  locale 键值时必须同步这些断言，并运行受影响套件（如 `pnpm run admin:test:e2e 01-routes`）——
+  `pnpm test` 与 `pnpm run check` 都不覆盖浏览器层。
 - 覆盖契约（全部断言真实 UI 状态，非仅文案）：
   1. 认证：setup → shell；错误密码表单内显示 `invalid_credentials` 且 URL 不变；
      登出回登录页；会话撤销后受保护请求 401 → 登录页且无错误屏。
@@ -191,8 +194,7 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
      Agent transcript / Frozen context）切换并渲染期望字段；失败调用显示稳定错误码
      （`provider_timeout`）且可展开脱敏详情（`sk-***`，无活密钥模式）；assistant 文本
      带 `Private reasoning` 标记。
-  5. 写操作（请求真实发出 + UI/数据变化）：记忆新建与删除（含 API 复核）、Bot admin
-     添加与移除、模型切换（写回 `config.jsonc`）、Settings 页的 `Apply config file`、
+  5. 写操作（请求真实发出 + UI/数据变化）：记忆新建与删除（含 API 复核）、模型切换（写回 `config.jsonc`）、Settings 页的 `Apply config file`、
      Alarm 取消成功与 409 冲突路径（`alarm_not_pending` + 列表刷新到新状态）、
      Overview 的 Cancel ongoing 与睡眠态 Wake now；Models 页并发编辑（模型编辑输掉 revision 竞争后关闭而不覆盖、
      连接卡片的旧草稿不能删掉期间新增的 header、header 名可逐键输入不丢焦点）。

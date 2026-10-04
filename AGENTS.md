@@ -104,6 +104,7 @@ node src/cli.ts serve --config dev-data/config.jsonc
 node src/cli.ts backup --config dev-data/config.jsonc
 node src/cli.ts configure --config dev-data/config.jsonc
 pnpm run admin:build
+pnpm run admin:test:e2e
 pnpm run admin:dev
 pnpm run docs:dev
 pnpm run docs:build
@@ -120,6 +121,7 @@ pnpm run docs:preview
 - `backup`：执行保留清理、SQLite `VACUUM INTO` 备份与轮换；完整性检查属于独立恢复验证。
 - `configure`：`src/tui/` 的交互式配置向导，编辑既有配置的 Provider 与 thinking level，可从 Provider `/models` 拉取可路由模型 ID 后写回原文件。要求已存在可加载的配置且 stdin 是 TTY，非交互环境直接报错退出——agent 不要调用它。
 - `admin:build`：构建 `apps/admin-next` 生产 bundle（`apps/admin-next/dist`），供 `serve` 静态托管。
+- `admin:test:e2e`：Playwright 浏览器 E2E（`apps/admin-next/e2e`），驱动 `admin:build` 产物与真实 AdminServer 子进程，首次运行前需安装 Chromium；CI 的 Docker workflow 构建后会运行同一套件。命令细节与单套件过滤见 [agent-doc/verification.md](agent-doc/verification.md#admin-panel-浏览器-e2e)。
 - `admin:dev`：启动 Rsbuild dev server（监听 127.0.0.1:5273），`/api` 代理到运行中的 Admin Panel。
 - `docs:*`：独立静态文档站；`dev`/`preview` 监听 127.0.0.1:5274，`build` 输出 `apps/docs/dist`，`verify` 检查生产 HTML/Markdown/llms 与 HTTP。维护及部署边界见 [apps/docs/README.md](apps/docs/README.md)。用户可见行为、配置或运维改变时，同步更新相关指南、示例与测试，不把 `agent-doc/` 自动发布到站点。
 
@@ -155,6 +157,7 @@ pnpm run docs:preview
 - Provider/Telegram 单元测试使用现有 Faux 或 fixture；真实外部连接由 `doctor` 和人工 Telegram 验收覆盖。
 - 媒体改动至少覆盖静态图片、Sticker 结构化输出或外部转换链路中受影响的一项。
 - Context 改动至少断言 canonical history 的落盘状态（`context_messages` / `head_seq` / `context_refs`）与审计事件，不能只断言返回文本。
+- Admin Panel 前端、admin API 端点或面板可见文案（含 locale 键值）改动，提交前运行 `pnpm run admin:test:e2e`，至少覆盖受影响套件（如 `pnpm run admin:test:e2e 01-routes`）：e2e 断言各路由真实渲染与页面可见文案（英文 locale），`pnpm test` 与 `pnpm run check` 不包含这一层，漏跑只会在 CI 上暴露。
 - 最终验证至少运行受影响测试与 `pnpm run check`；跨模块改动运行完整 `pnpm test`。
 
 ## Commit & Pull Request Guidelines
