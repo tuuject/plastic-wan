@@ -226,8 +226,8 @@ export const pages = {
     alertDesc1: 'These Telegram users may run',
     alertDesc2: 'and',
     alertDesc3:
-      'in allowed chats. They are bot administrators, unrelated to the admin panel login account. The user ID is the numeric Telegram account ID (see',
-    alertDesc4: '). The whitelist is the',
+      'in allowed chats. They are bot administrators, unrelated to the admin panel login account. The user ID is the numeric Telegram account ID (send',
+    alertDesc4: 'to the bot in an allowed chat to see yours). The whitelist is the',
     alertDesc5: 'field in config.jsonc; changes hot-apply without a restart.',
     loadingAdmins: 'Loading bot admins…',
     emptyAdmins: 'No bot admins configured.',

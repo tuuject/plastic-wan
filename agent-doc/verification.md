@@ -70,7 +70,7 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `admin-providers.test.ts` | Provider/模型管理、SecretRef 只写不读、修订冲突、全局模型端点保留 Chat 覆盖、阻止删除 Chat 引用（含待重启移除的运行中 Chat）的 Provider/模型且不落盘 |
 | `admin-chats.test.ts` | Chat 管理鉴权与 Origin、字符串 ID 与安全整数边界、Topic/模型严格校验、模型覆盖必须显式带 thinking、revision 先于 body 解析与并发写入保护、JSONC 注释及未管理字段保留、增删/Topic 待重启与历史保留、模型热应用/恢复继承、迁移 ID、保存后应用失败的状态与脱敏审计 |
 | `model-switch.test.ts` | 可切换模型仅列 text 能力、当前模型取配置值、`option()` 只校验不应用（未知 provider/model 与 image-only 拒绝）、`current()` 跟随 `store.publish` 变化 |
-| `bot-commands.test.ts` | 命令解析与 mention 匹配、`setMyCommands` 注册一致性、`/pause` 中止与阻断、`/resume` 恢复、`/status` 用量与 Context 行口径、`/model` 分页与切换（写配置文件并 reload）、管理员鉴权与匿名拒绝、命令只审计不入库 |
+| `bot-commands.test.ts` | 命令解析与 mention 匹配、`setMyCommands` 注册一致性、`/pause` 中止与阻断、`/resume` 恢复、`/status` 用量与 Context 行口径、`/model` 分页与切换（写配置文件并 reload）、管理员鉴权与匿名拒绝、`/whoami` 回显发送者 ID 且不限管理员、命令只审计不入库 |
 | `config-diff.test.ts` | 热更新白名单分类（hot/restart/outside_serve）、candidate 构造、Provider 的增删/改 kind/连接字段/模型定义全部取文件值、custom Provider `models[]` 对齐、新增 Chat 与 Prompt 内容比较 |
 | `config-reload.test.ts` | `ConfigReloader` 外部契约：generation 与两个 hash、`config_reloaded`/`config_reload_failed`/`model_switch_failed` 日志、待重启字段撤销与只改注释后 active hash 跟上文件 hash、两遍校验与 `candidate_invalid`、`secret_unresolved` 的整次拒绝、待重启列表、运行中 Invocation 钉住模型与 Provider 连接（两个本地端点验证换地址后的下一轮仍走旧地址）、`/model` 写入文件（保留注释、`0600`、符号链接拒绝）、`invocations.config_hash` 在 `queued → running` 写入、Admin `POST /config/apply` 与 `PUT /model` 的响应体；Chat 覆盖切换按文件 ID 定位（reorder 后仍解析正确、保留其它 Chat 与全局默认、文件里缺该 Chat 时拒绝写入不落盘）、并发 Chat 切换互不覆盖、发布前对全局与每个选中 Chat 模型逐一校验（删除在用 Chat 模型被拒、全局换模型拒绝继承不兼容的 thinking） |
 | `memory.test.ts` | 记忆持久化与 TTL、Conversation 隔离、Tool 审计、注入批次内 `<memory_list>` 的顺序与作用域、Admin 记忆 CRUD |

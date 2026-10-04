@@ -128,6 +128,17 @@ describe('parseBotCommand', () => {
     expect(parseBotCommand(message(commandUpdate(1, 1, '/pause@other_bot').message), BOT_USERNAME)).toBeNull();
   });
 
+  test('recognizes whoami and ignores trailing text', async () => {
+    expect(parseBotCommand(message(commandUpdate(1, 1, '/whoami').message), BOT_USERNAME)).toEqual({
+      name: 'whoami',
+      messageId: 1n,
+    });
+    expect(parseBotCommand(message(commandUpdate(1, 1, '/WHOAMI please').message), BOT_USERNAME)).toEqual({
+      name: 'whoami',
+      messageId: 1n,
+    });
+  });
+
   test('captures the optional /model argument', async () => {
     expect(parseBotCommand(message(commandUpdate(1, 1, '/model').message), BOT_USERNAME)).toEqual({
       name: 'model',
@@ -681,6 +692,15 @@ describe('bot command service', () => {
     );
     expect(await commands.run({ name: 'status' }, 123456789n, stranger, FIXED_NOW)).toContain('本群模型');
     expect(store.db.prepare<[], { count: bigint }>('SELECT COUNT(*) AS count FROM chat_pause').get()?.count).toBe(0n);
+    store.close();
+  });
+
+  test('whoami replies with the sender id and is not admin gated', async () => {
+    const { store, commands } = await setup();
+    expect(await commands.run({ name: 'whoami' }, 123456789n, ALICE, FIXED_NOW)).toBe('42');
+    const stranger: CommandSender = { id: 99n, name: 'Mallory', username: 'mallory' };
+    expect(await commands.run({ name: 'whoami' }, 123456789n, stranger, FIXED_NOW)).toBe('99');
+    expect(await commands.run({ name: 'whoami' }, 123456789n, null, FIXED_NOW)).toBe('无法识别发送者。');
     store.close();
   });
 });

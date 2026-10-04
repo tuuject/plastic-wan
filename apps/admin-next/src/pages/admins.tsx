@@ -26,7 +26,7 @@ export default function AdminsPage(): React.ReactElement {
         <AlertTitle>{t('pages.admins.alertTitle')}</AlertTitle>
         <AlertDescription>
           {t('pages.admins.alertDesc1')} <code>/pause</code> {t('pages.admins.alertDesc2')} <code>/resume</code>{' '}
-          {t('pages.admins.alertDesc3')} <code>@userinfobot</code>
+          {t('pages.admins.alertDesc3')} <code>/whoami</code>
           {t('pages.admins.alertDesc4')} <code>telegram.admins</code> {t('pages.admins.alertDesc5')}
         </AlertDescription>
       </Alert>

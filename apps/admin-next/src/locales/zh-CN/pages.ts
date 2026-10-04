@@ -217,8 +217,9 @@ export const pages: typeof pagesEn = {
     alertTitle: 'Telegram Bot 管理员',
     alertDesc1: '这些 Telegram 用户可以在允许的会话中执行',
     alertDesc2: '和',
-    alertDesc3: '。他们是 Bot 管理员，与管理面板的登录账户无关。用户 ID 即数字形式的 Telegram 账户 ID（可查看',
-    alertDesc4: '）。白名单由配置文件中的',
+    alertDesc3:
+      '。他们是 Bot 管理员，与管理面板的登录账户无关。用户 ID 即数字形式的 Telegram 账户 ID（在允许的会话中向 Bot 发送',
+    alertDesc4: '即可查看）。白名单由配置文件中的',
     alertDesc5: ' 字段管理，修改后热应用，无需重启。',
     loadingAdmins: '正在加载 Bot 管理员…',
     emptyAdmins: '尚未配置 Bot 管理员。',

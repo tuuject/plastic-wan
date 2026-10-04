@@ -14,7 +14,7 @@ import type { ConversationRuntime } from './conversation-runtime.ts';
 import type { BucketScheduler } from './scheduler.ts';
 
 export interface ParsedCommand {
-  readonly name: 'pause' | 'resume' | 'status' | 'model' | 'cut_topic';
+  readonly name: 'pause' | 'resume' | 'status' | 'model' | 'cut_topic' | 'whoami';
   readonly argument?: string;
   /** Telegram message ID of the command message itself; used by cut_topic. */
   readonly messageId?: bigint;
@@ -60,7 +60,14 @@ function switchPaths(configuredChatId: number): ReadonlySet<string> {
     `telegram.chats[${configuredChatId}].thinking_level`,
   ]);
 }
-const COMMAND_NAMES = new Set<ParsedCommand['name']>(['pause', 'resume', 'status', 'model', 'cut_topic']);
+const COMMAND_NAMES: Record<string, true> = {
+  pause: true,
+  resume: true,
+  status: true,
+  model: true,
+  cut_topic: true,
+  whoami: true,
+} satisfies Record<ParsedCommand['name'], true>;
 const DENIED_REPLY = '该命令仅对本 Bot 的管理员可用。';
 const MODEL_PAGE_SIZE = 20;
 
@@ -77,6 +84,7 @@ export const BOT_COMMANDS: readonly BotCommandRegistration[] = [
   { command: 'status', description: '查看当前模型、thinking effort 与本日 token 用量' },
   { command: 'model', description: '查看或切换 agent 模型（仅管理员）' },
   { command: 'cut_topic', description: '切掉此消息及更早的历史，仅对新会话生效（仅管理员）' },
+  { command: 'whoami', description: '查看你的 Telegram 数字 ID' },
 ];
 
 export interface CommandRegistrationApi {
@@ -85,7 +93,7 @@ export interface CommandRegistrationApi {
 
 export async function registerBotCommands(api: CommandRegistrationApi): Promise<void> {
   for (const entry of BOT_COMMANDS) {
-    if (!COMMAND_NAMES.has(entry.command as ParsedCommand['name'])) {
+    if (COMMAND_NAMES[entry.command] !== true) {
       throw new Error(`Command not handled by parseBotCommand: ${entry.command}`);
     }
   }
@@ -109,7 +117,7 @@ export function parseBotCommand(message: Message, botUsername: string | null): P
   if (mention !== null && mention !== botUsername?.toLowerCase()) {
     return null;
   }
-  if (!COMMAND_NAMES.has(name as ParsedCommand['name'])) {
+  if (COMMAND_NAMES[name] !== true) {
     return null;
   }
   const base: ParsedCommand =
@@ -177,6 +185,8 @@ export class BotCommandService {
         return this.#adminGate(sender)
           ? this.#cutTopic(telegramChatId, command.messageId, command.threadId, now)
           : DENIED_REPLY;
+      case 'whoami':
+        return sender === null ? '无法识别发送者。' : sender.id.toString();
     }
   }
 
