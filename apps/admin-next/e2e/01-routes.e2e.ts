@@ -97,7 +97,7 @@ test.describe('routes and deep links', () => {
   test('/admins renders the empty bot-admin list', async ({ page }) => {
     await page.goto(await adminUrl('/admins'));
     await expect(page.getByText('Telegram bot admins')).toBeVisible();
-    await expect(page.getByText('No bot admins yet.')).toBeVisible();
+    await expect(page.getByText('No bot admins configured.')).toBeVisible();
     await expect(page.getByText('Something went wrong')).toHaveCount(0);
   });
 
