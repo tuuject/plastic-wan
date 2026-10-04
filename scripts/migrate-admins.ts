@@ -1,7 +1,7 @@
-import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import Database from 'better-sqlite3';
-import { type ParseError, parse } from 'jsonc-parser';
+import { loadConfig } from '../src/platform/config.ts';
 import { writeConfigEdits } from '../src/platform/config-file.ts';
 
 /**
@@ -14,13 +14,15 @@ import { writeConfigEdits } from '../src/platform/config-file.ts';
  * Run it BEFORE starting a build that ships migration 026: that migration drops
  * `bot_admins` on startup, so the panel-added and self-enrolled rows only exist
  * until then (the automatic pre-migration backup is the last resort after that).
- * The write goes through `writeConfigEdits`, so the file must already be mode
- * 0600 in a 0700 directory; comments and formatting are kept, the result is
- * validated before it replaces the file, and only IDs are printed, never file
- * text. Running it again on a migrated file changes nothing.
+ * `paths.database` is resolved exactly like `serve` resolves it: relative values
+ * follow the current working directory, so run this from the same directory as
+ * `serve`. The write goes through `writeConfigEdits`, so the file must already
+ * be mode 0600 in a 0700 directory; comments and formatting are kept, the
+ * result is validated before it replaces the file, and only IDs are printed,
+ * never file text. Running it again on a migrated file changes nothing.
  *
- * The Docker image does not ship `scripts/`: run it from a checkout against the
- * host's `./config/config.jsonc` before starting a new image.
+ * The Docker image does not ship `scripts/`: run it from a checkout with the
+ * container's working directory layout before starting a new image.
  */
 
 function parseConfigPath(argv: readonly string[]): string {
@@ -32,25 +34,24 @@ function parseConfigPath(argv: readonly string[]): string {
 
 async function main(): Promise<void> {
   const configPath = parseConfigPath(process.argv.slice(2));
-  const source = await readFile(configPath, 'utf8');
-  const errors: ParseError[] = [];
-  const parsed = parse(source.replace(/^﻿/, ''), errors, { allowTrailingComma: true }) as {
-    paths?: { database?: unknown };
-    telegram?: { admins?: unknown };
-  };
-  if (
-    parsed === undefined ||
-    errors.length > 0 ||
-    typeof parsed.paths?.database !== 'string' ||
-    parsed.paths.database.length === 0
-  ) {
-    throw new Error(`Config is not valid JSONC with paths.database: ${configPath}`);
+  const loaded = await loadConfig(configPath);
+
+  const databasePath = resolve(loaded.config.paths.database);
+  if ((await stat(databasePath).catch(() => undefined)) === undefined) {
+    // `serve` never ran against this config, so there is no whitelist to move.
+    console.log(
+      JSON.stringify({
+        status: 'ok',
+        config: configPath,
+        database: databasePath,
+        moved: [],
+        note: 'database does not exist; nothing to migrate',
+      }),
+    );
+    return;
   }
 
-  const database = new Database(resolve(dirname(configPath), parsed.paths.database), {
-    readonly: true,
-    fileMustExist: true,
-  });
+  const database = new Database(databasePath, { readonly: true, fileMustExist: true });
   database.defaultSafeIntegers(true);
   let stored: number[];
   try {
@@ -77,21 +78,19 @@ async function main(): Promise<void> {
     database.close();
   }
 
-  const configured = Array.isArray(parsed.telegram?.admins)
-    ? parsed.telegram.admins.filter((id): id is number => typeof id === 'number')
-    : [];
+  const configured = loaded.config.telegram.admins ?? [];
   const moved = stored.filter((id) => !configured.includes(id)).map(String);
   if (moved.length === 0) {
-    console.log(JSON.stringify({ status: 'ok', config: configPath, moved }));
+    console.log(JSON.stringify({ status: 'ok', config: configPath, database: databasePath, moved }));
     return;
   }
   const merged = [...new Set([...configured, ...stored])].sort((left, right) => left - right);
   await writeConfigEdits(configPath, [{ path: ['telegram', 'admins'], value: merged }]);
-  console.log(JSON.stringify({ status: 'ok', config: configPath, moved }));
+  console.log(JSON.stringify({ status: 'ok', config: configPath, database: databasePath, moved }));
 }
 
 main().catch((error: unknown) => {
-  // A failed write reports IDs and validation messages, never the file text.
+  // A failed write reports paths and validation messages, never the file text.
   console.error(JSON.stringify({ status: 'error', error: error instanceof Error ? error.message : String(error) }));
   process.exitCode = 1;
 });

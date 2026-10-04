@@ -7,7 +7,7 @@ description: 审计 Plastic Wan 的 Invocation 与 Conversation 行为——解�
 
 ## 工具
 
-`scripts/audit.ts`：只读审计脚本（直连 SQLite，不属于业务层），在仓库根目录执行。默认数据库 `dev-data/data/plasticwan.sqlite`；其他部署用 `--db <path>`，路径按配置文件的 `paths.database`（相对配置文件所在目录解析）。
+`scripts/audit.ts`：只读审计脚本（直连 SQLite，不属于业务层），在仓库根目录执行。默认数据库 `dev-data/data/plasticwan.sqlite`；其他部署用 `--db <path>`，路径按配置文件的 `paths.database`（相对路径按运行 `serve` 的工作目录解析，与运行时一致）。
 
 ```bash
 node scripts/audit.ts invocation <id> [--json]              # 单次运行全貌 + 判读
