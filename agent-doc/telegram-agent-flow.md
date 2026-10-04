@@ -420,7 +420,7 @@ Sticker 视觉元数据通过严格 Tool Call 返回：中文描述、情绪、�
 
 - 旧版 `bot_admins` 表已删除（迁移 `026_drop_bot_admins.sql`）；旧表内容用 `scripts/migrate-admins.ts` 搬进配置（须在升级启动前运行）。
 - 权限判定在 `BotCommandService`：命令发送者的 `message.from.id` 命中运行中配置的 `telegram.admins` 才放行；`sender_chat` 匿名身份一律拒绝。
-- `telegram.admins` 在热更新白名单里（见 [configuration.md](configuration.md#运行时配置热更新)）：经 Admin「应用配置文件」等入口热应用，下一次命令执行就用新列表，无需重启；Admin Panel「Bot admins」页面只读展示该列表。
+- `telegram.admins` 在热更新白名单里（见 [configuration.md](configuration.md#运行时配置热更新)）：Admin「应用配置文件」或 Bot admins 页面的增删都会热应用，下一次命令执行就用新列表，无需重启；面板的增删是配置写端点（If-Match revision），写的就是这一字段。
 
 ## 常见排查顺序
 

@@ -387,12 +387,13 @@ export class AdminServer {
       }
     }
     if (route === 'admins' && request.method === 'GET') {
-      // The whitelist is the `telegram.admins` config field; the panel shows it
-      // read-only and edits go through the config file (hot-appliable).
-      const admins = this.#configStore.current().config.telegram.admins ?? [];
-      return json({
-        items: [...admins].sort((left, right) => left - right).map((id) => ({ telegram_user_id: id.toString() })),
-      });
+      return await this.#adminsView();
+    }
+    if (route === 'admins' && request.method === 'POST') {
+      return await this.#writeAdmins(request);
+    }
+    if (segments[0] === 'admins' && segments.length === 2 && request.method === 'DELETE') {
+      return await this.#writeAdmins(request, segments[1] ?? '');
     }
     if (segments[0] === 'alarms' && segments.length === 2 && request.method === 'DELETE') {
       const id = parseAlarmId(segments[1] ?? '');
@@ -756,6 +757,82 @@ export class AdminServer {
       }
       throw new AdminQueryError('config_invalid', this.#redact(error), 422);
     }
+  }
+
+  /**
+   * The bot admin whitelist is the `telegram.admins` config field. GET shows
+   * the on-disk list with its revision; POST/DELETE write that field through
+   * the reloader, so a successful write is hot-applied like every other
+   * configuration write.
+   */
+  async #adminsView(): Promise<Response> {
+    const reloader = this.#configReloader;
+    if (reloader === undefined) {
+      return json({ error: 'admins_unavailable', message: 'Configuration reloading is not wired' }, 503);
+    }
+    const { loaded, revision } = await this.#configFile(reloader);
+    return json({ items: this.#adminItems(loaded.fileConfig.telegram.admins), revision });
+  }
+
+  async #writeAdmins(request: Request, removeId?: string): Promise<Response> {
+    const reloader = this.#configReloader;
+    if (reloader === undefined) {
+      return json({ error: 'admins_unavailable', message: 'Configuration reloading is not wired' }, 503);
+    }
+    const revision = requiredRevision(request);
+    if (revision === null) {
+      return revisionRequired();
+    }
+    const { loaded, revision: currentRevision } = await this.#configFile(reloader);
+    if (revision !== currentRevision) {
+      return json({ error: 'config_conflict', message: 'The configuration file changed; reload before editing' }, 409);
+    }
+    const current = loaded.fileConfig.telegram.admins ?? [];
+    let merged: number[];
+    if (removeId === undefined) {
+      const added = this.#parseTelegramUserId((await readJsonObject(request)).telegram_user_id);
+      // Adding an existing ID is a no-op; a no-change edit would fail the write.
+      if (current.includes(added)) {
+        return json({
+          items: this.#adminItems(current),
+          revision: currentRevision,
+          apply: { applied: [], restart_required: [], outside_serve: [] },
+        });
+      }
+      merged = [...current, added];
+    } else {
+      const removed = this.#parseTelegramUserId(removeId, 'admin_id');
+      if (!current.includes(removed)) {
+        return json({ error: 'not_found', message: 'The Telegram user ID is not in the bot admin whitelist' }, 404);
+      }
+      merged = current.filter((entry) => entry !== removed);
+    }
+    const result = await reloader.writeAndApply([{ path: ['telegram', 'admins'], value: merged }], revision);
+    if (!result.ok) {
+      const message = result.fileWritten
+        ? `config.jsonc was updated but not applied: ${result.message}`
+        : result.message;
+      return json({ error: result.code, message }, CONFIG_WRITE_STATUS[result.code] ?? 409);
+    }
+    const view = await this.#configFile(reloader);
+    return json({
+      items: this.#adminItems(view.loaded.fileConfig.telegram.admins),
+      revision: view.revision,
+      apply: { applied: result.applied, restart_required: result.restartRequired, outside_serve: result.outsideServe },
+    });
+  }
+
+  #adminItems(admins: readonly number[] | undefined): { telegram_user_id: string }[] {
+    return (admins ?? []).map((id) => ({ telegram_user_id: id.toString() }));
+  }
+
+  #parseTelegramUserId(value: unknown, field = 'telegram_user_id'): number {
+    const parsed =
+      typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      throw new AdminQueryError('invalid_telegram_user_id', `${field} must be a positive safe integer`, 400);
+    }
+    return parsed;
   }
 
   async #chatsView(reloader: ConfigReloader) {

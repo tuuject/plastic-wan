@@ -53,6 +53,29 @@ test.describe('memories CRUD', () => {
   });
 });
 
+test.describe('bot admins', () => {
+  test('add and remove a bot admin with UI feedback', async ({ page }) => {
+    await page.goto(await adminUrl('/admins'));
+    await expect(page.getByText('No bot admins configured.')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Add bot admin' }).click();
+    await page.getByLabel('Telegram user ID').fill('123456789');
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await expect(page.getByText('Bot admin added')).toBeVisible();
+    const row = page.locator('table tbody tr', { hasText: '123456789' });
+    await expect(row).toBeVisible();
+
+    await row.getByRole('button', { name: 'Remove' }).click();
+    await page.getByRole('button', { name: 'Remove admin' }).click();
+    await expect(page.getByText('Bot admin removed')).toBeVisible();
+    await expect(page.getByText('No bot admins configured.')).toBeVisible();
+
+    const listResponse = await page.request.get(await adminUrl('/api/admins'));
+    const listBody = (await listResponse.json()) as { items: { telegram_user_id: string }[] };
+    expect(listBody.items.some((item) => item.telegram_user_id === '123456789')).toBeFalsy();
+  });
+});
+
 test.describe('agent model hot-switch', () => {
   test('switch to the vision model and back through the model rows', async ({ page }) => {
     await page.goto(await adminUrl('/models'));

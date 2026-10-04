@@ -343,6 +343,16 @@ export interface BotAdminEntry {
   readonly telegram_user_id: string;
 }
 
+export interface AdminDraft {
+  readonly telegram_user_id: number;
+}
+
+export interface BotAdminList {
+  readonly items: readonly BotAdminEntry[];
+  /** SHA-256 of config.jsonc; writes have to echo it via `If-Match`. */
+  readonly revision: string;
+}
+
 export interface ModelOption {
   readonly provider: string;
   readonly model: string;
@@ -872,8 +882,23 @@ export function deleteMemory(id: string): Promise<{ status: string }> {
   return call<{ status: string }>(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-export function listBotAdmins(): Promise<{ items: readonly BotAdminEntry[] }> {
-  return call<{ items: readonly BotAdminEntry[] }>('/admins');
+export function listBotAdmins(): Promise<BotAdminList> {
+  return call<BotAdminList>('/admins');
+}
+
+export function addBotAdmin(draft: AdminDraft, revision: string): Promise<BotAdminList> {
+  return call<BotAdminList>('/admins', {
+    method: 'POST',
+    headers: writeHeaders(revision),
+    body: JSON.stringify(draft),
+  });
+}
+
+export function removeBotAdmin(telegramUserId: string, revision: string): Promise<BotAdminList> {
+  return call<BotAdminList>(`/admins/${encodeURIComponent(telegramUserId)}`, {
+    method: 'DELETE',
+    headers: writeHeaders(revision),
+  });
 }
 
 /**

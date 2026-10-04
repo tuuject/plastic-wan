@@ -917,24 +917,85 @@ function textUpdate(updateId: number, messageId: number, text: string): Update {
   };
 }
 
-test('admins API lists the configured whitelist and offers no writes', async () => {
-  const { store, server } = await fixture();
+test('admins API manages the config whitelist and hot-applies it', async () => {
+  const { store, loaded, configStore, directory } = await fixture();
+  const configPath = join(directory, 'config.jsonc');
+  const configReloader = new ConfigReloader({
+    loaded,
+    store: configStore,
+    modelSwitcher: new AgentModelSwitcher(configStore),
+    secrets: new SecretStore(),
+    validateAgentModel: () => undefined,
+    onPublished: () => undefined,
+  });
+  const server = new AdminServer({ store, configStore, configReloader });
   try {
-    const created = await server.handle(post('/api/auth/setup', { username: 'owner', password: PASSWORD }));
-    const cookie = sessionCookie(created);
-
     const unauthenticated = await server.handle(request('/api/admins'));
     expect(unauthenticated.status).toBe(401);
 
-    const list = await readJson(await server.handle(request('/api/admins', { headers: { cookie } })));
-    expect(list).toEqual({ items: [{ telegram_user_id: '7' }, { telegram_user_id: '42' }] });
+    const created = await server.handle(post('/api/auth/setup', { username: 'owner', password: PASSWORD }));
+    const cookie = sessionCookie(created);
+    let revision = await readConfigRevision(configPath);
+    const write = (path: string, method: string, body?: unknown): Request => {
+      const headers: Record<string, string> = { cookie, 'if-match': revision };
+      if (body !== undefined) {
+        headers['content-type'] = 'application/json';
+      }
+      return request(path, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    };
 
-    const added = await server.handle(post('/api/admins', { telegram_user_id: 42 }, cookie));
-    expect(added.status).toBe(405);
-    expect(await readJson(added)).toMatchObject({ error: 'method_not_allowed' });
+    const initial = await readJson(await server.handle(request('/api/admins', { headers: { cookie } })));
+    expect(initial.items).toEqual([{ telegram_user_id: '7' }, { telegram_user_id: '42' }]);
 
-    const removed = await server.handle(request('/api/admins/42', { method: 'DELETE', headers: { cookie } }));
-    expect(removed.status).toBe(405);
+    const withoutRevision = await server.handle(
+      request('/api/admins', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ telegram_user_id: 99 }),
+      }),
+    );
+    expect(withoutRevision.status).toBe(400);
+    expect(await readJson(withoutRevision)).toMatchObject({ error: 'revision_required' });
+
+    const stale = await server.handle(
+      request('/api/admins', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie, 'if-match': 'stale' },
+        body: JSON.stringify({ telegram_user_id: 99 }),
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect(await readJson(stale)).toMatchObject({ error: 'config_conflict' });
+
+    const invalid = await server.handle(write('/api/admins', 'POST', { telegram_user_id: -5 }));
+    expect(invalid.status).toBe(400);
+    expect(await readJson(invalid)).toMatchObject({ error: 'invalid_telegram_user_id' });
+
+    const added = await readJson(await server.handle(write('/api/admins', 'POST', { telegram_user_id: 99 })));
+    expect(added.items.map((item: { telegram_user_id: string }) => item.telegram_user_id)).toEqual(['7', '42', '99']);
+    expect(added.apply.applied).toContain('telegram.admins');
+    // Hot: the running configuration — and thus the command gate — already sees 99.
+    expect(configStore.current().config.telegram.admins).toEqual([7, 42, 99]);
+    // The file is the source of truth across restarts.
+    expect((await loadConfig(configPath)).config.telegram.admins).toEqual([7, 42, 99]);
+
+    revision = added.revision;
+    const idempotent = await readJson(await server.handle(write('/api/admins', 'POST', { telegram_user_id: 99 })));
+    expect(idempotent.items).toEqual(added.items);
+    expect(idempotent.apply.applied).toEqual([]);
+
+    const removed = await readJson(await server.handle(write('/api/admins/99', 'DELETE')));
+    expect(removed.items.map((item: { telegram_user_id: string }) => item.telegram_user_id)).toEqual(['7', '42']);
+    expect(configStore.current().config.telegram.admins).toEqual([7, 42]);
+    revision = removed.revision;
+
+    const missing = await server.handle(write('/api/admins/55', 'DELETE'));
+    expect(missing.status).toBe(404);
+    expect(await readJson(missing)).toMatchObject({ error: 'not_found' });
   } finally {
     store.close();
   }
