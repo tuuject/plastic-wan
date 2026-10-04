@@ -341,14 +341,6 @@ export interface AlarmListItem {
 
 export interface BotAdminEntry {
   readonly telegram_user_id: string;
-  readonly display_name: string;
-  readonly added_by: string;
-  readonly created_at: string;
-  readonly updated_at: string;
-}
-
-export interface AdminDraft {
-  readonly telegram_user_id: string;
 }
 
 export interface ModelOption {
@@ -882,18 +874,6 @@ export function deleteMemory(id: string): Promise<{ status: string }> {
 
 export function listBotAdmins(): Promise<{ items: readonly BotAdminEntry[] }> {
   return call<{ items: readonly BotAdminEntry[] }>('/admins');
-}
-
-export function addBotAdmin(draft: AdminDraft): Promise<BotAdminEntry> {
-  return call<BotAdminEntry>('/admins', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(draft),
-  });
-}
-
-export function removeBotAdmin(telegramUserId: string): Promise<{ status: string }> {
-  return call<{ status: string }>(`/admins/${encodeURIComponent(telegramUserId)}`, { method: 'DELETE' });
 }
 
 /**

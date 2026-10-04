@@ -3,7 +3,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Update } from 'grammy/types';
-import { seedConfigAdmins } from '../src/store/admins.ts';
 import { BotCommandService } from '../src/orchestration/bot-commands.ts';
 import { type LoadedConfig, loadConfig } from '../src/platform/config.ts';
 import type { RuntimeConfigurationStore } from '../src/platform/runtime-config.ts';
@@ -97,7 +96,6 @@ async function setup(): Promise<{
   const loaded = await loadConfig(configPath);
   const configStore = await testConfigStore(loaded);
   const store = await SqliteStore.open(loaded.config);
-  seedConfigAdmins(store.orm, loaded.config.telegram.admins ?? []);
   const scheduler = new BucketScheduler(store, configStore, async () => ({
     state: 'completed',
     reason: 'done',

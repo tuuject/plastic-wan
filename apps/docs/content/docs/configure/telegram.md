@@ -39,6 +39,6 @@ Telegram 官方 FAQ 指引开发者通过 [@BotFather](https://t.me/BotFather) �
 
 ## 管理员命令与验证
 
-`telegram.admins` 中的 Telegram 用户可以使用 `/pause`、`/resume`、`/model`、`/cut_topic`。先在目标 Chat 发送一条测试消息，检查 `serve_started` 后的审计记录；“Bot 在线”不等于消息被允许，也不等于模型一定发言。
+`telegram.admins` 中的 Telegram 用户可以使用 `/pause`、`/resume`、`/model`、`/cut_topic`。名单由 `config.jsonc` 的 `telegram.admins` 字段管理，修改后可热应用，无需重启。先在目标 Chat 发送一条测试消息，检查 `serve_started` 后的审计记录；“Bot 在线”不等于消息被允许，也不等于模型一定发言。
 
 若需限制群内唤醒时段，参阅 [参与方式](../guides/participation.md)。

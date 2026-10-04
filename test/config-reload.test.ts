@@ -20,7 +20,6 @@ import { buildModelRegistry } from '../src/platform/providers.ts';
 import { RuntimeConfigurationStore } from '../src/platform/runtime-config.ts';
 import { SecretStore } from '../src/platform/secrets.ts';
 import { SystemResources } from '../src/platform/system-resources.ts';
-import { seedConfigAdmins } from '../src/store/admins.ts';
 import { SqliteStore } from '../src/store/database.ts';
 import type { TelegramSendApi } from '../src/capabilities/send-tool.ts';
 import {
@@ -223,7 +222,6 @@ async function setup(
   const loaded = await loadConfig(configPath);
   let fileConfig = structuredClone(loaded.fileConfig);
   const store = await SqliteStore.open(loaded.config);
-  seedConfigAdmins(store.orm, loaded.config.telegram.admins ?? []);
   // One registry for the store and the reloader, exactly as the composition root
   // wires it: credentials are resolved once, at startup. The fixture keeps the
   // mutable handle the registry was built from so a test can stand in a faux
@@ -1061,6 +1059,27 @@ test('a run keeps the registry it started with when a reload publishes a new one
     expect(before.models.getModel('faux', 'deepseek-reasoner')).toBeUndefined();
     expect(fixture.configStore.current().models.getModel('faux', 'deepseek-reasoner')).toBeDefined();
     expect(before.models.getModel('faux', AGENT_MODEL)?.id).toBe(AGENT_MODEL);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test('telegram.admins hot-applies and gates bot commands without a restart', async () => {
+  const fixture = await setup();
+  try {
+    fixture.ingestion.ingest(textUpdate(1, 10, 'hello'), new Date());
+    const stranger = { id: 7n, name: 'Stranger', username: null };
+    expect(await fixture.commands.run({ name: 'pause' }, BigInt(CHAT_ID), stranger, new Date())).toBe(
+      '该命令仅对本 Bot 的管理员可用。',
+    );
+
+    await fixture.patch((config) => {
+      config.telegram.admins = [7];
+    });
+    const reloaded = await fixture.reloader.reloadFromFile();
+    expect(reloaded.ok).toBe(true);
+
+    expect(await fixture.commands.run({ name: 'pause' }, BigInt(CHAT_ID), stranger, new Date())).toContain('已暂停');
   } finally {
     fixture.store.close();
   }

@@ -15,7 +15,6 @@ import { BucketScheduler } from '../src/orchestration/scheduler.ts';
 import { type FileConfig, loadConfig } from '../src/platform/config.ts';
 import { SecretStore } from '../src/platform/secrets.ts';
 import { SystemResources } from '../src/platform/system-resources.ts';
-import { seedConfigAdmins } from '../src/store/admins.ts';
 import { SqliteStore } from '../src/store/database.ts';
 import { LongTaskService } from '../src/store/long-tasks.ts';
 import { fauxRegistry, testConfigJsonc, testConfigStore, writeTestConfig } from './helpers.ts';
@@ -342,8 +341,9 @@ test('an unconsumed receipt survives a model error and is handled only by a fres
 test.each(['pause', 'admin_cancel'] as const)(
   '%s prevents attached unconsumed receipts from resurfacing',
   async (action) => {
-    const f = await fixture();
-    seedConfigAdmins(f.store.orm, [42], new Date());
+    const f = await fixture((config) => {
+      config.telegram.admins = [42];
+    });
     const commands = new BotCommandService(f.store, f.configStore, f.scheduler);
     let attached!: () => void;
     const attachedSignal = new Promise<void>((resolve) => {

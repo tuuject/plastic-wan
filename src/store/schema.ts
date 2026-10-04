@@ -565,14 +565,6 @@ export const chatPause = sqliteTable('chat_pause', {
   pausedAt: text('paused_at').notNull(),
 });
 
-export const botAdmins = sqliteTable('bot_admins', {
-  telegramUserId: sqliteBigIntId('telegram_user_id').primaryKey(),
-  displayName: text('display_name').notNull().default(''),
-  addedBy: text('added_by').notNull().default(''),
-  createdAt: text('created_at').notNull(),
-  updatedAt: text('updated_at').notNull(),
-});
-
 export const conversationContextCutoffs = sqliteTable('conversation_context_cutoffs', {
   conversationId: sqliteBigIntId('conversation_id')
     .primaryKey()

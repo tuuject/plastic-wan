@@ -17,7 +17,6 @@ import { BucketScheduler } from '../src/orchestration/scheduler.ts';
 import { loadConfig, type FileConfig } from '../src/platform/config.ts';
 import { SecretStore } from '../src/platform/secrets.ts';
 import { SystemResources } from '../src/platform/system-resources.ts';
-import { seedConfigAdmins } from '../src/store/admins.ts';
 import { SqliteStore } from '../src/store/database.ts';
 import { LongTaskService } from '../src/store/long-tasks.ts';
 import { fauxRegistry, renderInvocationContext, testConfigJsonc, testConfigStore, writeTestConfig } from './helpers.ts';
@@ -356,7 +355,6 @@ describe('alarm canonical context', () => {
         expect(contexts.header(1n)?.lastGcAt).not.toBeNull();
         nextId = 4;
       } else {
-        seedConfigAdmins(f.store.orm, f.config.telegram.admins ?? []);
         const commands = new BotCommandService(f.store, f.configStore, f.scheduler, undefined, f.conversationRuntime);
         const commandUpdate = update(2, '/cut_topic');
         commandUpdate.message!.entities = [{ offset: 0, length: 10, type: 'bot_command' }];

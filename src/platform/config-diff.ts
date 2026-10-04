@@ -58,6 +58,7 @@ const HOT_PATHS: ReadonlySet<string> = new Set([
   'vision.model',
   'vision.max_output_tokens',
   'image',
+  'telegram.admins',
 ]);
 
 /**

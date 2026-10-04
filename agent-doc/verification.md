@@ -150,7 +150,7 @@ node src/cli.ts serve --config dev-data/config.jsonc
 7. Memories 页面按群聊与状态过滤，新建/编辑/删除记忆后列表刷新；剩余寿命超过 `memory_ttl_warning_days` 的记忆带 warning 标记。
 8. Overview 的 Bot status 卡片显示 `sleeping`/`awake` 与 `sleep_until`，睡眠时 `Wake now` 带二次确认；同时列出所有 `chat_pause` Chat 与暂停时间。
 9. Alarms 页面按 state/Chat/Target 过滤，pending 优先置顶，展开显示完整诊断并链接到对应 Tool session；取消只对 pending 开放且需二次确认，对非 pending 给出 409 冲突提示。
-10. Bot admins 页面能添加/移除管理员，`telegram.admins` 的种子项来源显示为 `config`。
+10. Bot admins 页面只读展示 `telegram.admins` 配置的列表；改配置里的该字段并应用后，页面与命令权限无需重启即更新。
 11. Models 页面列出 Provider 与模型；切换 agent / vision 模型后 `config.jsonc` 的 `agent.provider` / `agent.model`（或 `vision.*`）被改写，页面立即反映新模型，后续 Invocation / vision 分析使用新模型，重启 `serve` 后仍然生效；Provider 增删、连接字段与模型列表的修改均热应用（在用引用仍受校验保护）。Models 页的 `PUT /api/model` 与 `PUT /api/thinking-level` 只写全局默认，保留 `telegram.chats[]` 的覆盖；未覆盖的 Chat 在 `/status` 中显示新的全局值，已覆盖的 Chat 保持自己的设置。Chat 覆盖通过 Chats 页、配置文件或 Telegram `/model` 维护。Settings 页的 `Configuration file` 卡片显示 generation、active hash 与 file hash；改一个白名单字段后点 `Apply config file`，应用列表出现该路径，改一个 restart 字段则出现在待重启列表。
 12. Conversation Contexts 页面按 chat 过滤，列表按最近活跃倒序并可用 Load more 翻页；详情显示 head/next seq、保留消息数与 capability refs，展开消息看到 `payload_preview` 与截断标记，且不出现已 GC 的行。
 13. 登出后访问深链接回落登录页；重新登录恢复访问。

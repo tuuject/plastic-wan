@@ -33,7 +33,6 @@ import { BUNDLED_SYSTEM_RESOURCES_DIR, SystemResources } from './platform/system
 import { BUILTIN_PLUGINS } from './plugins/builtin.ts';
 import { loadPlugins } from './plugins/plugin.ts';
 import { runStartupCatchUp } from './startup-catch-up.ts';
-import { seedConfigAdmins } from './store/admins.ts';
 import { ServeLock, SqliteStore, stopRunningInstance, watchStopRequests } from './store/database.ts';
 import { LongTaskService } from './store/long-tasks.ts';
 import { appState } from './store/schema.ts';
@@ -129,7 +128,6 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     if (loaded.warnings.length > 0) {
       logEvent('config_warnings', { warnings: loaded.warnings.join(' | ') });
     }
-    seedConfigAdmins(store.orm, loaded.config.telegram.admins ?? []);
     bot = new Bot(token);
     // The registry is built once here and republished by every reload; the
     // configuration and its models always travel together.

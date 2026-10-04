@@ -20,7 +20,6 @@ import type { AgentModelOption, AgentModelSwitcher } from '../../platform/model-
 import type { RuntimeConfigurationStore } from '../../platform/runtime-config.ts';
 import type { SecretStore } from '../../platform/secrets.ts';
 import { cancelAlarm, listAlarms, parseAlarmId } from '../../plugins/alarm/admin.ts';
-import { addBotAdmin, listBotAdmins, parseAdminUserId, removeBotAdmin } from '../../store/admins.ts';
 import type { SqliteStore } from '../../store/database.ts';
 import { LongTaskService } from '../../store/long-tasks.ts';
 import { wakeFromSleep } from '../../store/sleep.ts';
@@ -388,15 +387,12 @@ export class AdminServer {
       }
     }
     if (route === 'admins' && request.method === 'GET') {
-      return json({ items: listBotAdmins(this.#store.orm) });
-    }
-    if (route === 'admins' && request.method === 'POST') {
-      const body = await readJsonObject(request);
-      return json(addBotAdmin(this.#store.orm, parseAdminUserId(body.telegram_user_id), 'admin-panel'));
-    }
-    if (segments[0] === 'admins' && segments.length === 2 && request.method === 'DELETE') {
-      removeBotAdmin(this.#store.orm, parseAdminUserId(segments[1] ?? '', 'admin_id'));
-      return json({ status: 'ok' });
+      // The whitelist is the `telegram.admins` config field; the panel shows it
+      // read-only and edits go through the config file (hot-appliable).
+      const admins = this.#configStore.current().config.telegram.admins ?? [];
+      return json({
+        items: [...admins].sort((left, right) => left - right).map((id) => ({ telegram_user_id: id.toString() })),
+      });
     }
     if (segments[0] === 'alarms' && segments.length === 2 && request.method === 'DELETE') {
       const id = parseAlarmId(segments[1] ?? '');

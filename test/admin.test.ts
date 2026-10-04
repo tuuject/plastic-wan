@@ -54,6 +54,7 @@ async function fixture(): Promise<Fixture> {
         session_ttl_hours: 12,
         static_dir: staticDir.replaceAll('\\', '/'),
       };
+      config.telegram.admins = [7, 42];
     }),
   );
   const loaded = await loadConfig(configPath);
@@ -916,7 +917,7 @@ function textUpdate(updateId: number, messageId: number, text: string): Update {
   };
 }
 
-test('admins API lists, adds and removes bot admins', async () => {
+test('admins API lists the configured whitelist and offers no writes', async () => {
   const { store, server } = await fixture();
   try {
     const created = await server.handle(post('/api/auth/setup', { username: 'owner', password: PASSWORD }));
@@ -925,30 +926,15 @@ test('admins API lists, adds and removes bot admins', async () => {
     const unauthenticated = await server.handle(request('/api/admins'));
     expect(unauthenticated.status).toBe(401);
 
-    const empty = await server.handle(request('/api/admins', { headers: { cookie } }));
-    expect(empty.status).toBe(200);
-    expect(await readJson(empty)).toEqual({ items: [] });
-
-    const invalid = await server.handle(post('/api/admins', { telegram_user_id: -5 }, cookie));
-    expect(invalid.status).toBe(400);
-    expect(await readJson(invalid)).toMatchObject({ error: 'invalid_telegram_user_id' });
+    const list = await readJson(await server.handle(request('/api/admins', { headers: { cookie } })));
+    expect(list).toEqual({ items: [{ telegram_user_id: '7' }, { telegram_user_id: '42' }] });
 
     const added = await server.handle(post('/api/admins', { telegram_user_id: 42 }, cookie));
-    expect(added.status).toBe(200);
-    expect(await readJson(added)).toMatchObject({ telegram_user_id: '42', added_by: 'admin-panel' });
-
-    const duplicate = await server.handle(post('/api/admins', { telegram_user_id: 42 }, cookie));
-    expect(duplicate.status).toBe(200);
-    expect((await readJson(duplicate)).telegram_user_id).toBe('42');
-
-    const list = await readJson(await server.handle(request('/api/admins', { headers: { cookie } })));
-    expect(list.items).toHaveLength(1);
-    expect(list.items[0]).toMatchObject({ telegram_user_id: '42', display_name: '' });
+    expect(added.status).toBe(405);
+    expect(await readJson(added)).toMatchObject({ error: 'method_not_allowed' });
 
     const removed = await server.handle(request('/api/admins/42', { method: 'DELETE', headers: { cookie } }));
-    expect(removed.status).toBe(200);
-    expect(await readJson(removed)).toEqual({ status: 'ok' });
-    expect(store.db.prepare<[], { count: bigint }>('SELECT COUNT(*) AS count FROM bot_admins').get()?.count).toBe(0n);
+    expect(removed.status).toBe(405);
   } finally {
     store.close();
   }

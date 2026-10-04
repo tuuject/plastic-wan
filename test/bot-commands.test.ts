@@ -3,7 +3,6 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Message, Update } from 'grammy/types';
-import { seedConfigAdmins } from '../src/store/admins.ts';
 import {
   BOT_COMMANDS,
   type BotCommandRegistration,
@@ -57,7 +56,6 @@ async function setup(
   const loaded = await loadConfig(configPath);
   const configStore = await testConfigStore(loaded);
   const store = await SqliteStore.open(loaded.config);
-  seedConfigAdmins(store.orm, loaded.config.telegram.admins ?? [], new Date('2026-08-15T00:00:00.000Z'));
   const scheduler = new BucketScheduler(store, configStore, handler);
   return {
     loaded,
@@ -683,18 +681,6 @@ describe('bot command service', () => {
     );
     expect(await commands.run({ name: 'status' }, 123456789n, stranger, FIXED_NOW)).toContain('本群模型');
     expect(store.db.prepare<[], { count: bigint }>('SELECT COUNT(*) AS count FROM chat_pause').get()?.count).toBe(0n);
-    store.close();
-  });
-
-  test('acting admins refresh their display name in the admin list', async () => {
-    const { store, ingestion, commands } = await setup();
-    ingestion.ingest(textUpdate(1, 10, 'hello'), FIXED_NOW);
-    await commands.run({ name: 'pause' }, 123456789n, { id: 42n, name: 'Alice Liddell', username: 'alice' }, FIXED_NOW);
-    const row = store.db
-      .prepare<[], { display_name: string; added_by: string }>('SELECT display_name, added_by FROM bot_admins')
-      .get();
-    expect(row?.display_name).toBe('Alice Liddell');
-    expect(row?.added_by).toBe('config');
     store.close();
   });
 });

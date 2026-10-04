@@ -393,7 +393,7 @@ Sticker 视觉元数据通过严格 Tool Call 返回：中文描述、情绪、�
 - 命令消息只写 `telegram_updates` 审计，不写入 `messages`，因此不会创建 Bucket 或进入 Agent 历史。`parseBotCommand` 返回的命令附带 `messageId`（命令消息自身的 Telegram message ID）与 `threadId`（命令所在 Forum Topic），供 `/cut_topic` 记录切点并定位要清空的 Conversation Context。`threadId` 与入库共用 `conversationThreadId` 规则：只有 forum supergroup 的 topic 消息才取 `message_thread_id`，其余一律视为 thread 0，包括私聊（开启话题模式后消息会带 `message_thread_id`）和普通 supergroup 里 Reply 链自带的 `message_thread_id`。两边规则不一致时，带这类 thread id 的 `/cut_topic` 会找不到 Conversation、只写切点不清 Context，却仍回复「已清空」。
 - 回复是确定性 Bot 输出（不经模型），直接通过 Bot API 发送并 Reply 原命令消息，不经过 `send` Tool；发送失败只记 `command_reply_failed` 事件，不重试。
 
-`/pause` 与 `/resume` 仅对 Bot 管理员开放（`bot_admins` 表，见下文）；`/status` 对任何成员开放。非管理员或匿名身份执行会收到拒绝回复，不产生任何状态变更。管理员执行命令时其显示名会刷新到 `bot_admins`。
+`/pause` 与 `/resume` 仅对 Bot 管理员开放（`telegram.admins` 配置，见下文）；`/status` 对任何成员开放。非管理员或匿名身份执行会收到拒绝回复，不产生任何状态变更。
 
 `/model` 同样仅限管理员，在当前 Chat 上运行时切换 agent 模型（与 Admin Panel「Models」页共享同一 `AgentModelSwitcher` 与 `ConfigReloader`，但只写当前 Chat 的 `telegram.chats[<id>]` 覆盖，不碰全局 `agent.*`；全局切换仍走 Admin `PUT /api/model` 或配置文件）：`/model` 按每页 20 条列出该 Chat 生效的模型与思考强度（未覆盖的项标注「继承全局」）与第一页可切换序号；`/model page 页码` 翻页，所有页面保留全局序号；`/model 纯数字序号` 把序号对应的 `provider` / `model` 写入 `config.jsonc` 中该 Chat 的覆盖，同时把该 Chat 的 `thinking_level` 重置为目标模型接受的最弱级别，再重新加载配置，成功回复「已为本群切换: …，已写入 config.jsonc，将在下一次 agent session 生效。」与「思考强度已重置为该模型最弱的一档: <级别>」两行，因此重启后仍然生效。`/model default` 删除该 Chat 的 `provider`/`model`/`thinking_level` 三项覆盖，恢复继承全局；文件中已无覆盖时不重写文件，但仍应用文件里的其它热更新并报告待重启项。写入与加载共用同一把锁，两个并发切换不会交错；配置文件是符号链接、权限不允许或写后校验失败时回复错误，文件与当前配置都不变；文件已写入但应用失败时回复「已写入 config.jsonc，但应用失败: …」。越界页码、无效参数与 `/model reset` 都按无效序号处理。切换只对该 Chat 后续启动的 Invocation 生效，不影响进行中的会话；清单与语义见 [configuration.md](configuration.md#运行时配置热更新)。
 
@@ -416,11 +416,11 @@ Sticker 视觉元数据通过严格 Tool Call 返回：中文描述、情绪、�
 
 ## Bot 管理员列表
 
-`bot_admins`（迁移 `008_bot_admins.sql`）保存可执行 `/pause`、`/resume`、`/model`、`/cut_topic` 的 Telegram 用户 ID，Bot 全局共享：
+`/pause`、`/resume`、`/model`、`/cut_topic` 的白名单是配置文件里的 `telegram.admins`（Telegram User ID 数组），Bot 全局共享，它是唯一事实源：
 
-- 启动时 `telegram.admins`（JSONC 数组）以 `ON CONFLICT DO NOTHING` 播种，保证运营者始终保有控制权；面板新增的条目不会被种子移除。
-- Admin Panel「Bot admins」页面（`GET/POST /api/admins`、`DELETE /api/admins/:id`）是运行时管理入口。
-- 权限判定在 `BotCommandService`：命令发送者的 `message.from.id` 命中 `bot_admins` 才放行；`sender_chat` 匿名身份一律拒绝。
+- 旧版 `bot_admins` 表已删除（迁移 `026_drop_bot_admins.sql`）；旧表内容用 `scripts/migrate-admins.ts` 搬进配置（须在升级启动前运行）。
+- 权限判定在 `BotCommandService`：命令发送者的 `message.from.id` 命中运行中配置的 `telegram.admins` 才放行；`sender_chat` 匿名身份一律拒绝。
+- `telegram.admins` 在热更新白名单里（见 [configuration.md](configuration.md#运行时配置热更新)）：经 Admin「应用配置文件」等入口热应用，下一次命令执行就用新列表，无需重启；Admin Panel「Bot admins」页面只读展示该列表。
 
 ## 常见排查顺序
 

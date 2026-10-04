@@ -35,6 +35,7 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 | 其余 agent 字段：`thinking_level`、`context_stop_ratio`、`send_max_text_length`、`send_disallow_blank_lines`、`send_nudge_enabled`、`send_barrier_enabled`、`daily_budget.max_tokens`、`max_concurrency`、`history_messages`、`context.max_wall_clock_seconds`、`context.idle_grace_seconds`、`rate_limits.*` | 下一次 Invocation 使用新值；运行中的 Invocation 继续用它启动时的快照。唯一例外是 `daily_budget.max_tokens`：日预算在运行期实时读取，调低后下一次模型调用立即被拦截 |
 | `telegram.chats[<id>].instructions_file` | 仅限两边都存在的 Chat；路径或内容变化都算 |
 | `telegram.chats[<id>].provider` / `.model` / `.thinking_level` | 仅限两边都存在的 Chat 的按群模型覆盖（语义与校验见「Telegram Chat 与 Topic」）；新增/删除 Chat 仍是 restart |
+| `telegram.admins` | Bot 管理员白名单（`/pause`、`/resume`、`/model`、`/cut_topic` 的唯一事实源）；运行期判定直接读运行中的配置，下一次命令执行就用新列表 |
 | `providers.<alias>`（新增、删除、改 kind）与 `providers.<alias>.*`（连接字段、模型列表） | Provider 的每个字段都热更新：reload 按新定义重建注册表。模型列表变化只替换该 Provider 的模型；连接字段变化会重新解析它的 SecretRef |
 | `vision.provider`、`vision.model`、`vision.max_output_tokens` | 下一次 vision 分析使用新模型；`max_output_tokens` 在构建注册表时与新模型的上限一起校验，并和模型一起在分析开始时从同一份快照取出，等待中发布的新值只影响之后的分析 |
 | `image`（整段：存在性、`credentials`、`models` 及所有子字段） | 图片功能启停与配置都热应用：reload 重新解析 image SecretRef 并原子发布新的图片快照，下一次提交生效；进行中的生成继续用它开始时的凭据快照。段被剥离（结构不合法）或删除都等于禁用，Agent 与 Admin 同步失去图片工具与页面能力，不需要重启 |
@@ -159,7 +160,7 @@ command SecretRef：
 - `provider` / `model` / `thinking_level`（可选）是此 Chat 的按群模型覆盖：全局 `agent.provider` / `agent.model` / `agent.thinking_level` 作为默认值，缺省逐项继承（`resolveAgentSettings`）。`provider` 与 `model` 必须成对出现，只写其一会被 `check-config` 直接拒绝；`thinking_level` 可独立覆盖，不必随模型一起写。生效模型按「Chat 覆盖 → 全局默认」逐项解析，该组合必须合法：覆盖模型必须在该 Provider 下存在、支持 text，`thinking_level` 必须被解析后的生效模型接受，否则严格报错。每次 Invocation 从运行快照按此解析模型与思考档；运行中的 Invocation（含 attach 的批次）沿用启动时冻结的快照，下一次 Invocation 才用新值。Topic 共用所在 Chat 的设置，私聊同理；群迁移按已有 `resolveChatConfig` 规则解析到迁移前 Chat 的配置。
 - 修改 Chat 的 allowlist、Topic、增删 Chat 或其它字段后必须重启，并比较 `check-config` 与 `serve_started` 的 `config_hash`；已有 Chat 的 `instructions_file` 与 `provider`/`model`/`thinking_level` 属于热更新白名单，见「运行时配置热更新」。
 - Chat 没有每日 Invocation 次数上限，也不设 Token 硬上限；Token 只按 Chat 归属统计，唯一硬上限是全局 `agent.daily_budget.max_tokens`。
-- `admins`（可选）是 Telegram User ID 数组，作为 Bot 管理员 seed 到 `bot_admins`；只有管理员能执行 `/pause`、`/resume`、`/model`、`/cut_topic`。
+- `admins`（可选）是 Telegram User ID 数组，Bot 管理员白名单的唯一事实源；只有管理员能执行 `/pause`、`/resume`、`/model`、`/cut_topic`。属热更新白名单，见「运行时配置热更新」。
 
 ## 定时活跃（participation）
 

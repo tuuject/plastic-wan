@@ -53,6 +53,7 @@ async function setup(registry?: TestRegistry, recordPayloads = false) {
     configPath,
     testConfigJsonc(directory, (config) => {
       config.developer = { record_model_payloads: recordPayloads };
+      config.telegram.admins = [42];
     }),
   );
   const loaded = await loadConfig(configPath);
@@ -915,12 +916,6 @@ describe('alarm scheduling behavior', () => {
       throw new Error('Expected claimed alarm invocation');
     }
 
-    const now = new Date().toISOString();
-    store.db
-      .prepare(
-        "INSERT INTO bot_admins(telegram_user_id, display_name, added_by, created_at, updated_at) VALUES (42, 'Alice', 'config', ?, ?)",
-      )
-      .run(now, now);
     const commands = new BotCommandService(store, configStore, scheduler);
     expect(
       await commands.run(

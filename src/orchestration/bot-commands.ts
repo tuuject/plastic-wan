@@ -6,10 +6,9 @@ import type { ConfigReloader } from '../platform/config-reload.ts';
 import type { AgentModelOption, AgentModelSwitcher } from '../platform/model-switch.ts';
 import { isWithinActiveWindows } from '../platform/participation.ts';
 import type { RuntimeConfigurationStore } from '../platform/runtime-config.ts';
-import { isBotAdmin } from '../store/admins.ts';
 import { isChatPaused, resolveChatConfig, type SqliteStore } from '../store/database.ts';
 import { chatAttentionUntil, ParticipationRegistry } from '../store/participation.ts';
-import { botAdmins, chatPause, chats, conversationContextCutoffs, conversations, dailyUsage } from '../store/schema.ts';
+import { chatPause, chats, conversationContextCutoffs, conversations, dailyUsage } from '../store/schema.ts';
 import { readDailyTokenBudget } from '../store/sleep.ts';
 import type { ConversationRuntime } from './conversation-runtime.ts';
 import type { BucketScheduler } from './scheduler.ts';
@@ -182,23 +181,13 @@ export class BotCommandService {
   }
 
   #adminGate(sender: CommandSender | null): boolean {
-    if (sender === null || !isBotAdmin(this.#store.orm, sender.id)) {
+    if (sender === null) {
       return false;
     }
-    const timestamp = new Date().toISOString();
-    // Keep the panel list readable: refresh the display name of acting admins.
-    this.#store.orm
-      .insert(botAdmins)
-      .values({
-        telegramUserId: sender.id,
-        displayName: sender.name,
-        addedBy: 'telegram',
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      })
-      .onConflictDoUpdate({ target: botAdmins.telegramUserId, set: { displayName: sender.name, updatedAt: timestamp } })
-      .run();
-    return true;
+    // The whitelist is `telegram.admins`, read from the live configuration so a
+    // hot-applied list change takes effect on the next command.
+    const admins = this.#configStore.current().config.telegram.admins ?? [];
+    return admins.some((id) => BigInt(id) === sender.id);
   }
 
   #pause(telegramChatId: bigint, now: Date): string {
