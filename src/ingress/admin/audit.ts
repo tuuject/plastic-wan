@@ -118,6 +118,8 @@ interface MessageListRow {
   readonly reply_to_message_id: bigint | null;
   readonly media_group_id: string | null;
   readonly sender_display_name: string | null;
+  readonly sender_telegram_id: bigint | null;
+  readonly sender_telegram_type: string | null;
   readonly sender_username: string | null;
   readonly sender_is_bot: bigint | null;
   readonly revision_count: bigint;
@@ -600,7 +602,8 @@ export function getInvocation(orm: Orm, id: bigint): Record<string, unknown> | n
 const MESSAGE_SELECT = sql`SELECT m.id, m.telegram_message_id, m.telegram_date, m.received_at, m.visible, m.sent_by_bot,
               ch.telegram_chat_id, ch.type AS chat_type, ch.title AS chat_title, c.message_thread_id,
               r.revision_no, r.kind, r.text, r.caption, r.reply_to_message_id, r.media_group_id,
-              sd.display_name AS sender_display_name, sd.username AS sender_username, sd.is_bot AS sender_is_bot,
+              sd.display_name AS sender_display_name, sd.telegram_id AS sender_telegram_id,
+              sd.telegram_type AS sender_telegram_type, sd.username AS sender_username, sd.is_bot AS sender_is_bot,
               (SELECT COUNT(*) FROM message_revisions mr WHERE mr.message_id = m.id) AS revision_count,
               (SELECT COUNT(*) FROM media md WHERE md.revision_id = m.current_revision_id) AS media_count
        FROM messages m
@@ -648,7 +651,13 @@ export function listMessages(orm: Orm, query: ListQuery): Page<Record<string, un
     sender:
       row.sender_display_name === null
         ? null
-        : { display_name: row.sender_display_name, username: row.sender_username, is_bot: bit(row.sender_is_bot) },
+        : {
+            display_name: row.sender_display_name,
+            telegram_id: row.sender_telegram_id?.toString() ?? null,
+            telegram_type: row.sender_telegram_type,
+            username: row.sender_username,
+            is_bot: bit(row.sender_is_bot),
+          },
     revision_count: Number(row.revision_count),
     media_count: Number(row.media_count),
   }));
@@ -673,6 +682,8 @@ export function getMessage(orm: Orm, id: bigint): Record<string, unknown> | null
       serviceJson: messageRevisions.serviceJson,
       createdAt: messageRevisions.createdAt,
       senderDisplayName: senders.displayName,
+      senderTelegramId: senders.telegramId,
+      senderTelegramType: senders.telegramType,
       senderUsername: senders.username,
     })
     .from(messageRevisions)
@@ -728,7 +739,14 @@ export function getMessage(orm: Orm, id: bigint): Record<string, unknown> | null
       service_json: row.serviceJson,
       created_at: row.createdAt,
       sender:
-        row.senderDisplayName === null ? null : { display_name: row.senderDisplayName, username: row.senderUsername },
+        row.senderDisplayName === null
+          ? null
+          : {
+              display_name: row.senderDisplayName,
+              telegram_id: row.senderTelegramId?.toString() ?? null,
+              telegram_type: row.senderTelegramType,
+              username: row.senderUsername,
+            },
     })),
     media: mediaRows.map((row) => ({
       id: row.id.toString(),

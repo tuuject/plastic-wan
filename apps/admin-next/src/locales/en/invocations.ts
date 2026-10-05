@@ -176,6 +176,7 @@ export const invocations = {
       created: 'Created',
     },
     contextColumns: {
+      sender: 'Sender',
       section: 'Section',
       sequence: '#',
       message: 'Message',
@@ -192,7 +193,7 @@ export const invocations = {
       message: 'Message',
       revisions: 'Revisions',
       media: 'Media',
-      telegramId: 'Telegram ID',
+      telegramId: 'Telegram message ID',
       received: 'Received',
     },
     searchPlaceholder: 'Search text or caption',

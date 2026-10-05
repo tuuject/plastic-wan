@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import {
   ChatFilter,
   type ColumnSpec,
+  CopyableValue,
   CursorList,
   FilterToolbar,
   LIST_TABLE_CLASS,
@@ -75,9 +76,15 @@ export default function MessagesPage(): React.ReactElement {
             <span className="text-muted-foreground">—</span>
           )
         ) : (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="break-words">{row.sender.display_name}</span>
-            {row.sender.is_bot === true ? <ToneBadge tone="neutral">bot</ToneBadge> : null}
+          <div className="min-w-0 space-y-0.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="break-words">{row.sender.display_name}</span>
+              {row.sender.is_bot === true ? <ToneBadge tone="neutral">bot</ToneBadge> : null}
+            </div>
+            <CopyableValue
+              label={t(row.sender.telegram_type === 'sender_chat' ? 'common.telegramChatId' : 'common.telegramUserId')}
+              value={row.sender.telegram_id}
+            />
           </div>
         ),
     },

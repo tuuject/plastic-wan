@@ -35,6 +35,14 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
 - **Settings**：对手改配置使用 **Apply config file**，并查看 Saved 与 Running 状态及 `restart_required`。
 - **Developer**：按需记录模型调用的调试报文，或在确认后清除已有报文。
 
+## 查看和复制 Telegram ID
+
+在 **Messages** 的发送者姓名旁，可查看并复制 `Telegram user ID`；打开消息详情后，每条 Revision 也有相同入口。匿名或频道身份显示的是 `Telegram chat ID`，不能作为用户 ID 填入忽略名单。消息本身的 `Telegram message ID` 是另一项字段。
+
+在 Invocation 详情的 **Overview** 消息卡和 **Frozen context** 的 Sender 列，复制 `Telegram sender ID` 可取得当时冻结的发送者 ID。旧记录缺少 ID 时显示 `—`，不会猜测或填入当前资料。
+
+复制按钮只把数字 ID 放入剪贴板。浏览器拒绝剪贴板访问时，可以选中 ID 手动复制；复制不会修改 Bot 配置。用户 ID 可用于维护 `telegram.admins` 或 `ignored_user_ids`，成员自助忽略与恢复见 [Telegram 接入](telegram.md#自助忽略与恢复)。
+
 ## 界面语言
 
 界面支持英文与简体中文。顶栏右侧的语言切换按钮在两种语言间切换，立即生效并写入浏览器 `localStorage`（`admin-language`）；未手动选择时跟随浏览器语言（`zh` 开头解析为中文，否则英文）。技术名词（Invocation、Context、Prompt、Token 等）在中文界面中保留英文原文；后端返回的错误消息始终按服务端原文显示（错误码 + 消息）。

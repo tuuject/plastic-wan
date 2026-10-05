@@ -25,4 +25,10 @@ export const common: typeof commonEn = {
   off: '关闭',
   requestFailed: '请求失败',
   error: '错误',
+  telegramUserId: 'Telegram 用户 ID',
+  telegramChatId: 'Telegram 会话 ID',
+  telegramSenderId: 'Telegram 发送者 ID',
+  copyValue: '复制{{label}} {{value}}',
+  copied: '已复制到剪贴板',
+  copyFailed: '复制失败，请选中 ID 手动复制。',
 };

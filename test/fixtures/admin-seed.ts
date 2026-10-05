@@ -639,7 +639,7 @@ export function seedAdminFixture(store: SqliteStore): AdminSeedResult {
       sourceBucketId: null,
       omittedBefore: 0n,
       snapshotJson: JSON.stringify({
-        sender: { username: 'alice', name: 'Alice' },
+        sender: { id: '42', username: 'alice', name: 'Alice' },
         kind: 'photo',
         caption: 'edited caption',
         telegram_date: '2026-09-10T07:59:30.000Z',
@@ -659,7 +659,7 @@ export function seedAdminFixture(store: SqliteStore): AdminSeedResult {
       sourceBucketId: null,
       omittedBefore: 0n,
       snapshotJson: JSON.stringify({
-        sender: { username: 'alice', name: 'Alice' },
+        sender: { id: '42', username: 'alice', name: 'Alice' },
         kind: 'text',
         text: 'plain text message with a reply',
         telegram_date: '2026-09-10T08:00:05.000Z',
@@ -1014,6 +1014,29 @@ const EXTRA_MEMORIES = 28;
 export function seedAdminBulkRows(store: SqliteStore): AdminBulkSeedIds {
   const orm = store.orm;
   const iso = (offsetMinutes: number): string => new Date(Date.parse(BULK_BASE) + offsetMinutes * 60_000).toISOString();
+  orm
+    .insert(senders)
+    .values([
+      {
+        id: 5_002n,
+        telegramType: 'sender_chat',
+        telegramId: -1009876543210n,
+        displayName: 'Anonymous channel',
+        username: null,
+        isBot: false,
+        updatedAt: AT,
+      },
+      {
+        id: 5_003n,
+        telegramType: 'user',
+        telegramId: 43n,
+        displayName: 'Bob',
+        username: null,
+        isBot: false,
+        updatedAt: AT,
+      },
+    ])
+    .run();
 
   // --- 28 buckets + 28 invocations (24 completed / 4 failed) ---
   for (let index = 0; index < EXTRA_INVOCATIONS; index += 1) {
@@ -1087,7 +1110,7 @@ export function seedAdminBulkRows(store: SqliteStore): AdminBulkSeedIds {
         id: revisionId,
         messageId,
         revisionNo: 1n,
-        senderId: T.sender,
+        senderId: index === 25 ? 5_003n : index === 26 ? 5_002n : index === 27 ? null : T.sender,
         kind: 'text',
         text: `e2e message ${index + 1}`,
         caption: null,

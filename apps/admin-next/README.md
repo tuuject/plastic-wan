@@ -203,6 +203,12 @@ inset），图表无边框，列表项不要自己的 border。`LIST_TABLE_CLASS
 - `MonoValue({ value })`：可空等宽 ID（bigint 字符串字段保持字符串，不要
   转 `Number`）。
 
+### 可复制值 `copyable-value.tsx`
+
+- `CopyableValue({ label, value })`：显示标签与等宽字符串，通过图标按钮复制原始 `value`，不包含标签或其它修饰；`null` 显示 `—` 且不提供复制按钮。
+- ID 始终保持字符串，不能转 `Number`；按钮有包含标签和值的可访问名称，成功/失败使用本地化 toast，剪贴板不可用时保留手动选择复制的入口。不调用任何 API。
+- Messages / Revision 由页面按 `telegram_type` 区分用户与频道身份；Invocation 使用冻结快照的 `sender.id`，不回填当前资料。
+
 ### 二次确认弹窗 `confirm-dialog.tsx`
 
 - `ConfirmDialog({ open, onOpenChange, title, description?, confirmText,

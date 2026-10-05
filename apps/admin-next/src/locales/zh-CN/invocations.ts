@@ -171,6 +171,7 @@ export const invocations: typeof invocationsEn = {
       created: '创建时间',
     },
     contextColumns: {
+      sender: '发送者',
       section: '分段',
       sequence: '#',
       message: '消息',
@@ -187,7 +188,7 @@ export const invocations: typeof invocationsEn = {
       message: '消息',
       revisions: '修订',
       media: '媒体',
-      telegramId: 'Telegram ID',
+      telegramId: 'Telegram 消息 ID',
       received: '接收时间',
     },
     searchPlaceholder: '搜索文本或说明',

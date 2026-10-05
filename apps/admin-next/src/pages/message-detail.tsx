@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import {
   type ColumnSpec,
+  CopyableValue,
   DetailError,
   DetailSkeleton,
   JsonViewer,
@@ -80,7 +81,17 @@ function RevisionsTable({ message }: { readonly message: MessageDetail }): React
     {
       key: 'sender',
       title: t('invocations.messageDetail.revisionColumns.sender'),
-      render: (row) => <TextValue value={row.sender?.display_name ?? null} />,
+      render: (row) => (
+        <div className="min-w-0 space-y-0.5">
+          <TextValue value={row.sender?.display_name ?? null} />
+          {row.sender === null ? null : (
+            <CopyableValue
+              label={t(row.sender.telegram_type === 'sender_chat' ? 'common.telegramChatId' : 'common.telegramUserId')}
+              value={row.sender.telegram_id}
+            />
+          )}
+        </div>
+      ),
     },
     {
       key: 'text',

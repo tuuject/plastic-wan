@@ -100,6 +100,8 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 
 Invocation 列表与详情的统计按 `invocation_id` 查询 `model_calls` / `tool_calls`，依赖迁移 `023` 添加的关联索引。模型调用行包含大型请求/响应快照；缺少索引时，一页的多个统计子查询会反复扫描整张审计表，显著增加 TTFB，并阻塞与面板共用进程的 Bot。性能回归测试检查实际列表 SQL 的查询计划，避免用依赖机器速度的耗时阈值。
 
+`GET /messages` 的 `sender` 和 `GET /messages/:id` 的各条 Revision `sender` 包含 `telegram_id`（十进制字符串）与 `telegram_type`（`user` / `sender_chat`），身份不存在时整个 `sender` 为 `null`。这些 ID 来自 `senders.telegram_id`，不能用内部 sender 主键、Telegram message ID 或 username 替代；不经过 `Number` 转换。不新增数据库迁移或写端点。
+
 ## Chats 页端点
 
 `GET /chats` 返回配置管理视图，不是数据库中所有 Chat 的历史列表：
@@ -232,6 +234,8 @@ Settings 页有一张 `Configuration file` 卡片：显示 generation、active h
 Models 页是 Provider 与模型的管理器：顶部 “In use” 面板显示文件里的 agent 模型、vision 模型与 “Thinking effort” 下拉框（只列 agent 模型接受的级别，改动走 `PUT /thinking-level` 热应用；切换 agent 模型后提示 “Thinking effort reset to …”）；下方左栏 Provider 列表（搜索、Agent/Vision 在用徽章），右栏连接字段与模型列表。四个区域都是 `Panel`（In use、左栏、Connection、Models），列表项与表格都不再套自己的边框，保持「一个区域一个边框」。连接区里 builtin 只读展示 Pi 的供应商名与 baseUrl，custom 可编辑 `base_url` 与 `api`；API Key 与 header 值一律 `type="password"` 且没有查看按钮，提示 “Set - leave empty to keep it”；`base_url` 一改动，key 与所有 header 值立刻变成必填。模型区是一个 flush 面板：表格贴边、只保留标题下那条线，行内用图标标出 image / reasoning 能力（带 sr-only 文本），并显示 context / max output 与在用徽章，行末是 “Set as agent” “Set as vision” 与编辑 / 删除图标按钮。面板标题栏放 “Fetch models”（发现 + 元数据预览；连接字段还没应用时改用临时模式并要求再填一次 key）与 “Add by id”；编辑弹窗里元数据字段带来源标签与匹配来源；勾选 reasoning 后出现 thinking levels 复选框，全部不勾即沿用 Pi 默认；compat 三态放在折叠的 “Advanced” 区，只显示当前 API 适用的字段；`tool_schema_keywords` 三态（`Automatic` / `minimal`）放在 thinking levels 之后，对所有 API 都显示——它由运行时读取，不是 Pi 的 compat。草稿行对推理模型多显示一项 “thinking”（级别列表或 “Pi default”）。带 “N to confirm” 的草稿不能直接提交：字段齐全的可以用 “Accept listed values (N)” 一次接受列表里显示的值，有空缺的必须进编辑弹窗填写。Models 页的写入全部热应用，模型行不再出现待重启徽标；顶部横幅与 “Restart now” 按钮仍服务于其它 restart 字段（部署方未声明进程监督时隐藏），点击后界面会断开并轮询等待服务恢复。保存反馈在没有待重启字段时为 “Applied”；已有其它待重启字段时为 “Saved, restart required”。界面文案全部是英文，与面板其它页面一致。
 
 Tool session 详情默认打开 Overview 时间线：按时间合并冻结消息、Invocation 生命周期、Model Call、Tool Call 与 Agent transcript；消息正文和 `send` 参数中的发送内容直接展示，Tool 结果与完整参数按需展开。失败的 Model Call 同时展示稳定错误码，并可展开查看经密钥脱敏的完整 Provider 错误详情。Assistant 文本显式标注为私有推理，只有 `send` Tool 会发往 Telegram。
+
+Messages 列表与消息详情的 Revision 在发送者姓名旁显示可复制的 Telegram ID；个人账号标为 `Telegram user ID`，匿名/频道身份标为 `Telegram chat ID`。消息自己的那列明确标为 `Telegram message ID`。Invocation 的 Overview 消息卡与 Frozen context 的 Sender 列从冻结快照 `sender.id` 显示 `Telegram sender ID`，不拿当前用户资料替换历史快照；旧快照缺少 ID 时显示 `—` 并隐藏复制按钮。`CopyableValue` 共用剪贴板交互：复制成功/失败显示 toast；浏览器拒绝或不提供剪贴板时提示选中 ID 手动复制，复制不产生 Admin API 写请求。中英文文案保持同步。
 
 ## 数据表
 

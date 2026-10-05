@@ -8,6 +8,7 @@
 export { type ChartDatum, ChartPanel, type ChartSeries, TimeSeriesChart } from './chart-card';
 export { ChatFilter } from './chat-filter';
 export { ConfirmDialog, type ConfirmDialogProps } from './confirm-dialog';
+export { CopyableValue } from './copyable-value';
 export {
   CursorList,
   type CursorListProps,

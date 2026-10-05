@@ -27,4 +27,10 @@ export const common = {
   off: 'Off',
   requestFailed: 'Request failed',
   error: 'Error',
+  telegramUserId: 'Telegram user ID',
+  telegramChatId: 'Telegram chat ID',
+  telegramSenderId: 'Telegram sender ID',
+  copyValue: 'Copy {{label}} {{value}}',
+  copied: 'Copied to clipboard',
+  copyFailed: 'Copy failed. Select the ID and copy it manually.',
 };

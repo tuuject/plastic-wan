@@ -193,6 +193,8 @@ export interface InvocationDetail extends InvocationListItem {
 
 export interface SenderSummary {
   readonly display_name: string;
+  readonly telegram_id: string | null;
+  readonly telegram_type: string | null;
   readonly username: string | null;
   readonly is_bot?: boolean;
 }

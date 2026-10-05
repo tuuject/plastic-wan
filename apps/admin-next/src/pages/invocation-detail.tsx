@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   type BadgeSemantic,
   type ColumnSpec,
+  CopyableValue,
   DetailError,
   DetailSkeleton,
   JsonViewer,
@@ -295,6 +296,7 @@ function ContextMessageCard({ message }: { readonly message: ContextMessageEntry
             <span className="text-muted-foreground text-xs">@{username}</span>
           ) : null}
           {sentByBot ? <span className="text-muted-foreground text-xs">bot</span> : null}
+          <CopyableValue label={t('common.telegramSenderId')} value={stringField(sender, 'id')} />
         </>
       }
       extra={formatTime(stringField(snapshot, 'telegram_date'))}
@@ -855,6 +857,19 @@ function FrozenContextTab({ invocation }: { readonly invocation: InvocationDetai
       key: 'revision',
       title: t('invocations.invocationDetail.contextColumns.revision'),
       render: (row) => <MonoValue value={row.revision_id} />,
+    },
+    {
+      key: 'sender',
+      title: t('invocations.invocationDetail.contextColumns.sender'),
+      render: (row) => {
+        const sender = objectField(parseJsonObject(row.snapshot_json), 'sender');
+        return (
+          <div className="min-w-0 space-y-0.5">
+            <TextValue value={stringField(sender, 'name') ?? stringField(sender, 'username')} />
+            <CopyableValue label={t('common.telegramSenderId')} value={stringField(sender, 'id')} />
+          </div>
+        );
+      },
     },
     {
       key: 'omitted',

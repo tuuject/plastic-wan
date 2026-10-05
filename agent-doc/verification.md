@@ -145,7 +145,7 @@ node src/cli.ts serve --config dev-data/config.jsonc
 2. 首次打开 `http://127.0.0.1:<port>/` 渲染 “Create the administrator account” 表单（按钮 “Create account”），`GET /api/auth/session` 返回 `setup_required = true`。
 3. 创建账号后 Overview 显示 Invocations / Stored messages / Cached media analyses 统计卡，以及 Invocation states、Configured sticker index states、Top tools 表和 7d/30d Usage 图表。
 4. Tool session 详情六个 Tab（Overview / Tool calls / Model calls / Telegram sends / Agent transcript / Frozen context）各自渲染；默认落在 Overview 时间线。
-5. 消息搜索命中当前 Chat 的文本，详情展示全部 Revision。
+5. 消息搜索命中当前 Chat 的文本，详情展示全部 Revision；列表与 Revision 显示并复制发送者的 Telegram User ID（频道身份明确标为 Chat ID）。Invocation Overview 与 Frozen context 复制冻结快照的 sender ID，缺失 ID 不提供复制按钮；剪贴板失败明确提示手动复制。
 6. Bot sticker sets 页面明确说明只包含 `telegram.sticker_sets` 中配置的 Set，并按 Set 与 `index_state` 过滤后行数变化。
 7. Memories 页面按群聊与状态过滤，新建/编辑/删除记忆后列表刷新；剩余寿命超过 `memory_ttl_warning_days` 的记忆带 warning 标记。
 8. Overview 的 Bot status 卡片显示 `sleeping`/`awake` 与 `sleep_until`，睡眠时 `Wake now` 带二次确认；同时列出所有 `chat_pause` Chat 与暂停时间。
@@ -190,6 +190,7 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
      的过滤器真正改变结果集（各页可用过滤器以页面与 `02-lists-filters.e2e.ts` 为准）；
      `seedAdminBulkRows`（`test/fixtures/admin-seed.ts`）让每张列表的种子行数都超过
      默认每页 25 行，因此都会出现 `Load more` 并加载下一页；无跳页/总页数控件。
+     `13-sender-ids.e2e.ts` 验证 Messages、Revision、Invocation Overview/Frozen context 的发送者 ID 与真实剪贴板内容，覆盖无 username、匿名频道、缺失/旧快照、复制失败与窄屏暗色布局，确认复制不发写请求。
   4. Invocation 详情六个 Tab（Overview / Tool calls / Model calls / Telegram sends /
      Agent transcript / Frozen context）切换并渲染期望字段；失败调用显示稳定错误码
      （`provider_timeout`）且可展开脱敏详情（`sk-***`，无活密钥模式）；assistant 文本
