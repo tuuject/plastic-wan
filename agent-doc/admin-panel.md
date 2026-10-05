@@ -36,7 +36,22 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 - `POST /api/auth/logout` 按 Token 摘要删除 Session。
 - `POST /api/auth/credentials` 修改当前管理员用户名和密码，撤销该用户全部 Session（含当前）并签发新的 Cookie。
 
-跨站防护：所有写方法（`POST`/`PUT`/`DELETE`）校验 `Origin`，主机不匹配返回 403 `bad_origin`；审计路由只接受 `GET`，其它方法返回 405。
+跨站防护：所有写方法（`POST`/`PUT`/`DELETE`）校验 `Origin`——缺失（CLI、非浏览器客户端）放行，解析失败返回 400 `bad_origin`，主机不匹配返回 403 `bad_origin`；`Origin` 不参与读方法校验，`GET` 携带任意 `Origin` 仍正常处理。审计路由只接受 `GET`，其它方法返回 405。
+
+## 程序化 API 密钥
+
+`src/ingress/admin/api-keys.ts` 提供供 CLI 与评估工具使用的 API 密钥。密钥管理是 **Session-only** 的：只有面板登录会话能创建、列出与撤销密钥，密钥自身不能管理密钥。当前前端没有密钥管理页面，操作方式见[用户指南](../apps/docs/content/docs/configure/admin.md#api-密钥)。
+
+| 路由 | 语义 |
+| --- | --- |
+| `GET /api/api-keys` | 返回 `{ items }`，每项为 `id`/`name`/`prefix`/`created_at`/`last_used_at`/`revoked_at`，**永不返回明文** |
+| `POST /api/api-keys` | body 严格为 `{ name }`（1–80 字符，TypeBox 拒绝多余字段）；返回 `{ key, item }`，`key` 是 `pwk_` 加 32 字节随机值的 base64url（共 47 字符），**只在这一次响应里出现**，随后注册进 `SecretStore` 供日志与错误脱敏 |
+| `DELETE /api/api-keys/:id` | 置 `revoked_at` 永久禁用（保留行与元数据以便审计）；重复撤销或不存在返回 404 `not_found`，`:id` 非法返回 400 `invalid_id` |
+
+- 数据库只存 SHA-256 摘要与展示用 `prefix`（`pwk_` 加上前 8 个 base64url 字符），明文不可恢复；遗失只能撤销后重建。
+- 撤销立即生效（下一次鉴权即 401）。`last_used_at` 在密钥通过校验时更新——**包括随后因权限面被拒绝（403）的请求**；未通过校验（401）不更新。
+- 请求带 `Authorization` 头时**完全不读取面板 Cookie**：非 `Bearer` 前缀、空值、未知或已撤销的密钥统一返回 401 `unauthenticated`（固定消息，不区分原因），Bearer 前缀大小写不敏感；无效密钥也不会回退成有效 Session，有效 Session 也不能把密钥权限升级成完整面板权限。
+- 密钥的权限面固定为 `GET /api/invocations`、`GET /api/invocations/:id` 与 `POST /api/invocations/:id/replay`；其余一切——包括密钥管理自身、其它审计读端点、全部面板写端点与未知路由——都返回 403 `forbidden`（未知路由不泄露 404 差异）。
 
 ## API
 
@@ -78,7 +93,8 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 | `POST /auth/setup` / `POST /auth/login` | 首次建号与登录，约束见「认证」 |
 | `POST /auth/logout` / `POST /auth/credentials` | 改凭据会撤销该用户**全部** Session（含当前）并签发新 Cookie |
 | `PUT /developer` | 保存并热应用 `developer.record_model_payloads`，沿用配置 revision、校验与原子写入机制，见「Developer 页」 |
-| `DELETE /developer/model-payloads` | 分批置空历史 `model_calls.request_json` / `response_json`，保留所有审计行与关联；不执行 `VACUUM`，见「Developer 页」 |
+| `DELETE /developer/model-payloads` | 分批置空历史 `model_calls.request_json` / `response_json` / `replay_input_json`，保留所有审计行与关联；不执行 `VACUUM`，见「Developer 页」 |
+| `POST /api-keys` / `DELETE /api-keys/:id` | 仅面板 Session 可创建或撤销程序化密钥，见「程序化 API 密钥」 |
 | `POST /wake` | 删除持久化睡眠状态并唤醒 Scheduler；幂等，重复调用保持 `awake` |
 | `POST /cancel-ongoing-sessions` | 中断所有 running Invocation（经 Scheduler abort），同时 abort queued Invocation、过期 `collecting`/`queued` Bucket 与已 attach 未注入的 Bucket，被中断的运行不会把批次重新排队；已发出的 Telegram 消息不撤回 |
 | `POST` / `PUT` / `DELETE /memories[/:id]` | 创建时若 `(chat_id, message_thread_id)` 的 Conversation 不存在会自动建；`PUT` 至少要提供 `content` 或 `ttl_seconds` 之一 |
@@ -95,6 +111,7 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 | `POST /restart` | 界面上的 “Restart now”。部署方未声明 `PLASTICWAN_SUPERVISED=1` 时返回 409 `restart_unsupported`；磁盘配置权限或内容校验失败时返回 422 `config_invalid` 且不退出；成功返回 202 `{ status: 'restarting' }`，随后走优雅关闭并以退出码 75（`EX_TEMPFAIL`）退出，由外部监督重新拉起 |
 | `POST /config/apply` | 重新读取 `config.jsonc` 并把热更新白名单字段应用到运行中的进程。成功返回 200 `{ status: 'applied', applied, restart_required, outside_serve, generation, active_hash, file_hash }`；失败返回 422 `{ error, message }`，此时 active 配置不变，错误记录在 `GET /config/status` 的 `last_error` |
 | `DELETE /alarms/:id` | 只取消 Alarm 投影为 `pending` 的项目：waiting 任务变为 cancelled；completed+pending receipt 则只 suppress 投递、保留完成结果。`firing`（claimed）与其它终态返回 409 `alarm_not_pending`，不存在返回 404 `not_found`。取消记录当前面板管理员与 `admin_cancelled` 原因并唤醒 Scheduler |
+| `POST /invocations/:id/replay` | 用当前配置重放一次已结束的 Invocation，仅 Bearer API key 可调用（Session-only 请求返回 405），见「Invocation 重放」 |
 
 列表过滤同样只在少数端点上有效：`/alarms` 按 `state`(`pending`/`firing`/`fired`/`cancelled`)/`chat`/`target`，`/memories` 按 `chat`/`state`(`active`/`expired`/`long_ttl`)，`/stickers` 按 `set`/`state`，`/contexts` 只按 `chat`。记忆列表项带 `expired` 与 `long_ttl` 布尔标记，`long_ttl` 表示剩余寿命超过 `agent.memory_ttl_warning_days`。Alarm 列表把 `pending` 按 `scheduled_at, id` 升序置顶，非 pending 历史按最近状态时间/id 倒序。
 
@@ -174,9 +191,23 @@ Manage → Developer 独立管理调试选项。`GET /developer` 返回 `revisio
 
 `PUT /developer` 接受严格的 `{ record_model_payloads: boolean }`，必须带上述 revision 的 `If-Match`。通过 `ConfigReloader.writeAndApply` 保留 JSONC 注释、校验并原子写入，再热应用；revision、失败后文件/运行态分离等契约与其它配置端点一致。成功返回更新后的视图与 `apply`。页面立即保存开关，成功或失败后都刷新配置相关视图；应用失败时展示当前运行状态。
 
-`DELETE /developer/model-payloads` 需要登录和与其它写端点相同的 Origin 校验，但不依赖配置文件有效。页面必须先通过 `ConfirmDialog` 确认。后端固定清理开始时最大的 model call ID，按主键范围每批最多 100 行做集合更新，批次之间释放写锁并让出事件循环；不会把报文加载进 JS。仅将两列置为 `NULL`，不删除 Invocation、model/tool call、Telegram 发送、关联、Token/cache usage、费用、状态或错误。成功返回 `{ cleared_model_calls }`，没有报文时为 0；同一进程已有清除操作时返回 409 `clear_in_progress`。中途失败时已完成的批次保留，可安全重试。
+`DELETE /developer/model-payloads` 需要登录和与其它写端点相同的 Origin 校验，但不依赖配置文件有效。页面必须先通过 `ConfirmDialog` 确认。后端固定清理开始时最大的 model call ID，按主键范围每批最多 100 行做集合更新，批次之间释放写锁并让出事件循环；不会把报文加载进 JS。仅将三列（`request_json`、`response_json` 与重放用的 `replay_input_json`）置为 `NULL`，不删除 Invocation、model/tool call、Telegram 发送、关联、Token/cache usage、费用、状态或错误。成功返回 `{ cleared_model_calls }`，没有报文时为 0；同一进程已有清除操作时返回 409 `clear_in_progress`。中途失败时已完成的批次保留，可安全重试。
 
-开关不删除历史报文，清除也不关闭记录：开启记录时，新报文仍可继续写入。详情对空快照显示未记录或已清除。无数据库迁移，不自动清理历史；原有 retention 不变。清理只影响在线数据库，不修改既有备份；SQLite 释放的页可供复用，文件未必立即变小，端点不执行 `VACUUM`。
+开关不删除历史报文，清除也不关闭记录：开启记录时，新报文与首个 agent 请求的重放快照仍可继续写入；清除后这些 Invocation 的重放返回 `replay_input_unavailable`，不会回退到 `request_json` 或当前 Context。详情对空快照显示未记录或已清除。清除端点本身不需要数据库迁移，不自动清理历史；原有 retention 不变。清理只影响在线数据库，不修改既有备份；SQLite 释放的页可供复用，文件未必立即变小，端点不执行 `VACUUM`。
+
+## Invocation 重放
+
+`POST /api/invocations/:id/replay` 仅接受 Bearer API key，用**当前**配置重放一次已结束的 Invocation，由 `src/orchestration/replay.ts` 执行、`AdminServer` 只做转发（引擎未接线时 503 `replay_unavailable`）。请求体严格为 `{ system_prompt? }`：省略表示沿用快照里的 system prompt，空串是合法的显式覆盖；最多 65536 字符，body 上限 256 KiB，其它字段与超限分别返回 400 `invalid_body`、413 `body_too_large`。请求的 `AbortSignal` 直接传给引擎，客户端断开或进程关停都会中止重放。
+
+引擎行为（也是响应 `fidelity` 字段承诺的边界）：
+
+- **输入只有一个起点**：源 Invocation 首个 `role = 'agent'` model request 的归一化文本快照（`model_calls.replay_input_json`，迁移 `028`，见 [data-layer.md](data-layer.md#工具可见性审计)）。Invocation 未完成返回 409 `replay_source_unfinished`；缺快照（未开启记录、快照已清除或序列化失败）返回 409 `replay_input_unavailable`，快照解不开返回 409 `replay_input_invalid`——**不会**回退到 `request_json`、后续请求或当前 Conversation Context（不静默换起点）。
+- **模型用当前配置**：system prompt 默认来自快照（可覆盖），provider/model/thinking level 从当前 Chat 配置重新解析（`fidelity.model_selection: "current_chat_config"`，历史模型只记录在 `fidelity.historical_model`）；源 Chat 已不在配置中返回 409 `replay_chat_unconfigured`，当前模型不可用返回 409 `replay_model_unavailable`。
+- **工具面是合成层**：`send`、`zzz`、内存版记忆、内存版 Alarm 与 `image_generate` 有真实实现但只产生合成结果（`send` 只写入返回对象的 `outputs`，`image_generate` 返回 `replayed: false` 的假回执，`zzz` 不写睡眠状态）；`read` 读当前只读的 `system:///` 资源树；其余顶层工具与全部 MCP 工具一律 blocked。
+- **不复验、不重放的东西**：内联图片被丢弃（只记录 `omitted_images`）、运行期的热注入与后续请求不重放、`img_`/`stk_`/reply 引用不重新授权、每日预算与睡眠状态不参与、send 提醒关闭、历史时间只作为快照文本。模型请求是真实调用并**按 Provider 计费**，但重放不写生产审计与 `daily_usage`/budget（`fidelity.production_budgets: "not_charged"`）；模型请求关闭自动重试（`maxRetries: 0`，当前 `fidelity` 未单列这一差异）。
+- **限流与预算**：同一进程同时只允许一个重放，运行中再次请求返回 429 `replay_busy`；轮次取 `min(20, agent.rate_limits.turns_per_injection)`，wall clock 取 `min(240s, agent.context.max_wall_clock_seconds)`；工具调用尝试固定上限 128（含未知工具名与非法参数，在 `tool_execution_start` 即计数）；trace 投影累计上限 1 MiB。超限以 `turn_budget`/`timeout`/`tool_budget`/`trace_limit` 等 `error` 结束，结构照常返回。
+
+响应（`version: 1`）包含 `replay_id`、来源 ID（invocation/model call/conversation/chat/thread）、实际使用的模型、`started_at`/`finished_at`/`latency_ms`、`completion_reason`、`responded`/`send_count`/`outputs`、`tool_calls`（含结果与 `is_error`）、`usage`（`model_calls` 是实际模型请求次数）、`trace`、`error` 与 `fidelity`。`fidelity.dispatches[].mode`（`synthetic`/`live_read`/`blocked`）是**调用走的分派路线，不是执行结果**：`blocked` 在拒绝抛出之前记录、`live_read` 在读取尝试之前记录，成功与否看 `tool_calls`。`trace` 是循环内每条消息的脱敏 JSON 投影（同一内容可能重复出现），1 MiB 上限约束的是投影总量，不代表完整 Provider 响应被完整封顶保留。模型决定不发言（0 个 `send`）是正常成功结果。
 
 ## 静态资源
 
@@ -247,6 +278,8 @@ Messages 列表与消息详情的 Revision 在发送者姓名旁显示可复制�
 | `admin_sessions` | Token SHA-256 摘要、所属用户、创建/过期/最近活动时间 |
 
 `admin_sessions.user_id` 级联删除；`admin_sessions_expiry_idx` 支撑过期清理。两张表不参与 `purgeExpiredData` 的在线保留窗口（`retention.online_days`）——管理员账号不是会话数据。
+
+迁移 `src/store/migrations/027_admin_api_keys.sql` 建立 `admin_api_keys`：每行一个程序化 API key，`token_hash` 只存明文的 SHA-256 摘要（UNIQUE），`prefix` 是展示用前缀，`created_at`/`last_used_at`/`revoked_at` 记录生命周期；撤销设置 `revoked_at` 而不删除行，`last_used_at` 在每次通过鉴权时刷新（包括随后被权限面拒绝的请求）。该表与 `admin_users`/`admin_sessions` 一样不参与在线保留清理。语义见「程序化 API 密钥」。
 
 Bot 管理员白名单不再是数据库表：迁移 `src/store/migrations/026_drop_bot_admins.sql` 删除了旧表 `bot_admins`（迁移 `008` 引入），唯一事实源是配置文件里的 `telegram.admins`，旧表内容用 `scripts/migrate-admins.ts` 搬迁。Admin Panel「Bot admins」页面经配置写端点增删该列表并热应用。Bot 管理员决定谁能执行 `/pause`、`/resume`、`/model` 与 `/cut_topic`，与面板登录账号无关。
 

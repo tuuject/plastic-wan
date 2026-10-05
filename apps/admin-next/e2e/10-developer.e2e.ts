@@ -8,6 +8,8 @@ test('Developer persists recording preferences and confirms payload-only cleanup
   await page.getByRole('link', { name: 'Developer', exact: true }).click();
   const recording = page.getByRole('switch', { name: 'Record raw request payloads for debugging' });
   await expect(recording).not.toBeChecked();
+  const replayWarning = 'Replay inputs are also deleted; affected historical Invocations can no longer be replayed.';
+  await expect(page.getByText(replayWarning, { exact: false })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('developer-desktop.png'), fullPage: true });
   await recording.click();
   await expect(recording).toBeChecked();
@@ -22,6 +24,7 @@ test('Developer persists recording preferences and confirms payload-only cleanup
 
   await page.getByRole('button', { name: 'Clear previously recorded raw request payloads', exact: true }).click();
   const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toContainText(replayWarning);
   await expect(dialog).toContainText('The database file is not compacted.');
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(await (await page.request.get(detailUrl)).json()).toEqual(before);

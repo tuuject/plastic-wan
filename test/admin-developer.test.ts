@@ -181,10 +181,29 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
         errorDetail: 'retain error',
         requestJson: index % 2 === 0 ? '{"large":"request"}' : null,
         responseJson: '{"status":500}',
+        replayInputJson: index % 5 === 0 ? '{"replay":"mixed"}' : null,
         createdAt: new Date().toISOString(),
       })),
     )
     .run();
+  const replayOnly = f.store.orm
+    .insert(modelCalls)
+    .values(
+      Array.from({ length: 6 }, (_, index) => ({
+        role: 'doctor',
+        provider: 'fixture',
+        model: 'replay-only',
+        attempt: 1n,
+        state: 'success',
+        requestJson: null,
+        responseJson: null,
+        replayInputJson: JSON.stringify({ replay: index }),
+        createdAt: new Date().toISOString(),
+      })),
+    )
+    .returning({ id: modelCalls.id })
+    .all();
+  expect(replayOnly).toHaveLength(6);
   const before = f.store.orm.select().from(modelCalls).all();
   const snapshot = () => ({
     invocations: f.store.db.prepare('SELECT * FROM invocations ORDER BY id').all(),
@@ -206,6 +225,7 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
       attempt: 1n,
       state: 'success',
       requestJson: '{"new":true}',
+      replayInputJson: '{"new":"replay"}',
       createdAt: new Date().toISOString(),
     })
     .returning({ id: modelCalls.id })
@@ -213,13 +233,21 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
   const response = await clearing;
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({
-    cleared_model_calls: before.filter((row) => row.requestJson !== null || row.responseJson !== null).length,
+    cleared_model_calls: before.filter(
+      (row) => row.requestJson !== null || row.responseJson !== null || row.replayInputJson !== null,
+    ).length,
   });
   const after = f.store.orm.select().from(modelCalls).all();
   expect(after.filter((row) => row.id !== newCall.id)).toEqual(
-    before.map((row) => ({ ...row, requestJson: null, responseJson: null })),
+    before.map((row) => ({ ...row, requestJson: null, responseJson: null, replayInputJson: null })),
   );
   expect(after.find((row) => row.id === newCall.id)?.requestJson).toBe('{"new":true}');
+  expect(after.find((row) => row.id === newCall.id)?.replayInputJson).toBe('{"new":"replay"}');
+  // Only the concurrent write keeps a replay snapshot: every row the sweep was
+  // bounded to — mixed payloads and replay-only rows alike — lost all three.
+  expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM model_calls WHERE replay_input_json IS NOT NULL').get()).toEqual(
+    { n: 1n },
+  );
   expect(snapshot()).toEqual(auditBefore);
   expect(f.store.db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   expect(getInvocation(f.store.orm, seed.invocationA)).toMatchObject({
@@ -228,6 +256,9 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
   expect(await (await f.call('/developer/model-payloads', { method: 'DELETE' })).json()).toEqual({
     cleared_model_calls: 1,
   });
+  expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM model_calls WHERE replay_input_json IS NOT NULL').get()).toEqual(
+    { n: 0n },
+  );
   expect(await (await f.call('/developer/model-payloads', { method: 'DELETE' })).json()).toEqual({
     cleared_model_calls: 0,
   });

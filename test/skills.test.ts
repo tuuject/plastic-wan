@@ -18,6 +18,7 @@ import { KeyedSemaphore } from '../src/platform/concurrency.ts';
 import { loadConfig } from '../src/platform/config.ts';
 import type { RuntimeConfigurationStore } from '../src/platform/runtime-config.ts';
 import { SqliteStore } from '../src/store/database.ts';
+import { createToolAudit } from '../src/store/tool-audit.ts';
 import { capability, createExecuteTool } from '../src/capabilities/execute-tool.ts';
 import type { MediaDownloader } from '../src/capabilities/media/media-download.ts';
 import { MediaService } from '../src/capabilities/media/media.ts';
@@ -31,7 +32,6 @@ import { TelegramIngestion } from '../src/ingress/telegram-ingestion.ts';
 import {
   bundledSystemResources,
   fauxRegistry,
-  renderInvocationContext,
   testConfigJsonc,
   testConfigStore,
   writeTestConfig,
@@ -511,8 +511,7 @@ test('execute does not dispatch a capability once the run is aborted', async () 
     true,
   );
   const tool = createExecuteTool({
-    store,
-    context: renderInvocationContext(store, setup.loaded.config, setup.invocationId),
+    audit: createToolAudit(store, setup.invocationId),
     capabilities: [sideEffect],
   });
   const controller = new AbortController();

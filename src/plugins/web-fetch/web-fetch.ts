@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { Defuddle } from 'defuddle/node';
 import Type from 'typebox';
-import type { ToolAudit } from '../plugin.ts';
+import type { ToolAudit } from '../../store/tool-audit.ts';
 
 const Strict = { additionalProperties: false } as const;
 const WebFetchInputSchema = Type.Object(

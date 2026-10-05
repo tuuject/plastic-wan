@@ -337,6 +337,7 @@ export const modelCalls = sqliteTable(
     toolsJson: text('tools_json'),
     requestJson: text('request_json'),
     responseJson: text('response_json'),
+    replayInputJson: text('replay_input_json'),
     createdAt: text('created_at').notNull(),
     finishedAt: text('finished_at'),
   },
@@ -537,6 +538,21 @@ export const adminSessions = sqliteTable(
   },
   (t) => [index('admin_sessions_expiry_idx').on(t.expiresAt)],
 );
+
+/**
+ * Programmatic Admin API keys. `token_hash` is the SHA-256 digest of the
+ * plaintext `pwk_` key, which is shown once at creation and never stored;
+ * `prefix` is display-only metadata for the panel.
+ */
+export const adminApiKeys = sqliteTable('admin_api_keys', {
+  id: sqliteBigIntId('id').primaryKey(),
+  name: text('name').notNull(),
+  prefix: text('prefix').notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  createdAt: text('created_at').notNull(),
+  lastUsedAt: text('last_used_at'),
+  revokedAt: text('revoked_at'),
+});
 
 export const memories = sqliteTable(
   'memories',

@@ -18,6 +18,8 @@ pnpm test test/context-store.test.ts test/context-gc.test.ts test/context-hot-in
 pnpm test test/context-send.test.ts test/cut-topic.test.ts
 pnpm test test/agent-runtime.test.ts test/model-request-audit.test.ts
 pnpm test test/admin-developer.test.ts
+pnpm test test/admin-api-keys.test.ts test/invocation-cli.test.ts
+pnpm test test/replay.test.ts test/replay-input.test.ts test/replay-tools.test.ts test/replay-http.test.ts
 pnpm test test/skills.test.ts test/system-resources.test.ts test/plugins.test.ts
 pnpm test test/media.test.ts test/stickers.test.ts
 pnpm test test/mcp.test.ts test/web-fetch.test.ts
@@ -59,7 +61,13 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `system-resources.test.ts` | Skill manifest 校验与启动失败、插件 Skill 目录挂载与重名拒绝、`system:///` 绝对/相对 URI 解析、越界与非 Markdown 拒绝、32 KiB 截断、progressive disclosure fixture |
 | `plugins.test.ts` | 插件 id 校验与重名拒绝、内置插件清单装配 |
 | `model-request-audit.test.ts` | `request_json` 中 inline base64 图片被结构化摘要替换、其余请求数据保留、重复清洗幂等 |
-| `admin-developer.test.ts` | 旧配置缺省关闭、显式开关与 JSONC 持久化/热应用、权限/Origin/revision/类型校验、应用失败后文件与运行态分离、分批清除只置空报文且保留审计/关联/统计、重复清除与并发写入 |
+| `admin-developer.test.ts` | 旧配置缺省关闭、显式开关与 JSONC 持久化/热应用、权限/Origin/revision/类型校验、应用失败后文件与运行态分离、分批清除只置空报文（含 replay 快照）且保留审计/关联/统计、重复清除与并发写入 |
+| `admin-api-keys.test.ts` | 一次性 `pwk_` 明文与 SHA-256 存储、Session-only 管理边界（TypeBox、Bearer 不能管理密钥）、撤销立即生效且保留元数据、Bearer 只覆盖 invocation list/get/replay（其它审计、写端点与未知路由 403）、Authorization 存在时不回退 Cookie、replay 端点只接受 `system_prompt`（空串合法、64Ki 字符与 256 KiB body 上限）、engine 错误映射与失败脱敏、malformed Origin 返回 400 而非 500 且 Origin 只守写 |
+| `invocation-cli.test.ts` | `plasticwan-debug` 的 list/get/replay 请求形状与输出契约、`--api-key` 覆盖环境变量、replay 失败仍保留 stdout 文档、退出码、重定向/超时/超大响应拒绝、stdin 无 EOF（空流或部分输入）超时后非零退出且无 HTTP 请求、参数与端点校验、任何输出（含服务端回显与 JSON 转义形式）都不泄露 key |
+| `replay-input.test.ts` | 快照编解码往返（含 tool call 与 tool result）、内联图片丢弃与计数、版本与重复定义拒绝、快照随 Invocation 级联与无 Invocation model call 的保留窗口一起删除 |
+| `replay-tools.test.ts` | 合成 send（text/image/sticker）与参数保留、内存记忆/闹钟（空起步）、`image_generate` 假回执、`zzz` 不写全局状态、`read` 只读当前 `system:///` 并拒绝越界、未知顶层工具与 MCP 全部 blocked、`execute` 拒绝原语与无生产执行器、search/help 限快照注册表、abort 后不再 dispatch、工具层不引入生产接线 |
+| `replay.test.ts` | 首个请求的历史输入 + 当前模型、无生产写入、空 system prompt 覆盖与无 send 成功、来源守卫（未完成/缺快照/非法历史/不回退后续调用）、从 toolResult 尾部续跑、共享模型闸门与并发 429、关停与取消释放、context/turn/tool/trace/wall-clock 预算、脱敏覆盖任意参数键名与 dispatch 元数据 |
+| `replay-http.test.ts` | CLI 子进程 → 回环 AdminServer → ReplayRunner → Faux Provider 的真实 HTTP 链路，覆盖 Prompt 覆盖、当前模型、合成 send/记忆/Alarm、MCP 阻断、生产表不变（密钥使用时间除外）、缺失快照的 409/非零退出与撤销密钥的 401 |
 | `media.test.ts` | 图片标准化、缓存和 Vision reasoning、换 vision 模型后按新 `analysis_version` 重新分析 |
 | `stickers.test.ts` | Set 同步、结构化视觉 Tool Call、索引、搜索、发送 |
 | `media-image.test.ts` | 视频 Sticker 只按 WebM 解码（其他容器冒充时拒绝）、真实 WebM 仍能取帧、解压超过 8 MiB 的 TGS 在转换前拒绝；本机没有 ffmpeg/ffprobe 时整组跳过 |
@@ -180,8 +188,8 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
 - 用例文件名以 `.e2e.ts` 结尾、目录独立，Playwright `testMatch` 单独声明，**不会**被
   vitest 与 `pnpm test` 发现；`workers: 1` 串行执行，端口随机，不与固定端口冲突。
 - `01-routes.e2e.ts` 与多个套件按路由断言可见文案（英文 locale）：修改面板文案或
-  locale 键值时必须同步这些断言，并运行受影响套件（如 `pnpm run admin:test:e2e 01-routes`）——
-  `pnpm test` 与 `pnpm run check` 都不覆盖浏览器层。
+  locale 键值时必须同步这些断言，并运行受影响套件（如 `pnpm run admin:test:e2e 00-auth 01-routes`）——
+  `pnpm test` 与 `pnpm run check` 都不覆盖浏览器层。筛选依赖共享 Session 的套件时必须同时包含 `00-auth`：每轮夹具都是全新数据库，跳过建号与登录会停在首次设置页；旧 storageState 不能复用。
 - 覆盖契约（全部断言真实 UI 状态，非仅文案）：
   1. 认证：setup → shell；错误密码表单内显示 `invalid_credentials` 且 URL 不变；
      登出回登录页；会话撤销后受保护请求 401 → 登录页且无错误屏。
@@ -211,9 +219,22 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
      跨站 Origin 的写请求返回 403 `bad_origin`。
   9. Chats：字符串 ID 安全整数边界、新增 Chat 热应用、删除与 Topic 范围的保存/运行态分离、模型/thinking 热切与恢复继承、
      后台 refetch 不升级编辑和删除确认的原始 revision、保存后应用失败的双视图刷新与 Settings 恢复、移动端暗色布局。
+  10. API key（`14-api-keys.e2e.ts`，API-only、自带登录，可单独运行）：Session 创建只返回一次明文与 `prefix`，列表不回显明文；Bearer 覆盖 invocation list 与详情，其它路由（即使同时带 Cookie）403；撤销立即 401 且列表保留 `revoked_at`；`Authorization` 存在时不回退 Cookie；未接线的 replay 返回 503 `replay_unavailable`。
 
 - 首次运行 E2E 前需要 `pnpm --filter plasticwan-admin-next exec playwright install chromium`；浏览器安装失败时套件无法
   执行，属于环境前置问题而非代码缺陷。
+
+## Invocation 重放与 API 密钥冒烟（无 UI）
+
+面板没有 API 密钥与重放的界面入口；在已登录的浏览器控制台或调试客户端上验证，不需要 Telegram：
+
+1. 在面板登录后的浏览器控制台创建 key（同源 `fetch('/api/api-keys', { method: 'POST', … })`，步骤见 [admin-panel.md](admin-panel.md#程序化-api-密钥)）：创建响应是明文唯一一次出现；`GET /api/api-keys` 只返回元数据；`DELETE /api/api-keys/:id` 撤销后同一 key 的下一次请求立即 401。
+2. 用该 key 与 `plasticwan-debug invocation list/get` 能读到 Invocation；访问 `/api/overview`、`/api/memories`、`/api/api-keys` 等返回 403，同时带有效 Session Cookie 也不改变结果与权限面。
+3. 对一条已开启 `developer.record_model_payloads` 且仍保留快照的已完成 Invocation 执行 `plasticwan-debug invocation replay <id> --json`（真实调用模型、按 Provider 计费）：返回 `version: 1`、来源 ID、当前 Chat 模型与 `fidelity.limits`/`dispatches`；`send` 只出现在 `outputs`，不产生 `telegram_sends`；不新增 tool call、发送或预算行，后续 `daily_usage` 不含这次调用。
+4. 对未开启记录、快照已清除或未完成的 Invocation 重放：分别得到 409（`replay_input_unavailable`、`replay_source_unfinished`）或 CLI 退出码 1；确认没有回退读取 `request_json`、后续 model call 或当前 Context。
+5. 重放运行期间再次发起重放得到 429 `replay_busy`；模型请求失败或超限时响应仍带完整结构，`error` 非空。
+
+这些检查替代不了真实 Telegram 验收：重放不会发送消息，也不覆盖调度、引用与配额路径。
 
 ## 真实 Telegram 验收
 
@@ -341,6 +362,7 @@ telegram_updates
 ```bash
 git diff --check
 pnpm run check
+pnpm cli:check
 pnpm test
 ```
 

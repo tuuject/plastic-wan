@@ -117,7 +117,11 @@ Alarm 是 `plugin_id = 'alarm'` 的任务投影。`long_tasks.created_by_user_id
 
 仅在 `developer.record_model_payloads = true` 时保存模型调用的原始报文快照，缺省关闭。`model_calls.request_json` 不复制 `data:image/*;base64,...` 图片正文；对应字符串替换为包含 MIME、Base64 字符数、解码字节数与 SHA-256 的结构化摘要，真实 Provider 请求不受影响。现有 `response_json` 捕获的是 HTTP status 快照，并非完整流式响应体。关闭仅跳过这些调试快照，正常模型调用、工具、usage、费用、状态与错误审计照常记录；旧快照不自动删除。
 
-Developer 清除端点按主键范围分批把 `model_calls.request_json` / `response_json` 置为 `NULL`，不删除行、不改变关联或 retention，也不触碰 `telegram_sends` 的同名字段。两列本来就可空，无需新增迁移；释放空间供 SQLite 复用，不保证文件立即缩小，不执行 `VACUUM`，不修改旧备份。
+同一开关还保存**重放输入快照**：`model_calls.replay_input_json`（迁移 `028`）在本次运行**首个** agent model request 发出前写入，内容是 provider 无关的文本快照（system prompt、编码后的消息序列、当次请求的工具与能力定义、被丢弃的内联图片数）；不含图片正文；序列化失败时不写入且不打断运行。它不是 `request_json` 的别名：重放只读这一列，缺快照时显式失败，不会回退到 `request_json`、后续请求或当前 Context（见 [admin-panel.md](admin-panel.md#invocation-重放)）。
+
+Developer 清除端点按主键范围分批把 `model_calls.request_json` / `response_json` / `replay_input_json` 置为 `NULL`，不删除行、不改变关联或 retention，也不触碰 `telegram_sends` 的同名字段。三列本来就可空，清除本身不需要新增迁移；释放空间供 SQLite 复用，不保证文件立即缩小，不执行 `VACUUM`，不修改旧备份。
+
+`replay_input_json` 没有独立的清理规则：它随 `model_calls` 行删除——Invocation 级联清理带走属于自己的调用行，无 Invocation 的 model call（如 Doctor）按各自的保留窗口过期。
 
 `side_effect_started` 和 `outcome_unknown` 用于阻止不可逆 Tool 的盲目重试。审计记录应保留稳定错误码；不要依赖解析自由文本错误。
 
@@ -133,7 +137,7 @@ Developer 清除端点按主键范围分批把 `model_calls.request_json` / `res
 
 MCP 只有 `mcp_server_state` 一张自己的表（Server 状态、Tool registry hash、重连次数、错误码）；Tool 调用复用 `tool_calls`，没有自己的调用配额。
 
-Admin 侧的 `admin_users`/`admin_sessions` 语义见 [admin-panel.md](admin-panel.md#数据表)。密码明文和 Session Token 原文都不入库；`admin_users` 与 `admin_sessions` 不参与在线保留清理（管理员账号不是会话数据），过期 Session 由 `AdminAuth` 在认证、新建 Session 和服务启动时删除。`chat_pause` 记录 `/pause` 暂停的 Chat，`conversation_context_cutoffs` 记录 `/cut_topic` 的每 Conversation 上下文切点（Telegram message ID，迁移 `019` 前为按 Chat 的 `chat_context_cutoffs`，迁移时复制到该 Chat 的每个 Conversation）：切点同时决定新批次 history 的下界，并在同一步中断该 Conversation 正在运行的 Invocation、清空被切 Topic 的 Conversation Context（保留行打上 `evicted_at`、删除其 `context_refs`、`head_seq` 推到 `next_seq`），否则切点只会裁掉渲染用的 history，模型仍然能从 transcript 里看到全部旧消息。`evicted_at` 是保留窗口的权威条件之一：读取一律附带 `evicted_at IS NULL`，这样运行中的 Invocation 持有的陈旧 `head_seq` 也无法把淘汰行读回来。
+Admin 侧的 `admin_users`/`admin_sessions` 语义见 [admin-panel.md](admin-panel.md#数据表)。密码明文和 Session Token 原文都不入库；`admin_users` 与 `admin_sessions` 不参与在线保留清理（管理员账号不是会话数据），过期 Session 由 `AdminAuth` 在认证、新建 Session 和服务启动时删除。`admin_api_keys`（迁移 `027`）保存程序化 API key 的 SHA-256 摘要与生命周期（`prefix`/`created_at`/`last_used_at`/`revoked_at`），明文只在创建响应中出现一次；该表同样不参与在线保留清理。`chat_pause` 记录 `/pause` 暂停的 Chat，`conversation_context_cutoffs` 记录 `/cut_topic` 的每 Conversation 上下文切点（Telegram message ID，迁移 `019` 前为按 Chat 的 `chat_context_cutoffs`，迁移时复制到该 Chat 的每个 Conversation）：切点同时决定新批次 history 的下界，并在同一步中断该 Conversation 正在运行的 Invocation、清空被切 Topic 的 Conversation Context（保留行打上 `evicted_at`、删除其 `context_refs`、`head_seq` 推到 `next_seq`），否则切点只会裁掉渲染用的 history，模型仍然能从 transcript 里看到全部旧消息。`evicted_at` 是保留窗口的权威条件之一：读取一律附带 `evicted_at IS NULL`，这样运行中的 Invocation 持有的陈旧 `head_seq` 也无法把淘汰行读回来。
 
 ## ID 与 JSON 规则
 

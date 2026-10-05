@@ -1,9 +1,8 @@
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import Type from 'typebox';
 import Compile from 'typebox/compile';
-import type { InvocationContext } from '../platform/invocation-context.ts';
 import { safeJson, truncateUtf8 } from '../platform/truncate.ts';
-import { finishToolCall, rejectToolCall, type SqliteStore, startToolCall } from '../store/database.ts';
+import type { ToolAudit } from '../store/tool-audit.ts';
 
 const Strict = { additionalProperties: false } as const;
 const ToolNamePattern = '^[A-Za-z0-9_-]{1,128}$';
@@ -64,8 +63,7 @@ export function capability(tool: AgentTool, sideEffect: boolean): ExecutableCapa
 }
 
 export interface ExecuteToolOptions {
-  readonly store: SqliteStore;
-  readonly context: InvocationContext;
+  readonly audit: ToolAudit;
   readonly capabilities: readonly ExecutableCapability[];
 }
 
@@ -101,7 +99,6 @@ export function createExecuteTool(
     parameters: ExecuteInputSchema,
     executionMode: 'sequential',
     execute: async (toolCallId, input, signal) => {
-      const startedAt = performance.now();
       const parsed = parseExecuteRequest(input);
       if ('error' in parsed) {
         rejectExecute(options, toolCallId, input, 'invalid_arguments');
@@ -109,12 +106,12 @@ export function createExecuteTool(
       }
       const request = parsed.request;
       if (request.action === 'search') {
-        return executeSearch(options, registered, toolCallId, request.query, startedAt);
+        return executeSearch(options, registered, toolCallId, request.query);
       }
       if (request.action === 'help') {
-        return executeHelp(options, registered, toolCallId, request.tool, startedAt);
+        return executeHelp(options, registered, toolCallId, request.tool);
       }
-      return executeCall(options, registered, toolCallId, request.tool, request.input, signal, startedAt);
+      return executeCall(options, registered, toolCallId, request.tool, request.input, signal);
     },
   };
 }
@@ -149,19 +146,11 @@ function executeSearch(
   registered: Map<string, RegisteredCapability>,
   toolCallId: string,
   query: string,
-  startedAt: number,
 ): AgentToolResult<ExecuteToolDetails> {
-  const auditId = startToolCall(
-    options.store.orm,
-    options.context.invocationId,
-    toolCallId,
-    'execute',
-    JSON.stringify({ action: 'search', query }),
-    false,
-  );
+  const audit = options.audit.start(toolCallId, 'execute', JSON.stringify({ action: 'search', query }), false);
   const results = searchCapabilities([...registered.values()], query);
   const text = JSON.stringify(results);
-  finishToolCall(options.store.orm, auditId, 'success', text, null, { startedAt, pendingOnly: true });
+  audit.succeed(text);
   return {
     content: [{ type: 'text' as const, text }],
     details: { action: 'search', matches: results.length },
@@ -173,21 +162,13 @@ function executeHelp(
   registered: Map<string, RegisteredCapability>,
   toolCallId: string,
   toolName: string,
-  startedAt: number,
 ): AgentToolResult<ExecuteToolDetails> {
   const target = registered.get(toolName);
   if (target === undefined) {
     rejectExecute(options, toolCallId, { action: 'help', tool: toolName }, unknownCapabilityCode(toolName));
     throw new Error(unknownCapabilityMessage(toolName));
   }
-  const auditId = startToolCall(
-    options.store.orm,
-    options.context.invocationId,
-    toolCallId,
-    'execute',
-    JSON.stringify({ action: 'help', tool: toolName }),
-    false,
-  );
+  const audit = options.audit.start(toolCallId, 'execute', JSON.stringify({ action: 'help', tool: toolName }), false);
   const payload = {
     name: target.entry.tool.name,
     label: target.entry.tool.label,
@@ -195,7 +176,7 @@ function executeHelp(
     parameters: target.entry.tool.parameters,
   };
   const text = truncateUtf8(JSON.stringify(payload), RESULT_MAX_BYTES);
-  finishToolCall(options.store.orm, auditId, 'success', text, null, { startedAt, pendingOnly: true });
+  audit.succeed(text);
   return {
     content: [{ type: 'text' as const, text }],
     details: { action: 'help', tool: toolName },
@@ -209,7 +190,6 @@ async function executeCall(
   toolName: string,
   callInput: Record<string, unknown>,
   signal: AbortSignal | undefined,
-  startedAt: number,
 ): Promise<AgentToolResult<ExecuteToolDetails>> {
   const argumentsJson = safeJson({ action: 'call', tool: toolName, input: callInput }, INPUT_MAX_BYTES);
   const target = registered.get(toolName);
@@ -230,14 +210,7 @@ async function executeCall(
     rejectExecute(options, toolCallId, { action: 'call', tool: toolName, input: callInput }, 'invalid_arguments');
     throw new Error(`execute.call input does not match the schema of ${toolName}`);
   }
-  const auditId = startToolCall(
-    options.store.orm,
-    options.context.invocationId,
-    toolCallId,
-    'execute',
-    argumentsJson,
-    target.entry.sideEffect,
-  );
+  const audit = options.audit.start(toolCallId, 'execute', argumentsJson, target.entry.sideEffect);
   try {
     // Capabilities are not required to honour the signal (alarm ignores it), so
     // a call queued before the run was cancelled must stop here, before any side
@@ -256,14 +229,14 @@ async function executeCall(
       ...(Object.keys(refs).length === 0 ? {} : { refs }),
     });
     const text = truncateUtf8(envelope, RESULT_MAX_BYTES);
-    finishToolCall(options.store.orm, auditId, 'success', text, null, { startedAt, pendingOnly: true });
+    audit.succeed(text);
     return {
       content: [{ type: 'text' as const, text }],
       details: { action: 'call', tool: toolName, ...(Object.keys(refs).length === 0 ? {} : { refs }) },
     };
   } catch (error) {
     const code = signal?.aborted === true ? 'aborted' : 'capability_error';
-    finishToolCall(options.store.orm, auditId, 'error', null, code, { startedAt, pendingOnly: true });
+    audit.fail(code);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`execute.call ${toolName} failed: ${message}`);
   }
@@ -272,9 +245,7 @@ async function executeCall(
 function rejectExecute(options: ExecuteToolOptions, toolCallId: string, input: unknown, errorCode: string): void {
   const toolName =
     typeof input === 'object' && input !== null && 'tool' in input && typeof input.tool === 'string' ? input.tool : '';
-  rejectToolCall(
-    options.store.orm,
-    options.context.invocationId,
+  options.audit.reject(
     toolCallId,
     'execute',
     safeJson(input, INPUT_MAX_BYTES),

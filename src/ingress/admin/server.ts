@@ -10,12 +10,12 @@ import type { ImageService } from '../../image/service.ts';
 import type { BucketScheduler } from '../../orchestration/scheduler.ts';
 import { assertConfigPermissions, loadConfig, type RawConfig } from '../../platform/config.ts';
 import { type ConfigEdit, readConfigRevision } from '../../platform/config-file.ts';
+import type { ConfigErrorCode, ConfigReloader } from '../../platform/config-reload.ts';
 import {
   listOpenRouterImageEndpoints,
   listOpenRouterImageModels,
   validImageModelId,
 } from '../../platform/image-models.ts';
-import type { ConfigErrorCode, ConfigReloader } from '../../platform/config-reload.ts';
 import type { AgentModelOption, AgentModelSwitcher } from '../../platform/model-switch.ts';
 import type { RuntimeConfigurationStore } from '../../platform/runtime-config.ts';
 import type { SecretStore } from '../../platform/secrets.ts';
@@ -23,6 +23,7 @@ import { cancelAlarm, listAlarms, parseAlarmId } from '../../plugins/alarm/admin
 import type { SqliteStore } from '../../store/database.ts';
 import { LongTaskService } from '../../store/long-tasks.ts';
 import { wakeFromSleep } from '../../store/sleep.ts';
+import { authenticateApiKey, createApiKey, listApiKeys, parseCreateApiKeyBody, revokeApiKey } from './api-keys.ts';
 import {
   AdminQueryError,
   getConversationContext,
@@ -90,8 +91,17 @@ import {
 
 const SESSION_COOKIE = 'plasticwan_admin';
 const MAX_BODY_BYTES = 8_192;
+/** Replay bodies carry an optional prompt; JSON overhead stays well under this. */
+const REPLAY_BODY_MAX_BYTES = 256 * 1_024;
+const MAX_SYSTEM_PROMPT_LENGTH = 65_536;
 const imageCredentialSourcesValidator = Compile(
   Type.Record(Type.String({ pattern: '^[a-zA-Z0-9_-]{1,80}$' }), Type.String({ minLength: 1, maxLength: 80 })),
+);
+const replayBodyValidator = Compile(
+  Type.Object(
+    { system_prompt: Type.Optional(Type.String({ maxLength: MAX_SYSTEM_PROMPT_LENGTH })) },
+    { additionalProperties: false },
+  ),
 );
 const SECURITY_HEADERS: Record<string, string> = {
   'x-content-type-options': 'nosniff',
@@ -119,6 +129,15 @@ const CONTENT_TYPES: Record<string, string> = {
 
 export type AdminConfig = NonNullable<RawConfig['admin']>;
 
+/**
+ * Body accepted by `POST /api/invocations/:id/replay`. Only the optional
+ * system prompt override is accepted; omitted means the engine keeps the
+ * invocation's recorded prompt.
+ */
+export interface ReplayInvocationInput {
+  readonly system_prompt?: string;
+}
+
 export interface AdminServerOptions {
   readonly store: SqliteStore;
   readonly configStore: RuntimeConfigurationStore;
@@ -134,6 +153,8 @@ export interface AdminServerOptions {
   readonly imageBridge?: ImageBridge;
   /** Starts the graceful shutdown that exits with the restart code. */
   readonly requestRestart?: () => void;
+  /** Replays one audit invocation; absent when the agent runtime is not wired. */
+  readonly replayInvocation?: (id: bigint, input: ReplayInvocationInput, signal: AbortSignal) => Promise<unknown>;
 }
 
 /** Model reference problems are user errors; everything else is a conflict. */
@@ -168,6 +189,9 @@ export class AdminServer {
   readonly #configReloader: ConfigReloader | undefined;
   readonly #secrets: SecretStore | undefined;
   readonly #requestRestart: (() => void) | undefined;
+  readonly #replayInvocation:
+    | ((id: bigint, input: ReplayInvocationInput, signal: AbortSignal) => Promise<unknown>)
+    | undefined;
   readonly #staticDir: string;
   readonly #memoryWarningDays: number;
   #server: ServerType | undefined;
@@ -197,6 +221,7 @@ export class AdminServer {
     this.#configReloader = options.configReloader;
     this.#secrets = options.secrets;
     this.#requestRestart = options.requestRestart;
+    this.#replayInvocation = options.replayInvocation;
     this.#staticDir = resolve(
       admin.static_dir ?? join(import.meta.dirname, '..', '..', '..', 'apps', 'admin-next', 'dist'),
     );
@@ -265,13 +290,13 @@ export class AdminServer {
       return await this.#staticAsset(request, segments);
     } catch (error) {
       if (error instanceof AdminAuthError || error instanceof AdminQueryError) {
-        return json({ error: error.code, message: error.message }, error.status);
+        return json({ error: this.#redact(error.code), message: this.#redact(error.message) }, error.status);
       }
       console.error(
         JSON.stringify({
           event: 'admin_request_failed',
-          path: url.pathname,
-          error: error instanceof Error ? error.message : String(error),
+          path: this.#redact(url.pathname),
+          error: this.#redact(error),
           at: new Date().toISOString(),
         }),
       );
@@ -290,11 +315,24 @@ export class AdminServer {
     }
     if (request.method === 'POST' || request.method === 'PUT' || request.method === 'DELETE') {
       const origin = request.headers.get('origin');
-      if (origin !== null && new URL(origin).host !== url.host) {
-        return json({ error: 'bad_origin', message: 'Cross-origin admin requests are rejected' }, 403);
+      if (origin !== null) {
+        const originHost = parseOriginHost(origin);
+        if (originHost === null) {
+          return json({ error: 'bad_origin', message: 'Origin header is malformed' }, 400);
+        }
+        if (originHost !== url.host) {
+          return json({ error: 'bad_origin', message: 'Cross-origin admin requests are rejected' }, 403);
+        }
       }
     }
     const route = segments.join('/');
+    // An Authorization header makes the request a programmatic API-key call:
+    // it never falls back to the panel cookie, and a key only covers the
+    // invocation read/replay surface (see #apiKeyRequest).
+    const authorization = request.headers.get('authorization');
+    if (authorization !== null) {
+      return await this.#apiKeyRequest(request, url, segments, authorization);
+    }
     if (route === 'auth/session' && request.method === 'GET') {
       const session = this.#auth.authenticate(readCookie(request, SESSION_COOKIE));
       return json({
@@ -323,6 +361,20 @@ export class AdminServer {
     if (route === 'auth/credentials' && request.method === 'POST') {
       const token = await this.#auth.changeCredentials(session.userId, await readCredentials(request));
       return json({ status: 'ok' }, 200, this.#sessionCookie(request, url, token));
+    }
+    // API key management is session-only: an Authorization header never
+    // reaches this block, so a key cannot mint, list, or revoke keys.
+    if (route === 'api-keys' && request.method === 'GET') {
+      return json({ items: listApiKeys(this.#store.orm) });
+    }
+    if (route === 'api-keys' && request.method === 'POST') {
+      const created = createApiKey(this.#store.orm, parseCreateApiKeyBody(await readJsonObject(request)));
+      this.#secrets?.remember(created.key);
+      return json(created);
+    }
+    if (segments[0] === 'api-keys' && segments.length === 2 && request.method === 'DELETE') {
+      revokeApiKey(this.#store.orm, parseId(segments[1] ?? '', 'id'));
+      return json({ status: 'ok' });
     }
     if (route === 'cancel-ongoing-sessions' && request.method === 'POST') {
       // Close the database side first: an aborted run releases its un-injected
@@ -353,15 +405,7 @@ export class AdminServer {
     if (route === 'developer') {
       return await this.#developer(request);
     }
-    const query: ListQuery = {
-      limit: url.searchParams.get('limit'),
-      cursor: url.searchParams.get('cursor'),
-      state: url.searchParams.get('state'),
-      chat: url.searchParams.get('chat'),
-      set: url.searchParams.get('set'),
-      search: url.searchParams.get('search'),
-      target: url.searchParams.get('target'),
-    };
+    const query = listQuery(url);
     if (route === 'memories' && request.method === 'GET') {
       return json(listMemories(this.#store.orm, query, this.#memoryWarningDays));
     }
@@ -573,6 +617,59 @@ export class AdminServer {
       return json(listStickers(this.#store.orm, query));
     }
     return json({ error: 'not_found', message: 'Unknown admin API route' }, 404);
+  }
+
+  /**
+   * The programmatic surface of an `Authorization: Bearer pwk_…` request. The
+   * key authenticates the caller, but the surface is fixed: list invocations,
+   * read one, or replay one. Every other route is refused — including API key
+   * management and credential/config writes — and a panel cookie is never
+   * consulted when this header is present.
+   */
+  async #apiKeyRequest(
+    request: Request,
+    url: URL,
+    segments: readonly string[],
+    authorization: string,
+  ): Promise<Response> {
+    const scheme = 'Bearer ';
+    const token =
+      authorization.slice(0, scheme.length).toLowerCase() === scheme.toLowerCase()
+        ? authorization.slice(scheme.length).trim()
+        : '';
+    if (token.length === 0 || authenticateApiKey(this.#store.orm, token) === null) {
+      return json({ error: 'unauthenticated', message: 'A valid API key is required' }, 401);
+    }
+    this.#secrets?.remember(token);
+    if (segments[0] !== 'invocations') {
+      return json({ error: 'forbidden', message: 'API keys may only access invocation routes' }, 403);
+    }
+    if (segments.length === 1 && request.method === 'GET') {
+      return json(listInvocations(this.#store.orm, listQuery(url)));
+    }
+    if (segments.length === 2 && request.method === 'GET') {
+      const found = getInvocation(this.#store.orm, parseId(segments[1] ?? '', 'id'));
+      return found === null ? json({ error: 'not_found', message: 'Invocation does not exist' }, 404) : json(found);
+    }
+    if (segments.length === 3 && segments[2] === 'replay' && request.method === 'POST') {
+      return await this.#replayInvocationRoute(request, parseId(segments[1] ?? '', 'id'));
+    }
+    return json({ error: 'forbidden', message: 'API keys may only access invocation routes' }, 403);
+  }
+
+  /**
+   * Replay is dispatched to the host-supplied engine; the AdminServer neither
+   * reads invocation state nor runs a model itself. Domain failures surface as
+   * AdminQueryError thrown by the engine and are rendered by `handle`; anything
+   * else becomes the generic internal error, so no engine detail leaks.
+   */
+  async #replayInvocationRoute(request: Request, invocationId: bigint): Promise<Response> {
+    const replay = this.#replayInvocation;
+    if (replay === undefined) {
+      return json({ error: 'replay_unavailable', message: 'Invocation replay is not wired' }, 503);
+    }
+    const input = parseReplayInput(await readJsonObject(request, REPLAY_BODY_MAX_BYTES));
+    return json(await replay(invocationId, input, request.signal));
   }
 
   /**
@@ -1203,6 +1300,38 @@ function decodeSegments(segments: readonly string[]): string[] | null {
   } catch {
     return null;
   }
+}
+
+/** Extracts the host of an Origin header; `null` when it is not a valid origin. */
+function parseOriginHost(origin: string): string | null {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return null;
+  }
+}
+
+function listQuery(url: URL): ListQuery {
+  return {
+    limit: url.searchParams.get('limit'),
+    cursor: url.searchParams.get('cursor'),
+    state: url.searchParams.get('state'),
+    chat: url.searchParams.get('chat'),
+    set: url.searchParams.get('set'),
+    search: url.searchParams.get('search'),
+    target: url.searchParams.get('target'),
+  };
+}
+
+function parseReplayInput(value: unknown): ReplayInvocationInput {
+  if (!replayBodyValidator.Check(value)) {
+    throw new AdminQueryError(
+      'invalid_body',
+      `Request body must be an object with only an optional system_prompt of at most ${MAX_SYSTEM_PROMPT_LENGTH} characters`,
+    );
+  }
+  const record = value as { system_prompt?: string };
+  return record.system_prompt === undefined ? {} : { system_prompt: record.system_prompt };
 }
 
 /**
