@@ -23,7 +23,7 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 
 ## 运行时配置热更新
 
-`serve` 启动时读取一次配置，但白名单字段可以在运行中应用：Admin Panel 的「Apply config file」按钮（`POST /api/config/apply`）、Models / Chats 页保存，以及 Telegram `/model` 都会重新读取 `config.jsonc` 并把白名单字段的变化发布到当前进程。没有文件系统 watcher——手改文件后必须在面板上点一次应用（或执行 `/model`）才生效。
+`serve` 启动时读取一次配置，但白名单字段可以在运行中应用：Admin Panel 的「Apply config file」按钮（`POST /api/config/apply`）、Models / Chats 页保存，以及 Telegram `/model`、`/ignoreme`、`/unignoreme` 都会重新读取 `config.jsonc` 并把白名单字段的变化发布到当前进程。没有文件系统 watcher——手改文件后必须显式应用才生效。
 
 热更新白名单（`src/platform/config-diff.ts` 是唯一定义处，未列出的字段一律按 restart 处理；新增字段默认 restart）：
 
@@ -36,6 +36,7 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 | `telegram.chats`（**新增** Chat，整项 `{ id, … }`） | 立即生效：ingestion 白名单、参与策略注册表与 `resolveChatConfig` 都读发布后的配置并按代数重建/直读，无需重启。删除 Chat、已有 Chat 的其它字段修改与 Topic 范围仍是 restart |
 | `telegram.chats[<id>].instructions_file` | 仅限两边都存在的 Chat；路径或内容变化都算 |
 | `telegram.chats[<id>].provider` / `.model` / `.thinking_level` | 仅限两边都存在的 Chat 的按群模型覆盖（语义与校验见「Telegram Chat 与 Topic」）；删除 Chat 仍是 restart |
+| `telegram.chats[<id>].ignored_user_ids` | 增删字段、替换或清空列表都热应用；下一条实时/启动追赶 Update 使用新名单，不追溯删除已有 Message 或 Context。成员可用 `/ignoreme`、`/unignoreme` 写入或移除自己的 ID |
 | `telegram.admins` | Bot 管理员白名单（`/pause`、`/resume`、`/model`、`/cut_topic`、`/allowlist` 的唯一事实源）；运行期判定直接读运行中的配置，下一次命令执行就用新列表 |
 | `providers.<alias>`（新增、删除、改 kind）与 `providers.<alias>.*`（连接字段、模型列表） | Provider 的每个字段都热更新：reload 按新定义重建注册表。模型列表变化只替换该 Provider 的模型；连接字段变化会重新解析它的 SecretRef |
 | `vision.provider`、`vision.model`、`vision.max_output_tokens` | 下一次 vision 分析使用新模型；`max_output_tokens` 在构建注册表时与新模型的上限一起校验，并和模型一起在分析开始时从同一份快照取出，等待中发布的新值只影响之后的分析 |
@@ -43,7 +44,7 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 
 `outside_serve` 字段（`serve` 从不读取，下一次 `backup` 生效，既不算已应用也不算待重启）：`paths.backups`、`retention.online_days`、`retention.backup_copies`。
 
-其它所有路径都是 restart：改动会写进文件，但要重启才生效，包括 `telegram.token`、`data_dir`、`paths.database`、`admin.*`、`mcp.servers`、`telegram.sticker_sets`、Chat allowlist 的删除与已有 Chat 的修改（新增 Chat 是热变更），以及 `instructions_file`、`provider`、`model`、`thinking_level` 以外的 Chat 字段，以及 `vision` 的 `max_concurrency`、`background_sticker_concurrency`、`prompt_version`、`daily_budget`。
+其它所有路径都是 restart：改动会写进文件，但要重启才生效，包括 `telegram.token`、`data_dir`、`paths.database`、`admin.*`、`mcp.servers`、`telegram.sticker_sets`、Chat allowlist 的删除与已有 Chat 的修改（新增 Chat 是热变更），以及 `instructions_file`、`provider`、`model`、`thinking_level`、`ignored_user_ids` 以外的 Chat 字段，以及 `vision` 的 `max_concurrency`、`background_sticker_concurrency`、`prompt_version`、`daily_budget`。
 
 应用流程与语义：
 
@@ -51,14 +52,14 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 - candidate 的 restart 字段保留当前进程的值，热字段与 outside_serve 字段取文件的值。因此组合可能不合法：文件本身合法但与待重启字段冲突时返回 `candidate_invalid`，错误信息会列出待重启路径；文件仍然留在磁盘上，重启后与那些字段一起生效。
 - 待重启字段记录在 `ConfigReloader.status().restartRequired`；之后只改热字段再应用也不会清空它。
 - 模型定义的修改或删除按热更新处理，但文件与 candidate 都必须保留有效引用（全局 agent、Chat 覆盖、vision）。例如删除待重启移除的 Chat 所引用的模型时，即使文件本身合法，candidate 仍会拒绝；先清除/切换该 Chat 覆盖或重启后再删除。运行中的 Invocation 继续用启动时的快照。
-- Provider 的重建规则：连接字段（custom 的 `base_url`/`api`/`api_key`/`headers`，builtin 的 `provider`/`api_key`）没变的 Provider 沿用进程里已有的对象，只替换模型列表，不重新解析 SecretRef；新增或连接字段变化的 Provider 按启动时的路径完整构建，重新解析它的 SecretRef。`command` 引用因此会在 reload 时执行一次进程——与重启同效，且 reload 只由管理员的显式操作触发。builtin 仍然用 Pi 的 provider id 发请求，只有注册键是 alias。
+- Provider 的重建规则：连接字段（custom 的 `base_url`/`api`/`api_key`/`headers`，builtin 的 `provider`/`api_key`）没变的 Provider 沿用进程里已有的对象，只替换模型列表，不重新解析 SecretRef；新增或连接字段变化的 Provider 按启动时的路径完整构建，重新解析它的 SecretRef。`command` 引用因此会在 reload 时执行一次进程——与重启同效；reload 由显式应用或配置写入触发，包含成员的自助忽略命令。builtin 仍然用 Pi 的 provider id 发请求，只有注册键是 alias。
 - 发布是原子的：新注册表在发布前没有任何人能看到，注册表与配置在同一个同步块里发布。已经开始的 Invocation 与运行中 attach 的 Bucket 继续用运行开始时冻结的快照（快照同时带着模型与 Provider 连接），下一次 Invocation 才用新配置；`invocations.config_hash` 在 `queued → running` 时写入该快照的 active hash。
 - vision 分析钉住它开始时的快照：`read_image` 的聊天分析与后台 Sticker 索引在开始时取一次当前配置，用那一份的模型与缓存版本（`<provider>/<model>/prompt-<prompt_version>`）完成这次分析并写入 `media_analyses`。换 vision 模型后聊天图片按新版本重新分析；已经索引的 Sticker 不会重跑，见 [telegram-agent-flow.md](telegram-agent-flow.md)。
 - Prompt 变化（`agent.system_prompt_file` 或 `instructions_file`）改变稳定系统提示的哈希，该 Conversation 的 Context 在下一次运行时重建，见「Conversation Context」。
 - 每次成功应用输出 `config_reloaded` 日志事件，带 `generation`、`active_hash`、`file_hash`、`applied`、`restart_required`、`outside_serve`；失败输出 `config_reload_failed`（`code` 与脱敏后的 `error`）。失败时 active 配置与注册表都不变，错误记录在 `ConfigReloader.status().lastError`；`code` 为 `config_invalid`、`candidate_invalid`、`model_unusable`（注册模型缺失或不可用，含 vision 输出上限越界、MCP/Tool 注册表容量不足）或 `secret_unresolved`（新增或连接字段变化的 Provider 无法解析 SecretRef）。全局默认与每个 Chat 的生效组合都须通过校验；删除仍被引用的模型会在文件或 candidate 校验阶段被拒绝，任一失败都不会部分发布。
 - `/model` 在写入文件之前就被拒绝时（模型不存在、不可用，或文件无法写入），没有发生 reload：只输出 `model_switch_failed` 日志并把错误返回给调用方，不改变 `lastError`。写入之后应用失败才按上一条处理。
 - 没有任何待重启字段时 `active_hash` 等于文件哈希，可以直接与 `check-config` 的输出比对。只改注释或格式、或者把待重启字段改回原值后应用，都会发布一次内容相同的配置，让 `active_hash` 跟上新的文件哈希。有待重启字段时，`active_hash` 是 candidate RawConfig 的 JSON 序列化的 SHA-256；只有 restart 字段变化时它保持不变。
-- 写入配置文件（`/model`）由 `src/platform/config-file.ts` 完成：只替换 JSONC 的值，保留注释与格式；先写同目录临时文件并完整校验，再 rename 覆盖，因此读者只会看到旧文件或完整合法的新文件。配置文件是符号链接时拒绝写入（`config_symlink`）。带 Secret 的写入（`secretEdit`）把明文写进 key jar，文件里只留条目名，见 [SecretRef](#secretref)。
+- 写入配置文件（如 `/model`、`/ignoreme`、`/unignoreme`）由 `src/platform/config-file.ts` 完成：只替换 JSONC 的值，保留注释与格式；先写同目录临时文件并完整校验，再 rename 覆盖，因此读者只会看到旧文件或完整合法的新文件。配置文件是符号链接时拒绝写入（`config_symlink`）。带 Secret 的写入（`secretEdit`）把明文写进 key jar，文件里只留条目名，见 [SecretRef](#secretref)。
 - Admin「Chats」管理 Chat/Topic 白名单与按 Chat 的模型覆盖：列表分别显示磁盘 Saved settings 与进程 Running settings。新增/删除 Chat 和 Topic 范围修改保存后等待重启，已有 active Chat 的模型/thinking 覆盖热应用；删除不会清除消息、Context 或审计历史，最后一个配置 Chat 不允许删除。编辑只更新这四项管理字段，不覆盖 `instructions_file`、参与策略等其它设置。
 - 端点、状态码与响应体见 [admin-panel.md](admin-panel.md#api)。
 
@@ -156,10 +157,10 @@ command SecretRef：
 - 配置 `topic_ids`：只允许列出的正整数 Topic ID；未列出的 Topic 被审计为拒绝。
 - Forum Topic 按 `(chat_id, message_thread_id)` 隔离 Conversation。
 - `participation`（可选）配置此 Chat 的定时活跃时段、触发关键词与注意力窗口，见「定时活跃（participation）」。
-- `ignored_user_ids`（可选）是此 Chat 内要忽略的 Telegram User ID 数组；必须是唯一的正安全整数。匹配 `message.from.id` 的新消息和编辑只保留 Update 审计，不写入 Message、Revision、Media 或 Bucket，不能作为命令触发，也不会进入实时或启动追赶 Invocation 的 Context。其他成员消息中若 Reply 快照指向被忽略用户，该引用同样不保存。该字段不匹配 `sender_chat` 身份，修改后必须重启；已入库的旧消息不会追溯删除。
+- `ignored_user_ids`（可选）是此 Chat 内要忽略的 Telegram User ID 数组；必须是唯一的正安全整数。匹配 `message.from.id` 的新消息和编辑只保留 Update 审计，不写入 Message、Revision、Media 或 Bucket，也不会进入实时或启动追赶 Invocation 的 Context。命令同样被丢弃，只有实时新消息中的 `/ignoreme`、`/unignoreme` 会放行，供成员自行加入或取消忽略；两者只改发送者自己的 ID，作用于当前 Chat 的全部 Topic。其他成员消息中若 Reply 快照指向被忽略用户，该引用同样不保存。该字段不匹配 `sender_chat` 身份，支持热应用；已入库的旧消息不会追溯删除。
 - `instructions_file`（可选）指向该 Chat 的附加系统提示 Markdown 文件，缺省时为空；提示内容不提供额外授权。
 - `provider` / `model` / `thinking_level`（可选）是此 Chat 的按群模型覆盖：全局 `agent.provider` / `agent.model` / `agent.thinking_level` 作为默认值，缺省逐项继承（`resolveAgentSettings`）。`provider` 与 `model` 必须成对出现，只写其一会被 `check-config` 直接拒绝；`thinking_level` 可独立覆盖，不必随模型一起写。生效模型按「Chat 覆盖 → 全局默认」逐项解析，该组合必须合法：覆盖模型必须在该 Provider 下存在、支持 text，`thinking_level` 必须被解析后的生效模型接受，否则严格报错。每次 Invocation 从运行快照按此解析模型与思考档；运行中的 Invocation（含 attach 的批次）沿用启动时冻结的快照，下一次 Invocation 才用新值。Topic 共用所在 Chat 的设置，私聊同理；群迁移按已有 `resolveChatConfig` 规则解析到迁移前 Chat 的配置。
-- 修改 Chat 的 allowlist、Topic、增删 Chat 或其它字段后必须重启，并比较 `check-config` 与 `serve_started` 的 `config_hash`；已有 Chat 的 `instructions_file` 与 `provider`/`model`/`thinking_level` 属于热更新白名单，见「运行时配置热更新」。
+- 删除 Chat、修改 Topic 或其它非热字段后必须重启，并比较 `check-config` 与 `serve_started` 的 `config_hash`；新增 Chat、已有 Chat 的 `instructions_file`、`provider`/`model`/`thinking_level` 与 `ignored_user_ids` 属于热更新白名单，见「运行时配置热更新」。
 - Chat 没有每日 Invocation 次数上限，也不设 Token 硬上限；Token 只按 Chat 归属统计，唯一硬上限是全局 `agent.daily_budget.max_tokens`。
 - `admins`（可选）是 Telegram User ID 数组，Bot 管理员白名单的唯一事实源；只有管理员能执行 `/pause`、`/resume`、`/model`、`/cut_topic`。属热更新白名单，见「运行时配置热更新」。
 

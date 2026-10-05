@@ -42,7 +42,7 @@ config/
 node src/cli.ts check-config --config /path/to/config.jsonc
 ```
 
-没有文件监视器。Prompt、Provider、全局/既有 Chat 的模型覆盖、新增 Chat、部分预算和并发可以通过 Admin 的 **Apply config file**、Chats 页或 `/model` 热应用；删除 Chat、Topic 范围、MCP、Admin、数据路径和多数其他字段必须重启。`retention` 与备份路径只在下一次 `backup` 使用。
+没有文件监视器。Prompt、Provider、全局/既有 Chat 的模型覆盖、`ignored_user_ids`、新增 Chat、部分预算和并发可以通过 Admin 的 **Apply config file**、Chats 页或 `/model` 热应用；删除 Chat、Topic 范围、MCP、Admin、数据路径和多数其他字段必须重启。成员的 `/ignoreme`、`/unignoreme` 会保存自己的忽略设置并立即应用配置文件。`retention` 与备份路径只在下一次 `backup` 使用。
 
 成功热应用看 `config_reloaded` 的 `active_hash` 与 `file_hash`；重启后看 `serve_started.config_hash` 与 `check-config` 输出是否相同。详细字段见 [配置参考](../reference/config.md)。
 

@@ -141,6 +141,20 @@ describe('parseBotCommand', () => {
     });
   });
 
+  test('recognizes self-ignore commands, matching mentions and ignores supplied user IDs', () => {
+    expect(
+      parseBotCommand(message(commandUpdate(1, 1, '/IgnoreMe@plasticwan_test_bot 99').message), BOT_USERNAME),
+    ).toEqual({
+      name: 'ignoreme',
+      messageId: 1n,
+    });
+    expect(parseBotCommand(message(commandUpdate(1, 1, '/UNIGNOREME').message), BOT_USERNAME)).toEqual({
+      name: 'unignoreme',
+      messageId: 1n,
+    });
+    expect(parseBotCommand(message(commandUpdate(1, 1, '/unignoreme@other_bot').message), BOT_USERNAME)).toBeNull();
+  });
+
   test('captures the optional /model argument', async () => {
     expect(parseBotCommand(message(commandUpdate(1, 1, '/model').message), BOT_USERNAME)).toEqual({
       name: 'model',
@@ -254,6 +268,18 @@ describe('registerBotCommands', () => {
 });
 
 describe('bot command service', () => {
+  test('self-ignore controls reject unknown identity and report an unavailable reloader', async () => {
+    const { store, commands } = await setup();
+    try {
+      for (const name of ['ignoreme', 'unignoreme'] as const) {
+        expect(await commands.run({ name }, 123456789n, null)).toContain('无法识别发送者');
+        expect(await commands.run({ name }, 123456789n, ALICE)).toBe('运行时配置应用不可用。');
+      }
+    } finally {
+      store.close();
+    }
+  });
+
   test('pause expires pending buckets, aborts queued invocations and blocks new buckets', async () => {
     const { store, ingestion, scheduler, commands } = await setup();
     const start = new Date('2026-08-15T00:00:00.000Z');
@@ -790,6 +816,31 @@ describe('bot command service', () => {
 });
 
 describe('ingestion command interception', () => {
+  test.each(['ignoreme', 'unignoreme'])('does not allow /%s to bypass Chat or Topic restrictions', async (name) => {
+    const { store, ingestion } = await setup((config) => {
+      config.telegram.chats[0]!.topic_ids = [8];
+      config.telegram.chats[0]!.ignored_user_ids = [42];
+    });
+    try {
+      expect(ingestion.ingest(commandUpdate(1, 10, `/${name}`, 987654321), FIXED_NOW)).toEqual({});
+      const topic = commandUpdate(2, 11, `/${name}`);
+      topic.message = {
+        ...topic.message!,
+        chat: { id: 123456789, type: 'supergroup', title: 'Forum', is_forum: true },
+        is_topic_message: true,
+        message_thread_id: 9,
+      };
+      expect(ingestion.ingest(topic, FIXED_NOW)).toEqual({});
+      expect(
+        store.db
+          .prepare<[], { rejection_reason: string }>('SELECT rejection_reason FROM telegram_updates ORDER BY update_id')
+          .all(),
+      ).toEqual([{ rejection_reason: 'chat_not_allowed' }, { rejection_reason: 'topic_not_allowed' }]);
+    } finally {
+      store.close();
+    }
+  });
+
   test('commands are audited but not stored and never create buckets', async () => {
     const { store, ingestion } = await setup();
     const result = ingestion.ingest(commandUpdate(1, 10, '/status'), FIXED_NOW);

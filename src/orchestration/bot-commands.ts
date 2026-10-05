@@ -14,7 +14,16 @@ import type { ConversationRuntime } from './conversation-runtime.ts';
 import type { BucketScheduler } from './scheduler.ts';
 
 export interface ParsedCommand {
-  readonly name: 'pause' | 'resume' | 'status' | 'model' | 'cut_topic' | 'whoami' | 'allowlist';
+  readonly name:
+    | 'pause'
+    | 'resume'
+    | 'status'
+    | 'model'
+    | 'cut_topic'
+    | 'whoami'
+    | 'allowlist'
+    | 'ignoreme'
+    | 'unignoreme';
   readonly argument?: string;
   /** Telegram message ID of the command message itself; used by cut_topic. */
   readonly messageId?: bigint;
@@ -68,6 +77,8 @@ const COMMAND_NAMES: Record<string, true> = {
   cut_topic: true,
   whoami: true,
   allowlist: true,
+  ignoreme: true,
+  unignoreme: true,
 } satisfies Record<ParsedCommand['name'], true>;
 const DENIED_REPLY = '该命令仅对本 Bot 的管理员可用。';
 const MODEL_PAGE_SIZE = 20;
@@ -87,6 +98,8 @@ export const BOT_COMMANDS: readonly BotCommandRegistration[] = [
   { command: 'cut_topic', description: '切掉此消息及更早的历史，仅对新会话生效（仅管理员）' },
   { command: 'whoami', description: '查看你的 Telegram 数字 ID' },
   { command: 'allowlist', description: '将本群加入白名单，立即生效（仅管理员）' },
+  { command: 'ignoreme', description: '让 Bot 忽略你在本 Chat 的消息' },
+  { command: 'unignoreme', description: '恢复 Bot 接收你在本 Chat 的消息' },
 ];
 
 export interface CommandRegistrationApi {
@@ -191,6 +204,9 @@ export class BotCommandService {
         return sender === null ? '无法识别发送者。' : sender.id.toString();
       case 'allowlist':
         return this.#adminGate(sender) ? await this.#allowlist(telegramChatId) : DENIED_REPLY;
+      case 'ignoreme':
+      case 'unignoreme':
+        return await this.#setSelfIgnored(telegramChatId, sender, command.name === 'ignoreme');
     }
   }
 
@@ -336,6 +352,39 @@ export class BotCommandService {
         : `加入白名单失败: ${result.message}`;
     }
     const lines = ['已将本群加入白名单，配置已立即生效。'];
+    if (result.restartRequired.length > 0) {
+      lines.push(`另有 ${result.restartRequired.length} 项配置需要重启后生效。`);
+    }
+    return lines.join('\n');
+  }
+
+  async #setSelfIgnored(telegramChatId: bigint, sender: CommandSender | null, ignored: boolean): Promise<string> {
+    if (sender === null) {
+      return '无法识别发送者，请使用个人账号发送命令。';
+    }
+    const reloader = this.#configReloader;
+    if (reloader === undefined) {
+      return '运行时配置应用不可用。';
+    }
+    const chat = resolveChatConfig(this.#configStore.current().config, this.#store.orm, telegramChatId);
+    if (chat === undefined) {
+      return '本 Chat 未在配置中找到。';
+    }
+    const result = await reloader.setChatUserIgnored(chat.id, sender.id, ignored);
+    if (!result.ok) {
+      return result.fileWritten
+        ? `已写入 config.jsonc，但应用失败: ${result.message}`
+        : `更新忽略名单失败: ${result.message}`;
+    }
+    const lines = [
+      ignored
+        ? '已忽略你在本 Chat 的消息，配置已立即生效。发送 /unignoreme 可恢复。'
+        : '已恢复接收你在本 Chat 的消息，配置已立即生效。',
+    ];
+    const other = result.applied.filter((path) => path !== `telegram.chats[${chat.id}].ignored_user_ids`);
+    if (other.length > 0) {
+      lines.push(`同时应用了配置文件中的其它修改: ${other.join(', ')}`);
+    }
     if (result.restartRequired.length > 0) {
       lines.push(`另有 ${result.restartRequired.length} 项配置需要重启后生效。`);
     }

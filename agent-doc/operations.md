@@ -94,7 +94,7 @@ Admin Panel 的 Models / Chats 页在有字段等待重启时提供「立即重�
 
 ## 配置变更
 
-白名单字段可以热应用，其余字段不热重载。白名单（agent 模型、Provider 的全部字段——连接字段、模型列表与增删、vision 模型、Prompt、已有 Chat 的 `provider`/`model`/`thinking_level` 覆盖、预算与并发等）在改完文件后，用 Admin Panel 的「Apply config file」、Models / Chats 页的保存操作或 Telegram 的 `/model` 触发一次应用，不必重启；清单与语义见 [configuration.md](configuration.md#运行时配置热更新)。其它字段（allowlist、MCP、`admin.*`、`vision.max_concurrency` 等）变更后：
+白名单字段可以热应用，其余字段不热重载。白名单（agent 模型、Provider 的全部字段——连接字段、模型列表与增删、vision 模型、Prompt、已有 Chat 的 `provider`/`model`/`thinking_level` 覆盖和 `ignored_user_ids`、预算与并发等）在改完文件后，用 Admin Panel 的「Apply config file」、Models / Chats 页的保存操作或 Telegram 的 `/model` 触发一次应用，不必重启；成员的 `/ignoreme`、`/unignoreme` 会写回自己的忽略设置并热应用同一配置文件。清单与语义见 [configuration.md](configuration.md#运行时配置热更新)。其它字段（allowlist 的删除与 Topic 范围、MCP、`admin.*`、`vision.max_concurrency` 等）变更后：
 
 ```bash
 node src/cli.ts check-config --config dev-data/config.jsonc

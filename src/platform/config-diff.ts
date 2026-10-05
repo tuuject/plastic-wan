@@ -263,7 +263,7 @@ function mergeChat(
       }
       continue;
     }
-    if (key === 'provider' || key === 'model' || key === 'thinking_level') {
+    if (key === 'provider' || key === 'model' || key === 'thinking_level' || key === 'ignored_user_ids') {
       const path = `telegram.chats[${active.id}].${key}`;
       const hasFile = Object.hasOwn(fileRecord, key);
       const hasActive = Object.hasOwn(activeRecord, key);

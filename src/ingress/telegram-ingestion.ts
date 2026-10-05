@@ -167,12 +167,12 @@ export class TelegramIngestion {
     }
     const chatConfig = resolveChatConfig(this.#configStore.current().config, this.#store.orm, chatId);
     const ignoredUserIds = chatConfig?.ignored_user_ids ?? [];
-    if (isIgnoredUser(message, ignoredUserIds)) {
+    const selfIgnoreCommand = command?.name === 'ignoreme' || command?.name === 'unignoreme';
+    if (isIgnoredUser(message, ignoredUserIds) && !selfIgnoreCommand) {
       return {};
     }
     const internalChatId = this.#upsertChat(chat, chatId, receivedAt);
-    // Ignored users are dropped before command dispatch: their commands never
-    // reach the bot, exactly like their messages never reach a bucket.
+    // Self-ignore controls must remain reachable so an ignored member can opt back in.
     if (command !== null) {
       return { command };
     }

@@ -373,7 +373,7 @@ async function replyToCommand(context: Context, commands: BotCommandService, com
   }
   const chatId = message.chat.id;
   const sender =
-    message.from === undefined
+    message.from === undefined || message.sender_chat !== undefined
       ? null
       : {
           id: BigInt(message.from.id),

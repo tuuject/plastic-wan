@@ -45,4 +45,17 @@ Telegram 官方 FAQ 指引开发者通过 [@BotFather](https://t.me/BotFather) �
 
 任何成员都可以发送 `/whoami`，Bot 会回复发送者的 Telegram 数字 ID，可直接用于填写 `telegram.admins`。
 
+## 自助忽略与恢复
+
+在已允许的 Chat/Topic 中，用个人账号发送：
+
+| 命令 | 效果 |
+| --- | --- |
+| `/ignoreme` | 将自己的 Telegram User ID 加入当前 Chat 的 `ignored_user_ids`，立即忽略之后的消息。 |
+| `/unignoreme` | 将自己的 ID 从列表移除，立即恢复接收。被忽略时也可以使用。 |
+
+不需要管理员权限；命令只修改发送者自己，作用于该 Chat 的全部 Forum Topic，不影响其他 Chat。可加 `@Bot用户名` 指明目标 Bot。结果写回 `config.jsonc`，重启后仍保留；重复发送同一命令不会重复加入 ID。匿名身份不能使用。
+
+管理员也可以直接编辑 `telegram.chats[].ignored_user_ids`（唯一的正安全整数数组），然后在面板点击 **Apply config file** 热应用。被忽略后的普通消息、编辑和其他命令不进入模型；已有消息与 Context 不会追溯删除，Update 审计仍保留。若命令提示“已写入，但应用失败”，运行中仍使用旧配置，修复配置后重新发送命令或在面板应用。
+
 若需限制群内唤醒时段，参阅 [参与方式](../guides/participation.md)。

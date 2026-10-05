@@ -23,6 +23,7 @@
 | 修改 JSONC、Provider、Chat/Topic、Sticker Set 或 MCP | [configuration.md](configuration.md) |
 | 修改 SQLite、迁移、保留、备份或审计 | [data-layer.md](data-layer.md) |
 | 修改 Telegram 入库、调度、Context、Tool 或媒体 | [telegram-agent-flow.md](telegram-agent-flow.md) |
+| 修改 Bot 命令、自助忽略与恢复 | [telegram-agent-flow.md](telegram-agent-flow.md#bot-commands)、[configuration.md](configuration.md#运行时配置热更新) |
 | 修改 Conversation Context、GC、热注入或引用 TTL | [telegram-agent-flow.md](telegram-agent-flow.md#context-生命周期) |
 | 实现/排查 Skills、`read`/`execute` 原语与内部能力注册表 | [telegram-agent-flow.md](telegram-agent-flow.md#skills-与受控能力调用) |
 | 实现/排查 Alarm 与 Deferred Invocation | [telegram-agent-flow.md](telegram-agent-flow.md#alarm--deferred-invocation) |

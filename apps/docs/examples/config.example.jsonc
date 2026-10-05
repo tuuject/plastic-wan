@@ -10,7 +10,8 @@
     "bucket_window_seconds": 15,
     "chats": [
       {
-        "id": 123456789
+        "id": 123456789,
+        "ignored_user_ids": []
       }
     ]
   },

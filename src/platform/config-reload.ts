@@ -196,6 +196,55 @@ export class ConfigReloader {
     return this.#withLock(() => this.#addChat(configuredChatId));
   }
 
+  /** Reads the latest file under the write lock so concurrent members cannot overwrite each other's IDs. */
+  setChatUserIgnored(configuredChatId: number, userId: bigint, ignored: boolean): Promise<ConfigApplyResult> {
+    return this.#withLock(() => this.#setChatUserIgnored(configuredChatId, userId, ignored));
+  }
+
+  async #setChatUserIgnored(configuredChatId: number, userId: bigint, ignored: boolean): Promise<ConfigApplyResult> {
+    if (userId <= 0n || userId > BigInt(Number.MAX_SAFE_INTEGER)) {
+      return this.#rejected('config_invalid', `Invalid Telegram user ID: ${userId}`, 'config_write_failed');
+    }
+    if (!this.#store.current().config.telegram.chats.some((chat) => chat.id === configuredChatId)) {
+      return this.#rejected(
+        'config_invalid',
+        `Chat ${configuredChatId} is not configured in the running process`,
+        'config_write_failed',
+      );
+    }
+    let revision: string;
+    let loaded: LoadedConfig;
+    try {
+      revision = await readConfigRevision(this.#configPath);
+      loaded = await loadConfig(this.#configPath);
+    } catch (error) {
+      return this.#rejected('config_invalid', messageOf(error), 'config_write_failed');
+    }
+    const index = loaded.fileConfig.telegram.chats.findIndex((chat) => chat.id === configuredChatId);
+    const chat = loaded.fileConfig.telegram.chats[index];
+    if (chat === undefined) {
+      return this.#rejected(
+        'config_invalid',
+        `Chat ${configuredChatId} is no longer present in the configuration file`,
+        'config_write_failed',
+      );
+    }
+    const id = Number(userId);
+    const ids = chat.ignored_user_ids ?? [];
+    if (ids.includes(id) === ignored) {
+      return await this.#applyFile();
+    }
+    return await this.#writeAndApply(
+      [
+        {
+          path: ['telegram', 'chats', index, 'ignored_user_ids'],
+          value: ignored ? [...ids, id] : ids.filter((entry) => entry !== id),
+        },
+      ],
+      revision,
+    );
+  }
+
   async #addChat(configuredChatId: number): Promise<ConfigApplyResult> {
     if (!Number.isSafeInteger(configuredChatId) || configuredChatId === 0) {
       return this.#rejected('config_invalid', `Invalid Telegram chat ID: ${configuredChatId}`);

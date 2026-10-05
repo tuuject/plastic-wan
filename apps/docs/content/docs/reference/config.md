@@ -29,10 +29,12 @@ description: 按配置节理解 Plastic Wan 的必填项、覆盖关系与运行
 
 Conversation、短期记忆和注意力窗口按 Chat + Topic 隔离；预算硬限制不是每群配额：主 Agent 日 Token 限制全局共享，Vision 有另一组全局限制。
 
+`telegram.chats[].ignored_user_ids` 是当前 Chat 的忽略名单，包含唯一的正安全整数 User ID，支持热应用。成员可用 [`/ignoreme`、`/unignoreme`](../configure/telegram.md#自助忽略与恢复) 自行加入或取消，覆盖该 Chat 的全部 Topic；已有消息和 Context 不会追溯删除。
+
 ## SecretRef 与安全
 
 敏感字段只能用 `{ "env": "NAME" }`、`{ "jar": "name" }` 或固定 argv 的 `{ "command": [...] }`。HTTP MCP 禁止重定向和 URL 凭据；stdio MCP 仅运行配置里的固定 argv。Prompt 不会获得额外权限。
 
 ## 生效规则
 
-配置只在显式启动或应用时读取。Provider、模型、Prompt、新增 Chat 与部分 Agent 字段可热应用；删除 allowlist Chat、MCP、Admin、路径和大多数结构变化要重启。详细操作见 [配置文件与密钥](../configure/config-file.md)，逐字段请下载 Schema。
+配置只在显式启动或应用时读取。Provider、模型、Prompt、`ignored_user_ids`、新增 Chat 与部分 Agent 字段可热应用；删除 allowlist Chat、MCP、Admin、路径和大多数结构变化要重启。详细操作见 [配置文件与密钥](../configure/config-file.md)，逐字段请下载 Schema。

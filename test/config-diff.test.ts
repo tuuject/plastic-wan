@@ -147,6 +147,30 @@ test('adding a chat is hot and the candidate adopts it in file order', async () 
   expect(diff.candidate.raw.telegram.chats.map((chat) => chat.id)).toEqual([123456789, -987654321]);
 });
 
+test.each([
+  { before: undefined, after: [42] },
+  { before: [42], after: [99] },
+  { before: [42], after: [] },
+  { before: [42], after: undefined },
+])('hot-applies ignored_user_ids from $before to $after', async ({ before, after }) => {
+  const setIds = (config: FileConfig, ids: number[] | undefined) => {
+    if (ids === undefined) {
+      delete config.telegram.chats[0]!.ignored_user_ids;
+    } else {
+      config.telegram.chats[0]!.ignored_user_ids = ids;
+    }
+  };
+  const { active, file } = await loadBoth(
+    (config) => setIds(config, before),
+    (config) => setIds(config, after),
+  );
+  const diff = diffConfig({ file: active.fileConfig, raw: active.config }, { file: file.fileConfig, raw: file.config });
+  expect(paths(diff.changes, 'hot')).toEqual(['telegram.chats[123456789].ignored_user_ids']);
+  expect(paths(diff.changes, 'restart')).toEqual([]);
+  expect(diff.candidate.file.telegram.chats[0]?.ignored_user_ids).toEqual(after);
+  expect(diff.candidate.raw.telegram.chats[0]?.ignored_user_ids).toEqual(after);
+});
+
 test('treats a chat field other than instructions as restart-only', async () => {
   const { active, file } = await loadBoth(undefined, (config) => {
     config.telegram.chats[0]!.timezone = 'Asia/Tokyo';

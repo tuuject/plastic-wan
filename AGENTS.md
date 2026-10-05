@@ -130,7 +130,7 @@ pnpm run docs:preview
 - `serve` 是长期进程。Agent 必须使用进程监督器启动，等待 `serve_started`，并通过日志或真实消息验证。
 - 同一 `data_dir` 只能有一个实例；`ServeLock` 使用 `serve.lock` 防止双实例和 Telegram long polling 竞争。
 - 需要替换同一 `data_dir` 上正在运行的实例时用 `node src/cli.ts serve --config <path> --takeover`：它请求对方优雅退出并等锁释放（对方日志 `takeover_requested`，接管方 `takeover_completed`），不要手动删 `serve.lock` 或强杀进程。
-- 修改 `config.jsonc` 后：白名单字段可用 Admin 的「应用配置文件」或 `/model` 热应用，其余字段必须重启。用 `config_reloaded` 日志事件（同时带 `active_hash` 与 `file_hash`）或 `check-config` 输出对比哈希，避免误判白名单或模型配置。没有文件系统 watcher，文件只有在调用这两个入口时才生效。
+- 修改 `config.jsonc` 后：白名单字段可用 Admin 的「应用配置文件」或 `/model` 热应用，其余字段必须重启。成员的 `/ignoreme`、`/unignoreme` 也会写回当前 Chat 的 `ignored_user_ids` 并热应用配置文件。用 `config_reloaded` 日志事件（同时带 `active_hash` 与 `file_hash`）或 `check-config` 输出对比哈希，避免误判白名单或模型配置。没有文件系统 watcher，文件只有在显式应用或配置写入入口被调用时才生效。
 - 本地人工运行使用 `Ctrl+C` 停止；不要用未验证 PID 的强制终止命令。
 - Admin Panel 随 `serve` 在同一进程内启动，仅在 `admin.enabled = true` 时监听；`admin.host` 不限制回环，非回环绑定的暴露风险由运维承担。
 
