@@ -34,7 +34,8 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
 - **图片设置**：图片功能的启用开关、生图凭据与模型配置。保存后立即应用，不需要重启；禁用会删除整个 `image` 段并清理不再引用的 key jar 条目。
 - **Settings**：对手改配置使用 **Apply config file**，并查看 Saved 与 Running 状态及 `restart_required`。
 - **Developer**：按需记录模型调用的调试报文，或在确认后清除已有报文。
-- **API 密钥 / Invocation 重放**：为 CLI 与评估工具创建密钥，并重放已完成 Invocation 的模型请求；两者目前只在 API 上提供，没有页面入口，见下文。
+- **API keys**（Manage 组）：创建、查看与撤销供 CLI 与评估工具使用的密钥，明文只在创建弹窗中出现一次，见下文。
+- **Invocation 重放**：仍只有携带 API 密钥的 CLI/API 入口，没有页面入口，见下文。
 
 ## 查看和复制 Telegram ID
 
@@ -68,29 +69,12 @@ SQLite 释放的页可供后续写入复用，但数据库文件不一定立即�
 
 ## API 密钥
 
-面板目前**没有** API 密钥管理页面；密钥的创建、查看与撤销在已登录面板的浏览器开发者工具 Console 里用同源请求完成（浏览器自动携带 Session Cookie，与面板自身的请求等价）。密钥用于 CLI 与评估工具，安装与用法见 [CLI 参考](../reference/cli.md)。
+在面板的 **Manage → API keys**（`/api-keys`）页面创建、查看与撤销密钥；操作需要管理员登录 Session，API 密钥本身不能管理密钥。密钥用于 CLI 与评估工具，安装与用法见 [CLI 参考](../reference/cli.md)。
 
-创建（明文 key 只在这一条响应里出现，立刻存进密码管理器或环境变量；之后任何接口都不会再返回它）：
-
-```js
-const created = await fetch('/api/api-keys', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ name: 'eval-cli' }),
-}).then((r) => r.json());
-copy(created.key); // 浏览器 DevTools 的复制助手，不把密钥打印到日志
-delete created.key;
-```
-
-列出与撤销：
-
-```js
-// 列表只有名称、前缀与时间，永远不含明文
-await fetch('/api/api-keys').then((r) => r.json());
-
-// 撤销立即生效；之后该密钥的请求都会失败
-await fetch(`/api/api-keys/${created.item.id}`, { method: 'DELETE' });
-```
+- 列表显示 **Name**、**Prefix**、**Created**、**Last used**、**Status**（**Active** / **Revoked**）与 **Actions**，任何时刻都不回显明文；从未使用过的密钥在 **Last used** 显示 **Never used**。
+- 点 **Create API key** 只需填写 **Name**（1–80 字符），再点 **Create key**。成功后 **Save your API key** 弹窗显示一次完整明文，可点 **Copy API key** 复制；点 **Done** 或关闭弹窗、切换页面、刷新后都无法再查看，请立即存进密码管理器或部署环境变量。
+- 页面不把明文写入浏览器 `localStorage`/`sessionStorage` 或查询缓存，列表接口也不返回它。复制失败时弹窗保留文字并提示手动复制。
+- 点行内 **Revoke** 后需在确认框点 **Revoke key**；撤销立即生效且不可恢复，密钥行与元数据保留，**Status** 变为 **Revoked**，不再提供撤销操作。
 
 密钥的能力范围只有 Invocation 查询与重放（读取 Invocation 列表/详情、发起重放）；它不能读取其它审计、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
 

@@ -13,6 +13,7 @@ import {
   getUsage,
   type ListFilters,
   listAlarms,
+  listApiKeys,
   listBotAdmins,
   listConversationContexts,
   listInvocations,
@@ -92,6 +93,12 @@ export function conversationContextQuery(conversationId: string) {
 export const memoryChatsQuery = queryOptions({
   queryKey: ['memory-chats'],
   queryFn: listMemoryChats,
+});
+
+export const apiKeysQuery = queryOptions({
+  queryKey: ['api-keys'],
+  queryFn: listApiKeys,
+  staleTime: 0,
 });
 
 export const adminsQuery = queryOptions({

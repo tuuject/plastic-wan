@@ -143,6 +143,16 @@ test.describe('routes and deep links', () => {
       page.getByRole('button', { name: 'Clear previously recorded raw request payloads', exact: true }),
     ).toBeVisible();
   });
+
+  test('/api-keys renders the key table and the create action', async ({ page }) => {
+    await page.goto(await adminUrl('/api-keys'));
+    await expect(page.getByRole('main').getByText('API keys', { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create API key' })).toBeVisible();
+    for (const header of ['Name', 'Prefix', 'Created', 'Last used', 'Status', 'Actions']) {
+      await expect(page.getByRole('columnheader', { name: header, exact: true })).toBeVisible();
+    }
+    await expect(page.getByText('Something went wrong')).toHaveCount(0);
+  });
 });
 
 test.describe('no page errors while deep-linking', () => {
@@ -162,6 +172,7 @@ test.describe('no page errors while deep-linking', () => {
     '/stickers',
     '/settings',
     '/developer',
+    '/api-keys',
   ];
   for (const route of routes) {
     test(`browsing ${route} raises no pageerror`, async ({ page }) => {

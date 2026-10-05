@@ -29,7 +29,7 @@ test.describe('models page', () => {
     // Builtin providers show Pi's address read-only and only allow the key to change.
     await page.getByRole('button', { name: `Provider ${E2E_BUILTIN_ALIAS}` }).click();
     await expect(page.getByText('https://openrouter.ai/api/v1')).toBeVisible();
-    const keyInput = page.getByLabel('API Key');
+    const keyInput = page.getByLabel('API Key', { exact: true });
     await expect(keyInput).toHaveAttribute('type', 'password');
     await expect(keyInput).toHaveAttribute('autocomplete', 'new-password');
     await expect(keyInput).toHaveValue('');
@@ -44,7 +44,7 @@ test.describe('models page', () => {
     const secrets = [...Object.values(E2E_SECRETS), 'telegram-secret', 'agent-secret', 'vision-secret'];
     for (const alias of [E2E_BUILTIN_ALIAS, E2E_RELAY_ALIAS, 'agent', 'vision']) {
       await page.getByRole('button', { name: `Provider ${alias}` }).click();
-      await expect(page.getByLabel('API Key')).toBeVisible();
+      await expect(page.getByLabel('API Key', { exact: true })).toBeVisible();
       const html = await page.content();
       for (const secret of secrets) {
         expect(html, `${alias} connection card leaked ${secret}`).not.toContain(secret);
@@ -67,7 +67,7 @@ test.describe('models page', () => {
   test('saving a builtin key applies it without a restart', async ({ page }) => {
     await page.goto(await adminUrl('/models'));
     await page.getByRole('button', { name: `Provider ${E2E_BUILTIN_ALIAS}` }).click();
-    await page.getByLabel('API Key').fill('e2e-rotated-builtin-key');
+    await page.getByLabel('API Key', { exact: true }).fill('e2e-rotated-builtin-key');
     await page.getByRole('button', { name: 'Save' }).click();
 
     // The rotated key is applied to the running process right away.
@@ -352,7 +352,7 @@ test.describe('models page', () => {
   test('a connection edit built on an old revision cannot delete a header added meanwhile', async ({ page }) => {
     await page.goto(await adminUrl('/models'));
     await page.getByRole('button', { name: `Provider ${E2E_RELAY_ALIAS}`, exact: true }).click();
-    await page.getByLabel('API Key').fill('e2e-stale-draft-key');
+    await page.getByLabel('API Key', { exact: true }).fill('e2e-stale-draft-key');
 
     // Another admin adds a header while this card holds a draft.
     await page.evaluate(async (alias) => {

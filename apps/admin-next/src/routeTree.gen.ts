@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminsRouteImport } from './routes/admins'
 import { Route as AlarmsRouteImport } from './routes/alarms'
+import { Route as ApiKeysRouteImport } from './routes/api-keys'
 import { Route as ChatsRouteImport } from './routes/chats'
 import { Route as ContextsRouteImport } from './routes/contexts'
 import { Route as DeveloperRouteImport } from './routes/developer'
@@ -42,6 +43,11 @@ const AdminsRoute = AdminsRouteImport.update({
 const AlarmsRoute = AlarmsRouteImport.update({
   id: '/alarms',
   path: '/alarms',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiKeysRoute = ApiKeysRouteImport.update({
+  id: '/api-keys',
+  path: '/api-keys',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatsRoute = ChatsRouteImport.update({
@@ -130,6 +136,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admins': typeof AdminsRoute
   '/alarms': typeof AlarmsRoute
+  '/api-keys': typeof ApiKeysRoute
   '/chats': typeof ChatsRoute
   '/contexts': typeof ContextsRoute
   '/developer': typeof DeveloperRoute
@@ -151,6 +158,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admins': typeof AdminsRoute
   '/alarms': typeof AlarmsRoute
+  '/api-keys': typeof ApiKeysRoute
   '/chats': typeof ChatsRoute
   '/contexts': typeof ContextsRoute
   '/developer': typeof DeveloperRoute
@@ -173,6 +181,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admins': typeof AdminsRoute
   '/alarms': typeof AlarmsRoute
+  '/api-keys': typeof ApiKeysRoute
   '/chats': typeof ChatsRoute
   '/contexts': typeof ContextsRoute
   '/developer': typeof DeveloperRoute
@@ -196,6 +205,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admins'
     | '/alarms'
+    | '/api-keys'
     | '/chats'
     | '/contexts'
     | '/developer'
@@ -217,6 +227,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admins'
     | '/alarms'
+    | '/api-keys'
     | '/chats'
     | '/contexts'
     | '/developer'
@@ -238,6 +249,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admins'
     | '/alarms'
+    | '/api-keys'
     | '/chats'
     | '/contexts'
     | '/developer'
@@ -260,6 +272,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminsRoute: typeof AdminsRoute
   AlarmsRoute: typeof AlarmsRoute
+  ApiKeysRoute: typeof ApiKeysRoute
   ChatsRoute: typeof ChatsRoute
   ContextsRoute: typeof ContextsRoute
   DeveloperRoute: typeof DeveloperRoute
@@ -299,6 +312,13 @@ declare module '@tanstack/react-router' {
       path: '/alarms'
       fullPath: '/alarms'
       preLoaderRoute: typeof AlarmsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api-keys': {
+      id: '/api-keys'
+      path: '/api-keys'
+      fullPath: '/api-keys'
+      preLoaderRoute: typeof ApiKeysRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/chats': {
@@ -420,6 +440,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminsRoute: AdminsRoute,
   AlarmsRoute: AlarmsRoute,
+  ApiKeysRoute: ApiKeysRoute,
   ChatsRoute: ChatsRoute,
   ContextsRoute: ContextsRoute,
   DeveloperRoute: DeveloperRoute,

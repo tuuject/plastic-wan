@@ -141,7 +141,7 @@ plasticwan-debug invocation replay 12345 --system-prompt prompt.txt --json
 printf '%s' '临时替换的 system prompt' | plasticwan-debug invocation replay 12345 --system-prompt - --json
 ```
 
-- API key 只能在面板 Session 下创建（当前没有密钥管理界面，见 [admin-panel.md](admin-panel.md#程序化-api-密钥)）。tarball 可用 `npm install -g` 安装，随后直接用 `plasticwan-debug` 调用。
+- API key 只能在面板 Session 下创建：在面板 **Manage → API keys** 页（`/api-keys`）创建并取得唯一一次明文，也在同一页撤销（Bearer 密钥不能管理密钥，见 [admin-panel.md](admin-panel.md#程序化-api-密钥)）。tarball 可用 `npm install -g` 安装，随后直接用 `plasticwan-debug` 调用。
 - endpoint 必须显式给出；明文 `http` 仅允许 loopback（`127.0.0.0/8`、`::1`、`localhost`），远端必须 `https`，URL 不得带凭据、query 或 fragment。
 - 请求不跟随重定向、不自动重试；默认超时 list/get 30 秒、replay 300 秒；stdin 读取单独使用同一 `--timeout-ms` 上限，超时返回 `timeout`（退出码 1）且不发送 HTTP 请求；响应体超过 4 MiB 被拒绝。
 - `--json` 时 stdout 恰好一个 JSON 文档；失败时 stderr 为 `{"error","message"}`（经 key 脱敏）。退出码 `0` 成功、`1` 请求/服务端/replay 失败、`2` 参数或输入不合法。replay 即使返回的 `error` 非空也会把完整结构写在 stdout。

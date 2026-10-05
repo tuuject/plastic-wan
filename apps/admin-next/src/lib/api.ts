@@ -355,6 +355,24 @@ export interface BotAdminList {
   readonly revision: string;
 }
 
+export interface AdminApiKeyItem {
+  readonly id: string;
+  readonly name: string;
+  readonly prefix: string;
+  readonly created_at: string;
+  readonly last_used_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+export interface AdminApiKeyList {
+  readonly items: readonly AdminApiKeyItem[];
+}
+
+export interface CreatedAdminApiKey {
+  readonly key: string;
+  readonly item: AdminApiKeyItem;
+}
+
 export interface ModelOption {
   readonly provider: string;
   readonly model: string;
@@ -882,6 +900,22 @@ export function updateMemory(id: string, update: MemoryUpdate): Promise<MemoryEn
 
 export function deleteMemory(id: string): Promise<{ status: string }> {
   return call<{ status: string }>(`/memories/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function listApiKeys(): Promise<AdminApiKeyList> {
+  return call<AdminApiKeyList>('/api-keys');
+}
+
+export function createApiKey(name: string): Promise<CreatedAdminApiKey> {
+  return call<CreatedAdminApiKey>('/api-keys', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function revokeApiKey(id: string): Promise<{ status: string }> {
+  return call<{ status: string }>(`/api-keys/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export function listBotAdmins(): Promise<BotAdminList> {

@@ -58,7 +58,7 @@ npm install -g <打包生成的 tarball 路径>
 
 不想全局安装时，也可以直接运行构建产物：`node packages/cli/dist/bin.js …`。
 
-客户端用 API key 认证。面板目前没有密钥管理界面，需要在已登录的浏览器控制台创建，见[使用管理面板](../configure/admin.md#api-密钥)；密钥只覆盖 Invocation 查询与重放。
+客户端用 API key 认证。请在面板的 **Manage → API keys** 页面创建密钥（明文只在创建弹窗出现一次，关闭后不可再取回），见[使用管理面板](../configure/admin.md#api-密钥)；密钥只覆盖 Invocation 查询与重放。
 
 ```bash
 export PLASTICWAN_ENDPOINT=https://admin.example.com   # 必填；明文 http 只允许本机

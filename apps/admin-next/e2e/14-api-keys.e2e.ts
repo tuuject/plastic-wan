@@ -1,5 +1,5 @@
-import { type APIRequestContext, expect, test } from '@playwright/test';
-import { adminUrl } from './helpers.ts';
+import { type APIRequestContext, expect, type Page, test } from '@playwright/test';
+import { adminBase, adminUrl } from './helpers.ts';
 
 /**
  * Programmatic API keys against the real AdminServer: session-only management,
@@ -7,16 +7,26 @@ import { adminUrl } from './helpers.ts';
  * immediate revocation, and the unwired replay engine answering 503. The
  * fixture seeds invocation 4001 (see test/fixtures/admin-seed.ts).
  *
- * This spec is API-only and signs in itself, so it also passes when run on its
- * own (`pnpm run admin:test:e2e 14-api-keys`) before the auth spec has written
- * the shared storage state.
+ * `API key management UI` drives the same server through the built SPA:
+ * sidebar entry, one-time display, clipboard handling, storage hygiene,
+ * deep-link reload, revoke confirmation and pending/error states. It reuses
+ * the API login below by injecting the session cookie into the browser
+ * context.
+ *
+ * This spec signs in itself instead of relying on the shared storage state, so
+ * it also passes when run on its own (`pnpm run admin:test:e2e 14-api-keys`)
+ * before the auth spec has written that state.
  */
-test.use({ storageState: { cookies: [], origins: [] } });
+// Playwright also saves an ARIA error snapshot even with trace/screenshots off.
+// This page displays a live key; failure artifacts must not capture its value.
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = '1';
+test.use({ storageState: { cookies: [], origins: [] }, trace: 'off', screenshot: 'off', video: 'off' });
 
 const USERNAME = process.env.E2E_USERNAME ?? 'e2e-admin';
 const PASSWORD = process.env.E2E_PASSWORD ?? 'e2e-correct-horse';
 
 let cookie = '';
+let sessionToken = '';
 
 test.beforeAll(async ({ request }) => {
   const session = await request.get(await adminUrl('/api/auth/session'));
@@ -27,7 +37,8 @@ test.beforeAll(async ({ request }) => {
   expect(response.status()).toBe(200);
   const header = response.headers()['set-cookie'] ?? '';
   cookie = header.slice(0, header.indexOf(';'));
-  expect(cookie).toContain('plasticwan_admin=');
+  expect(cookie.startsWith('plasticwan_admin=')).toBe(true);
+  sessionToken = cookie.slice(cookie.indexOf('=') + 1);
 });
 
 function bearer(key: string): { Authorization: string } {
@@ -50,17 +61,19 @@ test('API keys are managed by the session and only shown once', async ({ request
   });
   expect(created.status()).toBe(200);
   const createdBody = (await created.json()) as { key: string; item: { id: string; prefix: string } };
-  expect(createdBody.key).toMatch(/^pwk_[A-Za-z0-9_-]{43}$/);
-  expect(createdBody.item.prefix).toBe(createdBody.key.slice(0, 12));
+  expect(/^pwk_[A-Za-z0-9_-]{43}$/.test(createdBody.key)).toBe(true);
+  expect(createdBody.item.prefix === createdBody.key.slice(0, 12)).toBe(true);
 
   // The listing repeats metadata but never the key itself.
   const listed = await request.get(await adminUrl('/api/api-keys'), { headers: { cookie } });
   expect(listed.status()).toBe(200);
   const listing = (await listed.json()) as { items: Array<{ id: string; name: string; revoked_at: string | null }> };
-  expect(listing.items).toContainEqual(
-    expect.objectContaining({ id: createdBody.item.id, name: 'e2e-cli', revoked_at: null }),
-  );
-  expect(JSON.stringify(listing)).not.toContain(createdBody.key);
+  expect(
+    listing.items.some(
+      (item) => item.id === createdBody.item.id && item.name === 'e2e-cli' && item.revoked_at === null,
+    ),
+  ).toBe(true);
+  expect(JSON.stringify(listing).includes(createdBody.key)).toBe(false);
 
   // The Bearer surface covers the invocation list and one invocation.
   const key = createdBody.key;
@@ -94,8 +107,8 @@ test('API keys are managed by the session and only shown once', async ({ request
   const relisted = (await (await request.get(await adminUrl('/api/api-keys'), { headers: { cookie } })).json()) as {
     items: Array<{ id: string; revoked_at: string | null }>;
   };
-  expect(relisted.items).toContainEqual(
-    expect.objectContaining({ id: createdBody.item.id, revoked_at: expect.any(String) }),
+  expect(relisted.items.some((item) => item.id === createdBody.item.id && typeof item.revoked_at === 'string')).toBe(
+    true,
   );
 });
 
@@ -113,4 +126,463 @@ test('a present Authorization header never falls back to the session cookie', as
   // The session cookie itself is still intact.
   const session = await request.get(await adminUrl('/api/invocations'), { headers: { cookie } });
   expect(session.status()).toBe(200);
+});
+
+/** In-page clipboard stub: Copy never touches the OS clipboard or logs the key. */
+async function installClipboardRecorder(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          (window as unknown as { __e2eCopiedText?: string }).__e2eCopiedText = text;
+        },
+      },
+    });
+  });
+}
+
+/** Boolean-only scan: no full `pwk_…` key may sit in Web Storage. */
+function storageHasApiKey(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const values = [...Object.values(window.localStorage), ...Object.values(window.sessionStorage)];
+    return values.some((value) => /pwk_[A-Za-z0-9_-]{43}/.test(value));
+  });
+}
+
+/** Boolean-only scan: is the plaintext still anywhere in the rendered DOM? */
+function bodyContains(page: Page, secret: string): Promise<boolean> {
+  return page.evaluate(
+    (needle) =>
+      (document.body.textContent?.includes(needle) ?? false) ||
+      [...document.querySelectorAll('input, textarea')].some((element) =>
+        (element as HTMLInputElement | HTMLTextAreaElement).value.includes(needle),
+      ),
+    secret,
+  );
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let release: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, resolve: release };
+}
+
+function uniqueKeyName(scope: string): string {
+  return `e2e-ui-${scope}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function createKeyThroughUi(page: Page, name: string): Promise<string> {
+  await page.getByRole('main').getByRole('button', { name: 'Create API key' }).click();
+  const createDialog = page.getByRole('dialog');
+  await createDialog.getByLabel('Name').fill(name);
+  await createDialog.getByRole('button', { name: 'Create key' }).click();
+  const saveDialog = page.getByRole('dialog');
+  await expect(saveDialog.getByText('Save your API key', { exact: true })).toBeVisible();
+  const key = await saveDialog.getByLabel('API key').inputValue();
+  await saveDialog.getByRole('button', { name: 'Done' }).click();
+  await expect(saveDialog).not.toBeVisible();
+  return key;
+}
+
+/**
+ * The real key-management surface. All tests reuse the API login above by
+ * injecting its session cookie, so this block stays standalone-runnable. The
+ * plaintext key lives only in the browser and in test memory: clipboard writes
+ * are stubbed, artifacts are off, and every secret-shaped assertion is a
+ * boolean (never `expect(key)` / `toContain(key)`, which would print it).
+ */
+test.describe('API key management UI', () => {
+  test.beforeEach(async ({ context }) => {
+    await context.addCookies([{ name: 'plasticwan_admin', value: sessionToken, url: await adminBase() }]);
+  });
+
+  test('creates a key from the sidebar, shows it once, and drops the plaintext afterwards', async ({ page }) => {
+    await installClipboardRecorder(page);
+    await page.goto(await adminUrl('/'));
+    const manageGroup = page.locator('[data-sidebar="group"]').filter({ hasText: 'Manage' });
+    await expect(manageGroup.getByRole('link', { name: 'API keys', exact: true })).toBeVisible();
+    await manageGroup.getByRole('link', { name: 'API keys', exact: true }).click();
+    await expect(page).toHaveURL(/\/api-keys$/);
+
+    const main = page.getByRole('main');
+    await expect(main.getByText('API keys', { exact: true }).first()).toBeVisible();
+    // The permission note is deliberately narrow: invocation list/get/replay.
+    await expect(main.getByText(/invocation/i).first()).toBeVisible();
+    await expect(main.getByText(/replay/i).first()).toBeVisible();
+    await expect(main.getByRole('button', { name: 'Create API key' })).toBeVisible();
+
+    const name = uniqueKeyName('once');
+    await main.getByRole('button', { name: 'Create API key' }).click();
+    const createDialog = page.getByRole('dialog');
+    await expect(createDialog.getByText('Create API key', { exact: true })).toBeVisible();
+    await expect(createDialog.getByLabel('Name')).toHaveAttribute('maxlength', '80');
+    await createDialog.getByLabel('Name').fill(name);
+    await createDialog.getByRole('button', { name: 'Create key' }).click();
+
+    const saveDialog = page.getByRole('dialog');
+    await expect(saveDialog.getByText('Save your API key', { exact: true })).toBeVisible();
+    await expect(saveDialog.getByText(/shown only once/i)).toBeVisible();
+    const apiKeyBox = saveDialog.getByLabel('API key');
+    await expect(apiKeyBox).toBeVisible();
+    expect(await apiKeyBox.evaluate((element) => (element as HTMLTextAreaElement).readOnly)).toBe(true);
+    const key = await apiKeyBox.inputValue();
+    expect(/^pwk_[A-Za-z0-9_-]{43}$/.test(key)).toBe(true);
+    expect(await bodyContains(page, key)).toBe(true);
+
+    // No storage wrote the plaintext while the one-time dialog was still open.
+    expect(await storageHasApiKey(page)).toBe(false);
+
+    await saveDialog.getByRole('button', { name: 'Copy API key' }).click();
+    const copied = await page.evaluate((secret) => {
+      const state = window as unknown as { __e2eCopiedText?: string };
+      const copied = state.__e2eCopiedText === secret && secret.startsWith('pwk_');
+      delete state.__e2eCopiedText;
+      return copied;
+    }, key);
+    expect(copied).toBe(true);
+
+    await saveDialog.getByRole('button', { name: 'Done' }).click();
+    await expect(saveDialog).not.toBeVisible();
+    expect(await bodyContains(page, key)).toBe(false);
+    expect(await storageHasApiKey(page)).toBe(false);
+
+    // Deep-link reload: the row keeps metadata only, the plaintext is gone.
+    await page.reload();
+    const row = main.locator('table tbody tr', { hasText: name });
+    await expect(row).toBeVisible();
+    await expect(row.getByText(/pwk_[A-Za-z0-9_-]+/)).toBeVisible();
+    await expect(row.getByText('Active', { exact: true })).toBeVisible();
+    await expect(row.getByText('Never used', { exact: true })).toBeVisible();
+    await expect(row.getByRole('button', { name: 'Revoke' })).toBeVisible();
+    expect(await bodyContains(page, key)).toBe(false);
+    expect(await storageHasApiKey(page)).toBe(false);
+
+    // The REST listing repeats metadata, never the key itself.
+    const listing = await page.request.get(await adminUrl('/api/api-keys'));
+    expect(listing.status()).toBe(200);
+    const listingBody = (await listing.json()) as { items: Array<Record<string, unknown>> };
+    const listed = listingBody.items.find((item) => item.name === name);
+    expect(listed).toBeTruthy();
+    expect(Object.hasOwn(listed ?? {}, 'key')).toBe(false);
+    expect(listingBody.items.some((item) => Object.hasOwn(item, 'key'))).toBe(false);
+
+    // A key opens the read-only invocation surface and nothing wider.
+    const invocations = await page.request.get(await adminUrl('/api/invocations?limit=1'), {
+      headers: bearer(key),
+    });
+    expect(invocations.status()).toBe(200);
+    const overview = await page.request.get(await adminUrl('/api/overview'), { headers: bearer(key) });
+    expect(overview.status()).toBe(403);
+  });
+
+  test('drops an open plaintext dialog on Escape, refresh and history navigation', async ({ page }) => {
+    for (const dismissal of ['escape', 'refresh', 'navigation']) {
+      await page.goto(await adminUrl('/'));
+      await page.getByRole('link', { name: 'API keys', exact: true }).click();
+      const name = uniqueKeyName(dismissal);
+      await page.getByRole('main').getByRole('button', { name: 'Create API key' }).click();
+      const dialog = page.getByRole('dialog');
+      await dialog.getByLabel('Name').fill(name);
+      await dialog.getByRole('button', { name: 'Create key' }).click();
+      await expect(dialog.getByText('Save your API key', { exact: true })).toBeVisible();
+      const key = await dialog.getByLabel('API key').inputValue();
+      expect(await bodyContains(page, key)).toBe(true);
+
+      if (dismissal === 'escape') {
+        await page.keyboard.press('Escape');
+      } else if (dismissal === 'refresh') {
+        await page.reload();
+      } else {
+        await page.goBack();
+        await expect(page).toHaveURL(await adminUrl('/'));
+        await page.getByRole('link', { name: 'API keys', exact: true }).click();
+      }
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      await expect(page.getByRole('main').locator('table tbody tr', { hasText: name })).toBeVisible();
+      expect(await bodyContains(page, key)).toBe(false);
+      expect(await storageHasApiKey(page)).toBe(false);
+    }
+  });
+
+  test('clears the one-time dialog when the session expires during the metadata refresh', async ({ page }) => {
+    const gate = deferred();
+    let expired = false;
+    let listCalls = 0;
+    await page.route('**/api/api-keys', async (route) => {
+      if (route.request().method() === 'GET') {
+        listCalls += 1;
+        if (listCalls > 1) {
+          await gate.promise;
+          await route.fulfill({
+            status: 401,
+            json: { error: 'unauthenticated', message: 'Admin session is required' },
+          });
+          return;
+        }
+      }
+      await route.fallback();
+    });
+    await page.route('**/api/auth/session', async (route) => {
+      if (expired) {
+        await route.fulfill({
+          json: { setup_required: false, authenticated: false, username: null, expires_at: null },
+        });
+        return;
+      }
+      await route.fallback();
+    });
+    await page.goto(await adminUrl('/api-keys'));
+    await expect(page.getByRole('columnheader', { name: 'Prefix', exact: true })).toBeVisible();
+    await page.getByRole('main').getByRole('button', { name: 'Create API key' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Name').fill(uniqueKeyName('session'));
+    await dialog.getByRole('button', { name: 'Create key' }).click();
+    await expect(dialog.getByText('Save your API key', { exact: true })).toBeVisible();
+    const key = await dialog.getByLabel('API key').inputValue();
+    expect(await bodyContains(page, key)).toBe(true);
+    expired = true;
+    gate.resolve();
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    expect(await bodyContains(page, key)).toBe(false);
+    expect(await storageHasApiKey(page)).toBe(false);
+  });
+
+  test('keeps a cancelled revocation request-free and revokes only after confirming', async ({ page }) => {
+    await page.goto(await adminUrl('/api-keys'));
+    const name = uniqueKeyName('revoke');
+    const key = await createKeyThroughUi(page, name);
+
+    const main = page.getByRole('main');
+    const row = main.locator('table tbody tr', { hasText: name });
+    await expect(row).toBeVisible();
+
+    let deletes = 0;
+    page.on('request', (request) => {
+      if (request.method() === 'DELETE' && new URL(request.url()).pathname.startsWith('/api/api-keys/')) {
+        deletes += 1;
+      }
+    });
+
+    await row.getByRole('button', { name: 'Revoke' }).click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(confirm.getByText('Revoke API key?', { exact: true })).toBeVisible();
+    await expect(confirm).toContainText(name);
+    await confirm.getByRole('button', { name: 'Cancel' }).click();
+    await expect(confirm).not.toBeVisible();
+    expect(deletes).toBe(0);
+    await expect(row.getByText('Active', { exact: true })).toBeVisible();
+
+    await row.getByRole('button', { name: 'Revoke' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Revoke key' }).click();
+    await expect(page.getByRole('alertdialog')).not.toBeVisible();
+    await expect(row.getByText('Revoked', { exact: true })).toBeVisible();
+    await expect(row.getByRole('button', { name: 'Revoke' })).toHaveCount(0);
+    expect(deletes).toBe(1);
+
+    const afterRevoke = await page.request.get(await adminUrl('/api/invocations'), { headers: bearer(key) });
+    expect(afterRevoke.status()).toBe(401);
+  });
+
+  test('a list failure offers Retry and recovers without inventing rows', async ({ page }) => {
+    let listCalls = 0;
+    await page.route('**/api/api-keys**', async (route) => {
+      const request = route.request();
+      if (request.method() === 'GET' && new URL(request.url()).pathname.endsWith('/api/api-keys')) {
+        listCalls += 1;
+        if (listCalls === 1) {
+          await route.fulfill({ status: 502, json: { error: 'internal', message: 'Synthetic list failure' } });
+        } else {
+          await route.fulfill({
+            json: {
+              items: [
+                {
+                  id: '9001',
+                  name: 'retry-fixture',
+                  prefix: 'pwk_retryfix',
+                  created_at: '2026-01-02T03:04:05.000Z',
+                  last_used_at: null,
+                  revoked_at: null,
+                },
+              ],
+            },
+          });
+        }
+        return;
+      }
+      await route.fallback();
+    });
+
+    await page.goto(await adminUrl('/api-keys'));
+    const main = page.getByRole('main');
+    await expect(main.getByText('Synthetic list failure', { exact: false })).toBeVisible();
+    await expect(main.locator('table tbody tr')).toHaveCount(0);
+
+    await main.getByRole('button', { name: 'Retry' }).click();
+    const row = main.locator('table tbody tr', { hasText: 'retry-fixture' });
+    await expect(row).toBeVisible();
+    await expect(row.getByText('Never used', { exact: true })).toBeVisible();
+    await expect(main.getByText('Synthetic list failure', { exact: false })).toHaveCount(0);
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a failed create stays inline, cannot double-submit, and retries manually', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async () => {
+            throw new Error('Clipboard denied');
+          },
+        },
+      });
+    });
+    const gate = deferred();
+    const fakeKey = `pwk_${'A'.repeat(43)}`;
+    let createCalls = 0;
+    await page.route('**/api/api-keys**', async (route) => {
+      const request = route.request();
+      if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/api/api-keys')) {
+        createCalls += 1;
+        if (createCalls === 1) {
+          await gate.promise;
+          await route.fulfill({ status: 502, json: { error: 'internal', message: 'Synthetic create failure' } });
+        } else {
+          await route.fulfill({
+            json: {
+              key: fakeKey,
+              item: {
+                id: '9002',
+                name: 'pending-guard',
+                prefix: fakeKey.slice(0, 12),
+                created_at: '2026-01-02T03:04:05.000Z',
+                last_used_at: null,
+                revoked_at: null,
+              },
+            },
+          });
+        }
+        return;
+      }
+      await route.fallback();
+    });
+
+    await page.goto(await adminUrl('/api-keys'));
+    const main = page.getByRole('main');
+    await main.getByRole('button', { name: 'Create API key' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Name').fill('   ');
+    await dialog.getByRole('button', { name: 'Create key' }).click();
+    await expect(dialog.getByText('Enter a name of 1–80 characters.')).toBeVisible();
+    expect(createCalls).toBe(0);
+    await dialog.getByLabel('Name').fill('pending-guard');
+    await dialog.getByRole('button', { name: 'Create key' }).click();
+
+    // While the request is held the submit is disabled and no retry fires.
+    await expect.poll(() => createCalls).toBe(1);
+    await expect(dialog.getByRole('button', { name: /^Creat/ })).toBeDisabled();
+
+    gate.resolve();
+    await expect(dialog.getByText('Synthetic create failure', { exact: false })).toBeVisible();
+    expect(createCalls).toBe(1);
+    await expect(dialog.getByRole('button', { name: 'Create key' })).toBeEnabled();
+
+    // A manual retry is the only way to submit again, and it succeeds once.
+    await dialog.getByRole('button', { name: 'Create key' }).click();
+    await expect.poll(() => createCalls).toBe(2);
+    const saveDialog = page.getByRole('dialog');
+    await expect(saveDialog.getByText('Save your API key', { exact: true })).toBeVisible();
+    await saveDialog.getByRole('button', { name: 'Copy API key' }).click();
+    await expect(saveDialog.getByText('Could not copy. Select the key and copy it manually.')).toBeVisible();
+
+    await saveDialog.getByRole('button', { name: 'Done' }).click();
+    await expect(saveDialog).not.toBeVisible();
+    expect(await bodyContains(page, fakeKey)).toBe(false);
+  });
+
+  test('a failed revoke stays in the confirmation with a pending guard', async ({ page }) => {
+    const item = {
+      id: '9003',
+      name: 'revoke-error-fixture',
+      prefix: 'pwk_revokefix',
+      created_at: '2026-01-02T03:04:05.000Z',
+      last_used_at: null,
+      revoked_at: null,
+    };
+    const gate = deferred();
+    let deleteCalls = 0;
+    let revoked = false;
+    await page.route('**/api/api-keys**', async (route) => {
+      const request = route.request();
+      if (request.method() === 'GET' && new URL(request.url()).pathname.endsWith('/api/api-keys')) {
+        await route.fulfill({
+          json: { items: [{ ...item, revoked_at: revoked ? '2026-01-02T03:04:05.000Z' : null }] },
+        });
+        return;
+      }
+      if (request.method() === 'DELETE') {
+        deleteCalls += 1;
+        if (deleteCalls === 1) {
+          await gate.promise;
+          await route.fulfill({ status: 404, json: { error: 'not_found', message: 'API key does not exist' } });
+        } else {
+          revoked = true;
+          await route.fulfill({ json: { status: 'ok' } });
+        }
+        return;
+      }
+      await route.fallback();
+    });
+
+    await page.goto(await adminUrl('/api-keys'));
+    const main = page.getByRole('main');
+    const row = main.locator('table tbody tr', { hasText: item.name });
+    await row.getByRole('button', { name: 'Revoke' }).click();
+    const confirm = page.getByRole('alertdialog');
+    await confirm.getByRole('button', { name: 'Revoke key' }).click();
+
+    // ConfirmDialog pending state: both buttons disabled, no second request.
+    await expect.poll(() => deleteCalls).toBe(1);
+    await expect(confirm.getByRole('button', { name: 'Working…' })).toBeDisabled();
+    await expect(confirm.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+    gate.resolve();
+    await expect(confirm.getByText('API key does not exist', { exact: false })).toBeVisible();
+    await expect(confirm.getByRole('button', { name: 'Revoke key' })).toBeEnabled();
+    expect(deleteCalls).toBe(1);
+
+    // Cancelling closes without a second request and keeps the row active.
+    await confirm.getByRole('button', { name: 'Cancel' }).click();
+    await expect(confirm).not.toBeVisible();
+    await expect(row.getByText('Active', { exact: true })).toBeVisible();
+    expect(deleteCalls).toBe(1);
+
+    // A manual second attempt (error cleared on reopen) can succeed.
+    await row.getByRole('button', { name: 'Revoke' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Revoke key' }).click();
+    await expect(page.getByRole('alertdialog')).not.toBeVisible();
+    await expect(row.getByText('Revoked', { exact: true })).toBeVisible();
+    await expect(row.getByRole('button', { name: 'Revoke' })).toHaveCount(0);
+    expect(deleteCalls).toBe(2);
+  });
+
+  test('fits a narrow dark viewport without full-page horizontal overflow', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => {
+      localStorage.setItem('admin-theme', 'dark');
+    });
+    await page.goto(await adminUrl('/api-keys'));
+    await expect(page.locator('html')).toHaveClass(/dark/);
+    const main = page.getByRole('main');
+    await expect(main.getByText('API keys', { exact: true }).first()).toBeVisible();
+    await main.getByRole('button', { name: 'Create API key' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByLabel('Name')).toBeInViewport();
+    await page.keyboard.press('Escape');
+    await expect(dialog).not.toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
 });

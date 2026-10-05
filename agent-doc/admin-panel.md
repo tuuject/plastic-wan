@@ -40,7 +40,7 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 
 ## 程序化 API 密钥
 
-`src/ingress/admin/api-keys.ts` 提供供 CLI 与评估工具使用的 API 密钥。密钥管理是 **Session-only** 的：只有面板登录会话能创建、列出与撤销密钥，密钥自身不能管理密钥。当前前端没有密钥管理页面，操作方式见[用户指南](../apps/docs/content/docs/configure/admin.md#api-密钥)。
+`src/ingress/admin/api-keys.ts` 提供供 CLI 与评估工具使用的 API 密钥。密钥管理是 **Session-only** 的：只有面板登录会话能创建、列出与撤销密钥，密钥自身不能管理密钥。前端入口是 **Manage → API keys** 独立页（`/api-keys`），复用下述现有接口，没有新增 API、迁移或配置项：表格列为 Name/Prefix/Created/Last used/Status/Actions（Active/Revoked，未使用时显示 Never used）；**Create API key** 只填 `name`（1–80 字符），明文只在随后 **Save your API key** 一次性弹窗中出现，Done/关闭/导航/刷新后不可再取回，也不写入 `localStorage`/`sessionStorage` 或查询缓存；**Copy API key** 失败时保留文字并提示手动复制；行内 **Revoke** 需确认、立即生效且保留元数据。列表失败提供 Retry，创建失败在弹窗内联显示且进行中禁止重复提交，撤销失败留在确认框。界面操作说明见[用户指南](../apps/docs/content/docs/configure/admin.md#api-密钥)。
 
 | 路由 | 语义 |
 | --- | --- |

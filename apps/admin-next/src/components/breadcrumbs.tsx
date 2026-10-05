@@ -29,6 +29,7 @@ const SEGMENT_TO_NAV: Partial<Record<string, NavKey>> = {
   alarms: 'alarms',
   memories: 'memories',
   admins: 'botAdmins',
+  'api-keys': 'apiKeys',
   models: 'models',
   'image-settings': 'imageSettings',
   chats: 'chats',

@@ -222,16 +222,17 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
      跨站 Origin 的写请求返回 403 `bad_origin`。
   9. Chats：字符串 ID 安全整数边界、新增 Chat 热应用、删除与 Topic 范围的保存/运行态分离、模型/thinking 热切与恢复继承、
      后台 refetch 不升级编辑和删除确认的原始 revision、保存后应用失败的双视图刷新与 Settings 恢复、移动端暗色布局。
-  10. API key（`14-api-keys.e2e.ts`，API-only、自带登录，可单独运行）：Session 创建只返回一次明文与 `prefix`，列表不回显明文；Bearer 覆盖 invocation list 与详情，其它路由（即使同时带 Cookie）403；撤销立即 401 且列表保留 `revoked_at`；`Authorization` 存在时不回退 Cookie；未接线的 replay 返回 503 `replay_unavailable`。
+  10. API key（`14-api-keys.e2e.ts` 的 API 用例，API-only、自带登录，可单独运行）：Session 创建只返回一次明文与 `prefix`，列表不回显明文；Bearer 覆盖 invocation list 与详情，其它路由（即使同时带 Cookie）403；撤销立即 401 且列表保留 `revoked_at`；`Authorization` 存在时不回退 Cookie；未接线的 replay 返回 503 `replay_unavailable`。
+  11. API keys 页面：`01-routes.e2e.ts`（共享 Session，筛选运行时需同时包含 `00-auth`）断言 `/api-keys` 深链接渲染标题、`Create API key` 与 Name/Prefix/Created/Last used/Status/Actions 列头；`14-api-keys.e2e.ts` 的 `API key management UI`（注入上方 API 登录的 Session Cookie，可单独运行）断言：侧栏 Manage → API keys 进入页面；创建弹窗 Name `maxlength=80`，成功后一次性 **Save your API key** 弹窗显示可复制的明文，`Copy API key` 的复制值正确（拦截 clipboard，不写系统剪贴板），Web Storage 无 `pwk_` 明文；Done/Escape、刷新、历史导航与会话过期后 DOM 和表单 value 均无明文，刷新后行内只保留元数据（前缀、Active、Never used）；Revoke 确认框取消不发 DELETE、确认后同一 key 立即 401 且状态 Revoked、按钮消失；列表失败显示错误与 Retry 且不伪造行，空白名称不发请求，创建失败在弹窗内联显示并禁止进行中重复提交，撤销失败留在确认框（Working… 禁用两端按钮）；窄屏暗色无整页横向溢出。该套件关闭 trace、截图、视频与失败时的 ARIA 页面快照，所有密钥值断言只输出布尔结果，避免失败产物泄漏明文。
 
 - 首次运行 E2E 前需要 `pnpm --filter plasticwan-admin-next exec playwright install chromium`；浏览器安装失败时套件无法
   执行，属于环境前置问题而非代码缺陷。
 
-## Invocation 重放与 API 密钥冒烟（无 UI）
+## Invocation 重放与 API 密钥冒烟
 
-面板没有 API 密钥与重放的界面入口；在已登录的浏览器控制台或调试客户端上验证，不需要 Telegram：
+密钥在面板的 **Manage → API keys** 页创建与撤销；重放仍只有携带密钥的 CLI/API 入口。以下检查不需要 Telegram：
 
-1. 在面板登录后的浏览器控制台创建 key（同源 `fetch('/api/api-keys', { method: 'POST', … })`，步骤见 [admin-panel.md](admin-panel.md#程序化-api-密钥)）：创建响应是明文唯一一次出现；`GET /api/api-keys` 只返回元数据；`DELETE /api/api-keys/:id` 撤销后同一 key 的下一次请求立即 401。
+1. 在 Manage → API keys 点 **Create API key**（名称 1–80 字符）→ **Create key**：**Save your API key** 弹窗是明文唯一一次出现，**Copy API key** 可复制，Done/关闭/刷新后不可再取回，`localStorage`/`sessionStorage` 里不出现 `pwk_` 明文；列表只显示 Name/Prefix/Created/Last used/Status 与操作，未使用时显示 Never used；**Revoke** 需在确认框确认，撤销后同一 key 的下一次请求立即 401，行保留并显示 Revoked。接口契约见 [admin-panel.md](admin-panel.md#程序化-api-密钥)。
 2. 用该 key 与 `plasticwan-debug invocation list/get` 能读到 Invocation；访问 `/api/overview`、`/api/memories`、`/api/api-keys` 等返回 403，同时带有效 Session Cookie 也不改变结果与权限面。
 3. 对一条已开启 `developer.record_model_payloads` 且仍保留快照的已完成 Invocation 执行 `plasticwan-debug invocation replay <id> --json`（真实调用模型、按 Provider 计费）：返回 `version: 1`、来源 ID、当前 Chat 模型与 `fidelity.limits`/`dispatches`；`send` 只出现在 `outputs`，不产生 `telegram_sends`；不新增 tool call、发送或预算行，后续 `daily_usage` 不含这次调用。
 4. 对未开启记录、快照已清除或未完成的 Invocation 重放：分别得到 409（`replay_input_unavailable`、`replay_source_unfinished`）或 CLI 退出码 1；确认没有回退读取 `request_json`、后续 model call 或当前 Context。

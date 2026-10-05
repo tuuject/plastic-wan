@@ -19,6 +19,7 @@ export const layout = {
     alarms: 'Alarms',
     memories: 'Memories',
     botAdmins: 'Bot admins',
+    apiKeys: 'API keys',
     models: 'Models',
     imageSettings: 'Image settings',
     chats: 'Chats',
