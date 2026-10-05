@@ -413,7 +413,10 @@ export const telegramSends = sqliteTable(
     createdAt: text('created_at').notNull(),
     finishedAt: text('finished_at'),
   },
-  () => [
+  (table) => [
+    index('telegram_sends_image_delivery_idx')
+      .on(table.conversationId, sql`json_extract(${table.requestJson}, '$.generation_id')`)
+      .where(sql`${table.kind} = 'image'`),
     check('telegram_sends_kind_check', sql`kind IN ('text', 'sticker', 'image')`),
     check('telegram_sends_state_check', sql`state IN ('pending', 'success', 'error', 'outcome_unknown')`),
   ],

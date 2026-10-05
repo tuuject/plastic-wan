@@ -285,14 +285,10 @@ export function createImageBridge(options: ImageBridgeOptions) {
     return core.generations.get(generationId, agentActor(conversationId)).outputs.map(toSendable);
   }
 
-  /** File bytes and mime for one output asset, for the send tool's upload. */
-  function assetContent(assetId: string): { readonly bytes: Buffer; readonly mime: string } | undefined {
-    try {
-      const { asset, bytes } = core.images.readContent(assetId);
-      return { bytes, mime: asset.mime };
-    } catch {
-      return undefined;
-    }
+  /** Missing output files must fail delivery, not silently shrink the picture set. */
+  function assetContent(assetId: string): { readonly bytes: Buffer; readonly mime: string } {
+    const { asset, bytes } = core.images.readContent(assetId);
+    return { bytes, mime: asset.mime };
   }
 
   /** Reconciles every waiting image task after a restart. */

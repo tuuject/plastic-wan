@@ -27,6 +27,7 @@ import {
   messages,
   taskReceipts,
   telegramSends,
+  toolCalls,
 } from '../src/store/schema.ts';
 import { testConfigJsonc, testConfigStore, writeTestConfig, writeTestKeyJar } from './helpers.ts';
 
@@ -46,7 +47,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  for (const close of cleanup.splice(0)) {
+  for (const close of cleanup.splice(0).reverse()) {
     await close();
   }
 });
@@ -335,11 +336,9 @@ test('send kind:image delivers finished outputs of a generation owned by this co
     bot: { id: 777n, displayName: 'bot', username: 'bot' },
     imageGeneration: {
       resolve: (id, conversationId) => {
-        const out = fixtureRef.bridge.sendableOutputs(id, conversationId)?.flatMap((output) => {
+        const out = fixtureRef.bridge.sendableOutputs(id, conversationId)?.map((output) => {
           const content = fixtureRef.bridge.assetContent(output.asset_id);
-          return content === undefined
-            ? []
-            : [{ assetId: output.asset_id, bytes: content.bytes, fileName: output.file_name }];
+          return { assetId: output.asset_id, bytes: content.bytes, fileName: output.file_name };
         });
         return out;
       },
@@ -362,6 +361,43 @@ test('send kind:image delivers finished outputs of a generation owned by this co
   expect(messageRow).toBeDefined();
   const mediaRow = fixtureRef.store.orm.select().from(media).where(eq(media.kind, 'photo')).get();
   expect(mediaRow).toBeDefined();
+
+  // A later output whose file disappeared must not be silently omitted, making
+  // the already-delivered first picture look like the whole generation.
+  const missing = await fixtureRef.service.core.images.create({
+    name: 'later-output',
+    base64: (
+      await sharp({ create: { width: 3, height: 2, channels: 3, background: '#ffffff' } })
+        .png()
+        .toBuffer()
+    ).toString('base64'),
+    mime: 'image/png',
+    description: '',
+    category: '',
+    source: 'generation',
+    generationId,
+    outputIndex: 1,
+  });
+  const missingRow = db.select().from(imageSchema.images).where(eq(imageSchema.images.id, missing.id)).get();
+  if (missingRow === undefined) {
+    throw new Error('Expected stored output');
+  }
+  await rm(join(fixtureRef.service.imageDir, missingRow.fileName));
+  expect(fixtureRef.bridge.sendableOutputs(generationId, 42n)).toHaveLength(2);
+  await expect(send.execute('call-send-missing', { kind: 'image', image_generation_id: generationId })).rejects.toThrow(
+    'image_generation_unavailable',
+  );
+  expect(sent).toHaveLength(1);
+  expect(fixtureRef.store.orm.select().from(telegramSends).all()).toHaveLength(1);
+  expect(
+    fixtureRef.store.orm.select().from(toolCalls).where(eq(toolCalls.toolCallId, 'call-send-missing')).get(),
+  ).toMatchObject({
+    state: 'error',
+    errorCode: 'image_generation_unavailable',
+  });
+  expect(fixtureRef.store.orm.select({ sendsUsed: invocations.sendsUsed }).from(invocations).get()).toEqual({
+    sendsUsed: 1n,
+  });
 });
 
 test("a foreign conversation cannot deliver another conversation's generation", async () => {

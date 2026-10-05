@@ -43,6 +43,8 @@ Telegram 官方 FAQ 指引开发者通过 [@BotFather](https://t.me/BotFather) �
 
 `/allowlist` 把 Bot 当前所在的 Chat（通常是刚把它拉进的新群）追加进 `telegram.chats` 并立即生效，无需重启。它是唯一能在未列入 allowlist 的 Chat 里使用的命令，且仅限 `telegram.admins` 中的用户：非管理员的 `/allowlist` 会被静默忽略。
 
+服务启动时会先处理停机期间 Telegram 积压的消息：其中 `/pause`、`/resume` 按消息顺序执行，仍需通过同样的管理员、Chat/Topic 与发送者校验，不补发旧命令回复。其他已识别命令（包括 `/allowlist`、`/model` 和自助忽略命令）只保留审计，不重放操作，也不会作为聊天内容交给模型；启动后需要重新发送这些命令。
+
 任何成员都可以发送 `/whoami`，Bot 会回复发送者的 Telegram 数字 ID，可直接用于填写 `telegram.admins`。
 
 ## 自助忽略与恢复

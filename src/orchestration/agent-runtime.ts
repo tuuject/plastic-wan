@@ -1069,7 +1069,13 @@ export class AgentRuntime {
         encoded.role === 'toolResult' &&
         message.role === 'toolResult' &&
         message.toolName === 'send' &&
-        message.isError !== true,
+        message.isError !== true &&
+        !(
+          message.details !== null &&
+          typeof message.details === 'object' &&
+          'replayed' in message.details &&
+          message.details.replayed === true
+        ),
     });
     entry.transcriptSeqs.push(seq);
     if (entry.transcriptSeqs.length !== entry.agent.state.messages.length) {

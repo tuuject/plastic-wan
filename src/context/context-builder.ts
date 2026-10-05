@@ -12,6 +12,7 @@ import {
 } from '../platform/prompt-template.ts';
 import { renderSkillIndexPrompt, type SystemSkill } from '../platform/system-resources.ts';
 import { resolveChatConfig, type SqliteStore } from '../store/database.ts';
+import { imageDeliveryState } from '../store/image-delivery.ts';
 import { LongTaskService } from '../store/long-tasks.ts';
 import type { ContextRefStore } from './context-refs.ts';
 import type { ContextHeader } from './context-store.ts';
@@ -56,6 +57,12 @@ const MessageSnapshotSchema = Type.Object(
   Strict,
 );
 const snapshotValidator = Compile(MessageSnapshotSchema);
+const imageReceiptValidator = Compile(
+  Type.Object({
+    generation_id: Type.String(),
+    outputs: Type.Array(Type.Object({ asset_id: Type.String() })),
+  }),
+);
 
 /**
  * Runtime sleep state, stated inside the newest injected batch instead of the
@@ -409,7 +416,11 @@ export class ContextBuilder {
       '</runtime_state>',
       ...(completion === null
         ? []
-        : ['<untrusted_task_receipt>', this.#completionReceipt(completion), '</untrusted_task_receipt>']),
+        : [
+            '<untrusted_task_receipt>',
+            this.#completionReceipt(completion, identity.conversationId),
+            '</untrusted_task_receipt>',
+          ]),
       ...(!renderStickerCatalog ? [] : ['<untrusted_sticker_catalog>', stickerCatalog, '</untrusted_sticker_catalog>']),
       ...(historyText.length === 0
         ? []
@@ -502,7 +513,25 @@ export class ContextBuilder {
     return [...new Set(parseSnapshotLines(text).map((snapshot) => snapshot.message_id))];
   }
 
-  #completionReceipt(completion: CompletionContext): string {
+  #completionReceipt(completion: CompletionContext, conversationId: bigint): string {
+    // The task may have finished during a tool chain that already sent its
+    // outputs. Snapshot delivery now, not when the delayed receipt was created.
+    const result = completion.resultJson;
+    let imageDelivery:
+      | { delivered_asset_ids: string[]; pending_asset_ids: string[]; unknown_asset_ids: string[] }
+      | undefined;
+    if (completion.pluginId === 'image' && imageReceiptValidator.Check(result)) {
+      const delivery = imageDeliveryState(this.#store.orm, conversationId, result.generation_id);
+      const assets = result.outputs.map((output) => output.asset_id);
+      // An earlier success cannot resolve another pending/unknown attempt;
+      // keep the three receipt categories exclusive, with uncertainty first.
+      const unknown = (assetId: string): boolean => delivery.unknownAssets || delivery.uncertain.has(assetId);
+      imageDelivery = {
+        delivered_asset_ids: assets.filter((id) => !unknown(id) && delivery.delivered.has(id)),
+        pending_asset_ids: assets.filter((id) => !unknown(id) && !delivery.delivered.has(id)),
+        unknown_asset_ids: assets.filter(unknown),
+      };
+    }
     return JSON.stringify({
       task_id: completion.taskId.toString(),
       plugin_id: completion.pluginId,
@@ -510,6 +539,7 @@ export class ContextBuilder {
       context: completion.payload,
       ...(completion.resultJson === undefined ? {} : { result: completion.resultJson }),
       ...(completion.errorJson === undefined ? {} : { error: completion.errorJson }),
+      ...(imageDelivery === undefined ? {} : { image_delivery: imageDelivery }),
     })
       .replaceAll('<', '\\u003c')
       .replaceAll('>', '\\u003e');

@@ -110,7 +110,13 @@ export class TelegramIngestion {
     const edited = update.edited_message !== undefined;
     // Chat control commands are handled by the bot itself: they are audited
     // but never stored as messages, so they cannot trigger or taint buckets.
-    const command = schedule && !edited && message !== undefined ? parseBotCommand(message, this.#botUsername) : null;
+    // `command` is every recognized command; `handledCommand` is the subset the
+    // caller may act on. Startup catch-up replays only /pause and /resume — the
+    // two whose state must survive the downtime — while every other recognized
+    // command is still intercepted below (never stored as a message) so a
+    // stale update cannot replay administrative effects like /allowlist.
+    const command = !edited && message !== undefined ? parseBotCommand(message, this.#botUsername) : null;
+    const handledCommand = schedule || command?.name === 'pause' || command?.name === 'resume' ? command : null;
     // A chat the allowlist does not name still reaches the bot through exactly
     // one command: an admin allowlisting it. Every other command or message
     // from such a chat stays rejected, so the bot never talks where it is not
@@ -119,7 +125,9 @@ export class TelegramIngestion {
       message?.from !== undefined &&
       (this.#configStore.current().config.telegram.admins ?? []).includes(message.from.id);
     const adminCommand =
-      topics === null && command !== null && command.name === 'allowlist' && senderIsAdmin ? command : null;
+      topics === null && handledCommand !== null && handledCommand.name === 'allowlist' && senderIsAdmin
+        ? handledCommand
+        : null;
     const allowed = adminCommand !== null || (chat !== undefined && chat.type !== 'channel' && topicAllowed);
     const rejectionReason = allowed
       ? null
@@ -167,14 +175,17 @@ export class TelegramIngestion {
     }
     const chatConfig = resolveChatConfig(this.#configStore.current().config, this.#store.orm, chatId);
     const ignoredUserIds = chatConfig?.ignored_user_ids ?? [];
-    const selfIgnoreCommand = command?.name === 'ignoreme' || command?.name === 'unignoreme';
+    const selfIgnoreCommand = handledCommand?.name === 'ignoreme' || handledCommand?.name === 'unignoreme';
     if (isIgnoredUser(message, ignoredUserIds) && !selfIgnoreCommand) {
       return {};
     }
     const internalChatId = this.#upsertChat(chat, chatId, receivedAt);
     // Self-ignore controls must remain reachable so an ignored member can opt back in.
     if (command !== null) {
-      return { command };
+      // A command that catch-up does not replay stops here: it was audited
+      // above and must not fall through into the message stream. Live ingestion
+      // and the replayable commands return the command for the bot to run.
+      return handledCommand === null ? {} : { command: handledCommand };
     }
     const stored = this.#storeMessage(message, internalChatId, threadId, receivedAt, edited, ignoredUserIds);
     if (stored === undefined) {

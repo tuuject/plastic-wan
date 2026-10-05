@@ -50,12 +50,13 @@
 
 普通重启在启动 Scheduler 和常规 long polling 前，以非阻塞 `getUpdates` 排空 Telegram pending updates：
 
-1. Update 仍经过 allowlist、去重、Revision 与媒体持久化，但不创建常规实时 Bucket。
-2. `app_state.telegram_startup_catch_up` 保存本轮起点；进程在排空或建任务时崩溃，下一次启动从同一起点完成，不丢失已确认 Update。
+1. Update 仍经过 allowlist、去重、Revision 与媒体持久化，但不创建常规实时 Bucket。识别到的控制命令只写 Update 审计，不进入消息与模型上下文；仅 `/pause`、`/resume` 按 Update 顺序交给同一 `BotCommandService` 执行，复用管理员与发送者身份校验，不补发旧命令回复。其余命令不重放管理副作用（包括 `/allowlist`），编辑与忽略用户等边界保持实时规则。排空后的最终暂停状态决定是否排队追赶。
+2. `app_state.telegram_startup_catch_up` 保存本轮起点；进程在排空或建任务时崩溃，下一次启动从同一起点重新排空，已入库消息仍会进入追赶任务。去重发生在命令执行之前：已经提交的 Update 只保留审计，若崩溃落在入库提交与 `/pause`、`/resume` 执行之间，该命令在重启后不会补执行（实时链路同样如此）；不承诺 exactly-once 或崩溃不丢命令。
 3. 每个有可触发消息的 Conversation（Chat + Forum Topic）只创建一个 `startup_catch_up` Bucket，取该 Conversation 最新的 `agent.history_messages` 条消息，参与闸门也按该 Conversation 判断；同一 Chat 的多个 Topic 各自排队，由 Scheduler 按 Chat 串行启动；单独的人类 Sticker 仍受 `sticker_trigger_enabled` 限制。
-4. Bucket 仅包含该 Chat 按 Telegram 时间排序的最新 `agent.history_messages` 条本轮消息；Forum Topic 可以混合。
-5. Snapshot 携带 `message_thread_id`。回复可见消息时，`send` 路由到该消息所属 Topic；不带 Reply 时路由到最新消息所属 Topic。
+4. Bucket 仅包含该 Conversation 按 Telegram 时间排序的最新 `agent.history_messages` 条本轮消息，不混合不同 Forum Topic。
+5. Snapshot 携带 `message_thread_id`。回复可见消息时，`send` 路由到该消息所属 Topic；不带 Reply 时仍发送到本 Conversation 的 Topic。
 6. 排空完成并原子清除启动状态后，才切换到常规按 Conversation 收集。
+7. 追赶 Invocation 建任务后，recovery 年龄从排空完成时刻起算（消息选取仍按本轮持久化起点），慢排空或崩溃续跑不会让它刚排队就被启动恢复判为过期；只有真正排队超过恢复上限（5 分钟）后才重启时，才按 `recovery_age` 过期。
 
 ## 会话节拍与 Bucket
 
@@ -344,7 +345,8 @@ Tool 只返回文本、JSON、XML 或 JavaScript 响应，拒绝压缩和二进�
 - **输入授权**：`input_image_refs` 只接受本 Conversation Context 授权的 `img_` 引用（经 `resolveMedia` 解析为真实 Media ID），任意 file ID、URL 或其它会话的引用在提交前就被拒绝并审计（`image_input_ref_unauthorized`）。
 - **提交与幂等**：bridge 以 actor `agent:<conversationId>` 向 image core 提交生成意图（idempotency key 绑定 Conversation），同一 Conversation 内同内容重复提交返回既有 generation（`replayed: true`），不重复计费；每个 Invocation 最多 3 次提交。工具立即返回 `generation_id`，图片此时还不存在。
 - **回执**：生成落定（成功、部分成功、失败、重启后由 `reconcile` 对账）时，bridge 经 long task 完成对应任务，Scheduler 把任务完成回执作为消息注入原 Conversation——回执是**不可信数据**（`generation_id`、status、输出清单），与 Alarm 回执同一通道。进程重启不影响未完成生成：启动时 reconcile 重建 core 状态，晚到的结果照常投递，不会重复回执。
-- **交付**：模型回执后用 `send kind:"image"` + `image_generation_id` 交付。运行时按「该 generation 的 actor 是否就是本 Conversation」解析输出（`sendableOutputs`，跨 Conversation 引用拒绝），一次 send 把该 generation 的全部已完成输出作为一个相册发送（单图 sendPhoto，2 张以上 sendMediaGroup），并审计 `telegram_sends.kind='image'`、bot 消息与生成的 `media` 行，纳入 canonical history 与引用 TTL。模型不能发送它没有在本会话收到过 `generation_id` 的生成，也不能只发送部分输出。
+- **交付**：模型用 `send kind:"image"` + `image_generation_id` 交付。运行时按「该 generation 的 actor 是否就是本 Conversation」解析输出（`sendableOutputs`，跨 Conversation 引用拒绝），声明输出的文件读取失败时直接以 `image_generation_unavailable` 拒绝并审计，不静默缩小相册、不发图也不占发送预算。随后按目标 Conversation、generation 与 asset ID 查询 `telegram_sends`，只把尚未成功交付的成品一起发送（单图 sendPhoto，2 张以上 sendMediaGroup）。发送请求审计记录 `asset_ids`；全部已送时返回成功的 `replayed:true`，Tool 结果文本列出相关投递批次的旧 Telegram message ID，只增加 `tool_calls` 和 canonical toolResult，不新建发送行、不增加 `sends_used`、限流用量或 Context 的 `send_count_total`/`send_seq`。生成后来增加的成品不会被旧交付误拦。去重随在线发送审计保留，跨 Invocation 与进程重启有效，不承诺超出保留窗口的幂等。
+- **延迟回执与重发**：图片回执在实际注入时附带 `image_delivery`，由互斥的 `delivered_asset_ids`、`pending_asset_ids`、`unknown_asset_ids` 三类列表组成且结果未知优先（同一 asset 的成功不抵消任何未决尝试，整代资产集合不可证明时全部归入未知），而不是沿用任务刚完成时的交付快照；因此工具链中已发送的图会被标为已送。用户明确要求重新发送时，只有普通用户消息轮（有 caller）可用 `resend:true`；完成回执轮不能绕过去重。任一待送资产存在 pending 或 `outcome_unknown` 的未决尝试、或旧发送带 `asset_ids_unknown` 时，都会阻止本次盲重试，即使显式 resend 也不绕过。真正发图仍审计 bot 消息与 `media`，并保留既有授权、引用 TTL、限流与发送屏障。
 - **失败语义**：失败/中断的轮次同样完成任务（回执带失败状态）；模型用自己的话解释失败，重试是新的 `image_generate` 提交，未送达的输出没有隐藏重发路径。
 
 配置段（模型、凭据、能力契约、热更新、软降级）见 [configuration.md](configuration.md#image-生成)；Admin 三页与启用开关见 [admin-panel.md](admin-panel.md#api)。

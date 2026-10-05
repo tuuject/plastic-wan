@@ -61,6 +61,21 @@ export interface CommandSender {
   readonly username: string | null;
 }
 
+/**
+ * The sender a permission check sees. An anonymous chat identity (`sender_chat`)
+ * is nobody: `/pause` and friends must never be grantable from a channel post
+ * or an anonymous group admin.
+ */
+export function commandSender(message: Message): CommandSender | null {
+  return message.from === undefined || message.sender_chat !== undefined
+    ? null
+    : {
+        id: BigInt(message.from.id),
+        name: [message.from.first_name, message.from.last_name].filter((part) => part !== undefined).join(' '),
+        username: message.from.username ?? null,
+      };
+}
+
 /** What chat-scoped `/model` itself writes; any other applied path came from the file. */
 function switchPaths(configuredChatId: number): ReadonlySet<string> {
   return new Set([

@@ -15,6 +15,7 @@ import { AgentRuntime, type CapabilityToolFactory, type ToolFactory } from './or
 import {
   BOT_COMMANDS,
   BotCommandService,
+  commandSender,
   type ParsedCommand,
   registerBotCommands,
 } from './orchestration/bot-commands.ts';
@@ -225,11 +226,9 @@ export async function serve(configPath: string, takeover = false): Promise<void>
                 if (outputs === undefined) {
                   return undefined;
                 }
-                return outputs.flatMap((output) => {
+                return outputs.map((output) => {
                   const content = current.assetContent(output.asset_id);
-                  return content === undefined
-                    ? []
-                    : [{ assetId: output.asset_id, bytes: content.bytes, fileName: output.file_name }];
+                  return { assetId: output.asset_id, bytes: content.bytes, fileName: output.file_name };
                 });
               },
             },
@@ -296,6 +295,7 @@ export async function serve(configPath: string, takeover = false): Promise<void>
       store,
       ingestion,
       scheduler: startedScheduler,
+      commands,
       allowedUpdates: ALLOWED_UPDATES,
       signal: catchUpController.signal,
     });
@@ -372,14 +372,7 @@ async function replyToCommand(context: Context, commands: BotCommandService, com
     return;
   }
   const chatId = message.chat.id;
-  const sender =
-    message.from === undefined || message.sender_chat !== undefined
-      ? null
-      : {
-          id: BigInt(message.from.id),
-          name: [message.from.first_name, message.from.last_name].filter((part) => part !== undefined).join(' '),
-          username: message.from.username ?? null,
-        };
+  const sender = commandSender(message);
   let text: string;
   try {
     text = await commands.run(command, BigInt(chatId), sender);

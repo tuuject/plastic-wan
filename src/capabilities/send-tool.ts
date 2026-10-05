@@ -6,6 +6,7 @@ import type { MessageEntity } from 'grammy/types';
 import Type, { type Static } from 'typebox';
 import type { CapabilityRefResolver, InvocationContext } from '../platform/invocation-context.ts';
 import { rejectToolCall, type SqliteStore } from '../store/database.ts';
+import { imageDeliveryState } from '../store/image-delivery.ts';
 import {
   chats,
   invocations,
@@ -21,6 +22,7 @@ import {
 export const SendInputSchema = Type.Object(
   {
     kind: Type.Optional(Type.Enum({ text: 'text', sticker: 'sticker', image: 'image' })),
+    resend: Type.Optional(Type.Boolean()),
     text: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
     parse_mode: Type.Optional(Type.Literal('MarkdownV2')),
     sticker_ref: Type.Optional(Type.String({ minLength: 1 })),
@@ -51,6 +53,7 @@ export type SendToolInput =
   | {
       readonly kind: 'image';
       readonly image_generation_id: string;
+      readonly resend?: boolean;
       readonly text?: string;
       readonly reply_to_message_id?: string;
     };
@@ -61,7 +64,11 @@ function narrowSendInput(input: Static<typeof SendInputSchema>): SendToolInput |
     (input.text !== undefined && input.sticker_ref === undefined && input.image_generation_id === undefined
       ? 'text'
       : undefined);
-  if (kind === undefined || (kind === 'sticker' && input.parse_mode !== undefined)) {
+  if (
+    kind === undefined ||
+    (kind === 'sticker' && input.parse_mode !== undefined) ||
+    (kind !== 'image' && input.resend !== undefined)
+  ) {
     return undefined;
   }
   const reply = input.reply_to_message_id === undefined ? {} : { reply_to_message_id: input.reply_to_message_id };
@@ -82,7 +89,13 @@ function narrowSendInput(input: Static<typeof SendInputSchema>): SendToolInput |
     return undefined;
   }
   const caption = input.text === undefined ? {} : { text: input.text };
-  return { kind: 'image', image_generation_id: input.image_generation_id, ...caption, ...reply };
+  return {
+    kind: 'image',
+    image_generation_id: input.image_generation_id,
+    ...(input.resend === undefined ? {} : { resend: input.resend }),
+    ...caption,
+    ...reply,
+  };
 }
 
 interface TelegramSendResponse {
@@ -207,7 +220,7 @@ function escapeMarkdownV2LinkText(text: string): string {
 
 export function createSendTool(
   environment: SendToolEnvironment,
-): AgentTool<typeof SendInputSchema, { telegramMessageId: string }> {
+): AgentTool<typeof SendInputSchema, { telegramMessageId: string; replayed?: boolean }> {
   const mentionedTasks = new Set<bigint>();
   const textConstraints = [
     environment.maxTextLength === undefined
@@ -220,7 +233,7 @@ export function createSendTool(
   return {
     name: 'send',
     label: 'Send to Telegram',
-    description: `Publish exactly one warranted user-visible Telegram message or sticker. Use this only after deciding the new messages or a current task completion require a reply, clarification, or confirmation; do not use it merely because the tool is available, to answer history-only content, or to publish private reasoning. Keep the message concise and self-contained. For text, kind may be omitted; omit parse_mode for plain text, or set parse_mode to MarkdownV2 only when the text is correctly escaped. ${textConstraints} For a sticker, kind must be sticker and sticker_ref must be a stk_ value returned by the search_stickers capability (via execute); img_ refs cannot be sent. Set reply_to_message_id only to a message visible in this conversation, preferring the relevant new message; when several separate discussions are active, set it on every message so each reply is visibly attached to the one it answers. Success means Telegram accepted the send; if the tool fails or reports an unknown outcome, do not claim it was sent and do not blindly retry. One batch of new messages may hold several separate discussions among different people: keep one message to one discussion, calling send once per discussion you choose to answer rather than merging unrelated discussions into a single message, and leave a discussion unanswered when you have nothing to add to it. Still do not split one answer across several messages; repeated sends are rate limited per chat.`,
+    description: `Publish exactly one warranted user-visible Telegram message or sticker. Use this only after deciding the new messages or a current task completion require a reply, clarification, or confirmation; do not use it merely because the tool is available, to answer history-only content, or to publish private reasoning. Keep the message concise and self-contained. For text, kind may be omitted; omit parse_mode for plain text, or set parse_mode to MarkdownV2 only when the text is correctly escaped. ${textConstraints} For generated images, use kind:image with image_generation_id from this conversation. Already delivered outputs are not sent again; a replayed result reports the earlier delivery, not a new message. Set resend:true only when a new user message explicitly asks to resend those pictures, never just to handle a completion receipt or retry an unknown outcome. For a sticker, kind must be sticker and sticker_ref must be a stk_ value returned by the search_stickers capability (via execute); img_ refs cannot be sent. Set reply_to_message_id only to a message visible in this conversation, preferring the relevant new message; when several separate discussions are active, set it on every message so each reply is visibly attached to the one it answers. Success means Telegram accepted the send; if the tool fails or reports an unknown outcome, do not claim it was sent and do not blindly retry. One batch of new messages may hold several separate discussions among different people: keep one message to one discussion, calling send once per discussion you choose to answer rather than merging unrelated discussions into a single message, and leave a discussion unanswered when you have nothing to add to it. Still do not split one answer across several messages; repeated sends are rate limited per chat.`,
     parameters: SendInputSchema,
     executionMode: 'sequential',
     execute: async (toolCallId, input, signal) => {
@@ -273,11 +286,17 @@ export function createSendTool(
         recordRejectedSend(environment, toolCallId, input, 'sticker_ref_not_authorized');
         throw new Error('sticker_ref is not authorized in this conversation context');
       }
-      const resolvedPictures =
-        send.kind === 'image'
-          ? environment.imageGeneration?.resolve(send.image_generation_id, environment.context.conversationId)
-          : undefined;
-      const generationPictures =
+      let resolvedPictures: ReturnType<NonNullable<SendToolEnvironment['imageGeneration']>['resolve']>;
+      try {
+        resolvedPictures =
+          send.kind === 'image'
+            ? environment.imageGeneration?.resolve(send.image_generation_id, environment.context.conversationId)
+            : undefined;
+      } catch {
+        recordRejectedSend(environment, toolCallId, input, 'image_generation_unavailable');
+        throw new Error('image_generation_unavailable: generated output files could not be read');
+      }
+      let generationPictures =
         send.kind === 'image' ? (resolvedPictures === undefined ? [] : resolvedPictures) : undefined;
       if (send.kind === 'image' && resolvedPictures === undefined) {
         recordRejectedSend(environment, toolCallId, input, 'image_generation_not_authorized');
@@ -299,6 +318,53 @@ export function createSendTool(
         const errorCode = signal?.aborted === true ? 'aborted' : 'deadline_exceeded';
         recordRejectedSend(environment, toolCallId, input, errorCode);
         throw new Error(`Not sent: ${errorCode}`);
+      }
+      if (send.kind === 'image' && generationPictures !== undefined) {
+        if (send.resend === true && (completion !== null || environment.context.callerUserId === null)) {
+          recordRejectedSend(environment, toolCallId, input, 'image_resend_requires_user');
+          throw new Error('resend:true requires an explicit new user request, not a completion receipt');
+        }
+        const delivery = imageDeliveryState(environment.store.orm, targetConversationId, send.image_generation_id);
+        // A prior uncertain attempt is not permission to try again, even when a
+        // model asks for a resend. The user must resolve that outcome first.
+        if (delivery.unknownAssets || generationPictures.some((picture) => delivery.uncertain.has(picture.assetId))) {
+          recordRejectedSend(environment, toolCallId, input, 'image_delivery_unknown');
+          throw new Error('An earlier image delivery is pending or has an unknown outcome; do not resend blindly');
+        }
+        if (send.resend !== true) {
+          const messageIds = [
+            ...new Set(
+              generationPictures.flatMap((picture) => {
+                const messageId = delivery.delivered.get(picture.assetId);
+                return messageId === undefined ? [] : [messageId];
+              }),
+            ),
+          ];
+          const firstMessageId = messageIds[0];
+          generationPictures = generationPictures.filter((picture) => !delivery.delivered.has(picture.assetId));
+          if (generationPictures.length === 0 && firstMessageId !== undefined) {
+            const text = `Images already delivered; Telegram delivery message(s): ${messageIds.join(', ')}. No new message was sent.`;
+            const now = new Date().toISOString();
+            environment.store.orm
+              .insert(toolCalls)
+              .values({
+                invocationId: environment.context.invocationId,
+                toolCallId,
+                toolName: 'send',
+                argumentsJson: JSON.stringify(send),
+                state: 'success',
+                sideEffect: false,
+                resultText: text,
+                createdAt: now,
+                finishedAt: now,
+              })
+              .run();
+            return {
+              content: [{ type: 'text', text }],
+              details: { telegramMessageId: firstMessageId, replayed: true },
+            };
+          }
+        }
       }
       // Checked last, so only a send that would otherwise go out is held back:
       // an invalid one keeps its own error and the barrier stays unspent.
@@ -351,7 +417,12 @@ export function createSendTool(
               kind: send.kind,
               reply_to_message_id: send.reply_to_message_id ?? null,
               ...(send.kind === 'image'
-                ? { generation_id: send.image_generation_id, pictures: generationPictures?.length ?? 0 }
+                ? {
+                    generation_id: send.image_generation_id,
+                    pictures: generationPictures?.length ?? 0,
+                    asset_ids: generationPictures?.map((picture) => picture.assetId) ?? [],
+                    resend: send.resend === true,
+                  }
                 : {}),
             }),
             state: 'pending',

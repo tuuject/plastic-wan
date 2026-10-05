@@ -18,6 +18,8 @@ Plastic Wan 使用单个 SQLite 数据库保存消息、调度状态、能力索
 
 迁移 `021` 删除旧 `internal_contexts` 旁路观察，不向 canonical history 回填，也不删任务、回执或正常审计。工具结果只随 `context_messages` 保留；本次移除旧提示词也会改变稳定 prompt hash，升级后首次打开 Conversation 时仍按既有规则重建 Context，不为旧外挂保留兼容通道。迁移 `022` 为既有回执回填其所属 Invocation 的 Bucket，并把唯一性从 Invocation 转为非空 `bucket_id`；因此同一 Invocation 可保留多个 receipt。
 
+迁移 `027` 为图片发送去重添加发送审计查询索引，并给旧 `telegram_sends.request_json` 回填发送当时已存在的 `asset_ids`（标记 `asset_ids_inferred`）。数量与旧 `pictures` 不一致时标记 `asset_ids_unknown`，阻止把不确定的旧投递当成可重发；后续生成的资产不会回填成旧发送的输出。发送审计本身就是交付台账，不引入第二套 outbox，去重范围也受在线保留窗口约束。
+
 新增迁移时：
 
 1. 创建下一个连续编号文件。
@@ -55,14 +57,14 @@ Plastic Wan 使用单个 SQLite 数据库保存消息、调度状态、能力索
 
 - `conversation_contexts.conversation_id` 带 UNIQUE 约束：**每个 Conversation 至多一行 context**。
 - 保留窗口是半开区间 `[head_seq, next_seq)`：`next_seq` 是下一个空位，`head_seq` 是第一条保留行；`context_messages` 以 `(context_id, seq)` 为主键，`seq` 只增不减，被丢弃的行不从编号里移除。
-- `send_count_total` 是该 context 累计的成功 `send` 次数，跨 Invocation 累计，`head_seq` 前移时不清零。
+- `send_count_total` 是该 context 累计的成功实发 `send` 次数，跨 Invocation 累计，`head_seq` 前移时不清零；图片去重返回的 `replayed:true` 只落 toolResult，不增加该计数。
 - `system_prompt_hash` 是稳定系统提示的 SHA-256。打开 context 时 hash 不一致按「重建」处理：删除该 context 的全部 `context_messages` 与 `context_refs`，`head_seq`/`next_seq` 复位为 1、`send_count_total` 归零、`active_invocation_id` 清空。
 - `active_invocation_id` 指向当前拥有该 context 的 running Invocation，运行结束时清空；Invocation 行本身被清理时置 `NULL`。
 - `last_active_at` 在每次追加行与 `touch`（Invocation 开始/结束）时刷新，是保留清理判定「空闲 Conversation」的依据；`last_gc_at` 记录最近一次 GC 时间。
 - `context_messages.payload_json` 保存**完整 AgentMessage JSON**（含 thinking 与 tool call 结构），可以直接解码重放，而不是从文本反推；`role` 只有 `user`/`assistant`/`toolResult`。
 - `agent_messages` 与 `context_messages` 的分工：前者是审计轨迹（每 Invocation 扁平展开、人可读、把 harness 提醒单独标成 `harness_nudge`），后者是重放来源（完整结构与 thinking、按 Conversation 长期保留）；两者都由 `agent-runtime` 写入，互不替代。
 - `is_checkpoint` 标记一条注入批次的首条 user 消息；GC 只会把 `head_seq` 推到 checkpoint 行上。
-- `send_seq` 只在「成功 `send` 的 toolResult」行上非空，值等于写入时的 `send_count_total + 1`；GC 用它统计保留窗内还剩几次发送。
+- `send_seq` 只在「成功实发 `send` 的 toolResult」行上非空（排除图片去重返回），值等于写入时的 `send_count_total + 1`；GC 用它统计保留窗内还剩几次发送。
 - `est_tokens` 是逐行 Token 估算，供 GC 与收尾判定使用，不是精确计数。
 - `evicted_at` 是软删除标记：GC 不立即物理删除行，只打标记；行保留到在线窗口之后才由 `purgeExpiredData` 真正删除（见「保留清理」）。
 - `invocation_id` 记录写入该行的 Invocation，Invocation 被清理时置 `NULL`，历史行本身不随之删除。
@@ -119,7 +121,7 @@ Alarm 是 `plugin_id = 'alarm'` 的任务投影。`long_tasks.created_by_user_id
 
 Developer 清除端点按主键范围分批把 `model_calls.request_json` / `response_json` 置为 `NULL`，不删除行、不改变关联或 retention，也不触碰 `telegram_sends` 的同名字段。两列本来就可空，无需新增迁移；释放空间供 SQLite 复用，不保证文件立即缩小，不执行 `VACUUM`，不修改旧备份。
 
-`side_effect_started` 和 `outcome_unknown` 用于阻止不可逆 Tool 的盲目重试。审计记录应保留稳定错误码；不要依赖解析自由文本错误。
+`side_effect_started` 和 `outcome_unknown` 用于阻止不可逆 Tool 的盲目重试。审计记录应保留稳定错误码；不要依赖解析自由文本错误。图片交付去重直接读这份发送台账：同一 Conversation 与 generation 下，只有 `success` 且带 `telegram_message_id` 的 `request_json.asset_ids` 算已交付；`pending`、`outcome_unknown` 按未决处理，已成功的旧发送若带 `asset_ids_unknown` 也不能证明具体交付集合，不能当作可重发。
 
 ### 媒体与 Sticker 缓存
 

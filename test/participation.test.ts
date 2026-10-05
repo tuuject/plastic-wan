@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Message, Update } from 'grammy/types';
 import { TelegramIngestion } from '../src/ingress/telegram-ingestion.ts';
+import { BotCommandService } from '../src/orchestration/bot-commands.ts';
 import { BucketScheduler } from '../src/orchestration/scheduler.ts';
 import { ConversationContextStore } from '../src/context/context-store.ts';
 import { ContextRefStore } from '../src/context/context-refs.ts';
@@ -50,6 +51,7 @@ interface Harness {
   readonly configStore: RuntimeConfigurationStore;
   readonly ingestion: TelegramIngestion;
   readonly scheduler: BucketScheduler;
+  readonly commands: BotCommandService;
 }
 
 async function setup(
@@ -82,15 +84,17 @@ async function setup(
   const loaded = await loadConfig(configPath);
   const configStore = await testConfigStore(loaded);
   const store = await SqliteStore.open(loaded.config);
+  const scheduler = new BucketScheduler(store, configStore, async () => ({
+    state: 'completed',
+    reason: 'done',
+  }));
   return {
     store,
     config: loaded.config,
     configStore,
     ingestion: new TelegramIngestion(store, configStore, { id: BOT_ID, username: BOT_USERNAME }),
-    scheduler: new BucketScheduler(store, configStore, async () => ({
-      state: 'completed',
-      reason: 'done',
-    })),
+    scheduler,
+    commands: new BotCommandService(store, configStore, scheduler),
   };
 }
 
@@ -590,12 +594,13 @@ describe('startup catch-up participation', () => {
   const catchUpAt = new Date('2026-08-15T13:00:10.000Z');
 
   test('skips a quiet chat without starting an invocation', async () => {
-    const { store, ingestion, scheduler } = await setup({ global: { active_windows: [DAY_WINDOW] } });
+    const { store, ingestion, scheduler, commands } = await setup({ global: { active_windows: [DAY_WINDOW] } });
     const result = await runStartupCatchUp({
       api: fakeApi([groupMessage(1, 10, { text: 'while down' })]),
       store,
       ingestion,
       scheduler,
+      commands,
       allowedUpdates: ['message', 'edited_message', 'my_chat_member'],
       now: () => catchUpAt,
     });
@@ -608,12 +613,13 @@ describe('startup catch-up participation', () => {
   });
 
   test('resumes a chat whose attention window a catch-up mention refreshed', async () => {
-    const { store, ingestion, scheduler } = await setup({ global: { active_windows: [DAY_WINDOW] } });
+    const { store, ingestion, scheduler, commands } = await setup({ global: { active_windows: [DAY_WINDOW] } });
     const result = await runStartupCatchUp({
       api: fakeApi([groupMessage(1, 10, mentionText())]),
       store,
       ingestion,
       scheduler,
+      commands,
       allowedUpdates: ['message', 'edited_message', 'my_chat_member'],
       now: () => catchUpAt,
     });

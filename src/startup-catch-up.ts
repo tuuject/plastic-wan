@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import type { Update } from 'grammy/types';
 import type { TelegramIngestion } from './ingress/telegram-ingestion.ts';
+import { type BotCommandService, commandSender } from './orchestration/bot-commands.ts';
 import { type BucketScheduler, STARTUP_CATCH_UP_STATE_KEY } from './orchestration/scheduler.ts';
 import type { SqliteStore } from './store/database.ts';
 import { appState } from './store/schema.ts';
@@ -21,6 +22,13 @@ export interface StartupCatchUpOptions {
   readonly store: SqliteStore;
   readonly ingestion: TelegramIngestion;
   readonly scheduler: BucketScheduler;
+  /**
+   * Runs the commands ingestion reports during the drain — `/pause` and
+   * `/resume` only, in update order. The service applies the same admin gate
+   * and state transitions as live commands; its reply is discarded because
+   * these updates are old.
+   */
+  readonly commands: BotCommandService;
   readonly allowedUpdates: readonly Exclude<keyof Update, 'update_id'>[];
   readonly signal?: AbortSignal;
   readonly now?: () => Date;
@@ -73,10 +81,18 @@ export async function runStartupCatchUp(options: StartupCatchUpOptions): Promise
       break;
     }
     for (const update of updates) {
-      const result = options.ingestion.ingestCatchUp(update, currentTime());
+      const receivedAt = currentTime();
+      const result = options.ingestion.ingestCatchUp(update, receivedAt);
       updatesReceived += 1;
       if (result.messageId !== undefined && update.message !== undefined) {
         storedMessages += 1;
+      }
+      const command = result.command;
+      const message = update.message;
+      if (command !== undefined && message !== undefined) {
+        // In update order, so a later /resume or /pause wins exactly as it
+        // would have live; duplicates never get here (ingestion dedupes them).
+        await options.commands.run(command, BigInt(message.chat.id), commandSender(message), receivedAt);
       }
     }
     const lastUpdate = updates.at(-1);

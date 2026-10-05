@@ -251,7 +251,10 @@ export class InvocationQueueService {
                   conversationId: latest.conversation_id,
                   state: 'queued',
                   kind: 'startup_catch_up',
-                  firstReceivedAt: startedAt.toISOString(),
+                  // Recovery ages queued work from this clock. A slow/resumed
+                  // drain is fresh work, not an expired bucket; message selection
+                  // still uses the persisted `startedAt`.
+                  firstReceivedAt: timestamp,
                   deadlineAt: timestamp,
                   queuedAt: timestamp,
                   createdAt: timestamp,
