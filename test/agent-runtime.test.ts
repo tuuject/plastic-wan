@@ -168,6 +168,18 @@ test.each([undefined, false, true])(
       expect(nextCall?.response_json).toBe('{"status":200}');
     }
     const auditedCalls = store.orm.select().from(modelCalls).all();
+    expect(auditedCalls[0]?.replayInputJson !== null).toBe(recordPayloads === true);
+    expect(auditedCalls[1]?.replayInputJson).toBeNull();
+    if (recordPayloads === true) {
+      expect(JSON.parse(auditedCalls[0]!.replayInputJson!)).toMatchObject({
+        version: 1,
+        tools: [
+          expect.objectContaining({ name: 'read' }),
+          expect.objectContaining({ name: 'send' }),
+          expect.objectContaining({ name: 'execute' }),
+        ],
+      });
+    }
     for (const call of auditedCalls) {
       expect(call.outputTokens).toBeGreaterThan(0n);
       expect(call.totalTokens).toBe(

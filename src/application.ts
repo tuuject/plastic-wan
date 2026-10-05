@@ -9,6 +9,7 @@ import { grammySendApi } from './capabilities/telegram-send-api.ts';
 import { createMemoryTools, MemoryStore } from './context/memory.ts';
 import { createImageBridge, type ImageBridge } from './image/bridge.ts';
 import { createImageService, type ImageService } from './image/service.ts';
+import { AdminQueryError } from './ingress/admin/audit.ts';
 import { AdminServer } from './ingress/admin/server.ts';
 import { TelegramIngestion } from './ingress/telegram-ingestion.ts';
 import { AgentRuntime, type CapabilityToolFactory, type ToolFactory } from './orchestration/agent-runtime.ts';
@@ -21,6 +22,7 @@ import {
 } from './orchestration/bot-commands.ts';
 import { ConversationRuntime } from './orchestration/conversation-runtime.ts';
 import { BucketScheduler } from './orchestration/scheduler.ts';
+import { ReplayError, ReplayRunner } from './orchestration/replay.ts';
 import { KeyedSemaphore } from './platform/concurrency.ts';
 import { assertConfigPermissions, loadConfig } from './platform/config.ts';
 import { ConfigReloader } from './platform/config-reload.ts';
@@ -62,6 +64,7 @@ export async function serve(configPath: string, takeover = false): Promise<void>
   let mcp: McpManager | undefined;
   let admin: AdminServer | undefined;
   let startupCatchUpController: AbortController | undefined;
+  const replayShutdown = new AbortController();
   let shuttingDown = false;
   let restartRequested = false;
   const shutdown = (): void => {
@@ -71,6 +74,7 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     shuttingDown = true;
     logEvent('shutdown_requested');
     startupCatchUpController?.abort(new Error('shutdown'));
+    replayShutdown.abort(new Error('shutdown'));
     // Unblock bot.start() so the finally block below runs the full cleanup.
     // grammY's stop() also fires a best-effort offset-confirming getUpdates;
     // swallow its rejection so it can never become an unhandled promise
@@ -308,6 +312,14 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     await mcpManager.start();
     startedScheduler.start();
     if (loaded.config.admin?.enabled === true) {
+      const replay = new ReplayRunner({
+        orm: store.orm,
+        configStore,
+        secrets,
+        systemResources,
+        modelGate,
+        shutdownSignal: replayShutdown.signal,
+      });
       const adminServer = new AdminServer({
         store,
         configStore,
@@ -319,6 +331,16 @@ export async function serve(configPath: string, takeover = false): Promise<void>
         requestRestart,
         imageService,
         imageBridge,
+        replayInvocation: async (id, input, signal) => {
+          try {
+            return await replay.run(id, input, signal);
+          } catch (error) {
+            if (error instanceof ReplayError) {
+              throw new AdminQueryError(error.code, error.message, error.status);
+            }
+            throw error;
+          }
+        },
       });
       admin = adminServer;
       const listening = await adminServer.start();
@@ -337,6 +359,7 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(secrets.redact(message));
   } finally {
+    replayShutdown.abort(new Error('shutdown'));
     process.off('SIGTERM', shutdown);
     process.off('SIGINT', shutdown);
     stopWatcher?.();

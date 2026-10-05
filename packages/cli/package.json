@@ -1,0 +1,21 @@
+{
+  "name": "@plasticwan/cli",
+  "version": "0.1.0",
+  "description": "Plastic Wan Admin API 调试客户端（invocation list/get/replay）",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "plasticwan-debug": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "tsc -p tsconfig.json"
+  }
+}

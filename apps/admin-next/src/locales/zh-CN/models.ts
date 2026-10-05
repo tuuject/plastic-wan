@@ -247,17 +247,17 @@ export const models: typeof modelsEn = {
     debugDescription: '仅在需要调查模型调用时开启。',
     recordLabel: '记录原始请求报文以便调试',
     recordDescription:
-      '开启后保存模型调用的原始请求与响应快照，以便在 Invocation 详情中排查问题。可能显著增加数据库占用。',
+      '开启后保存模型调用的原始请求与响应快照，以便在 Invocation 详情中排查问题，并尽力保存首次请求的纯文本输入供重放。可能显著增加数据库占用。',
     recordHint: '默认关闭。修改后对新的模型调用生效；关闭不会清除历史报文。',
     stateMismatch: '文件设置与运行状态不同。当前运行状态：{{status}}。 请在 Settings 中应用配置文件。',
     historyTitle: '历史报文',
     historyDescription:
-      '清除已保存的模型请求与响应快照，保留 Invocation、调用记录、Token、费用、状态和错误审计。 SQLite 会复用释放的空间，数据库文件不一定立即缩小。',
+      '清除已保存的模型请求与响应快照，保留 Invocation、调用记录、Token、费用、状态和错误审计。重放输入也会一并删除，受影响的历史 Invocation 将无法再重放。 SQLite 会复用释放的空间，数据库文件不一定立即缩小。',
     clearButton: '清除此前记录的原始请求报文',
     cleared: '已清除 {{count}} 条模型调用的调试报文。',
     confirmTitle: '清除此前记录的原始请求报文？',
     confirmDescription:
-      '此操作不可撤销，仅清除模型请求与响应快照，保留其他审计数据。开启记录时，新报文仍会继续保存。不会压缩数据库文件。',
+      '此操作不可撤销，将清除模型请求与响应快照，保留其他审计数据。重放输入也会一并删除，受影响的历史 Invocation 将无法再重放。开启记录时，新报文仍会继续保存。不会压缩数据库文件。',
     confirmClear: '确认清除',
   },
 };

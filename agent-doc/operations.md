@@ -120,6 +120,33 @@ node src/cli.ts doctor --config dev-data/config.jsonc --output-agent-prompt
 
 该选项仍会执行完整 Doctor 检查；成功 JSON 中增加 `agent_prompt` 字段。输出包含 Prompt 正文，但不会包含 Secret、Chat 记忆或 Chat-specific instructions。不要在共享日志中使用该选项。
 
+## Invocation 调试客户端
+
+`packages/cli`（工作区包 `@plasticwan/cli`，私有、**尚未发布**）提供只做 invocation 查询与重放的 `plasticwan-debug`。它不包含 SDK、密钥管理或完整 Eval 能力，只有 list/get/replay 三个子命令；Node.js ≥ 24，无运行时依赖。
+
+```bash
+pnpm cli:build                         # 等价 pnpm --filter @plasticwan/cli build，输出 packages/cli/dist
+pnpm cli:check                         # 对 packages/cli 做 TypeScript 检查（不产出 JS）
+pnpm --filter @plasticwan/cli pack     # prepack 先构建，生成可安装的 tarball（含 dist 与 README）
+```
+
+```bash
+export PLASTICWAN_ENDPOINT=https://admin.example.com   # 必填，不猜 admin.port
+export PLASTICWAN_API_KEY=...                          # 推荐环境变量，避免进入 shell 历史
+
+node packages/cli/dist/bin.js invocation list --limit 20 --state completed --chat -1001234567890 --json
+plasticwan-debug invocation get 12345 --json                       # 全局安装 tarball 后
+plasticwan-debug invocation replay 12345 --json
+plasticwan-debug invocation replay 12345 --system-prompt prompt.txt --json
+printf '%s' '临时替换的 system prompt' | plasticwan-debug invocation replay 12345 --system-prompt - --json
+```
+
+- API key 只能在面板 Session 下创建（当前没有密钥管理界面，见 [admin-panel.md](admin-panel.md#程序化-api-密钥)）。tarball 可用 `npm install -g` 安装，随后直接用 `plasticwan-debug` 调用。
+- endpoint 必须显式给出；明文 `http` 仅允许 loopback（`127.0.0.0/8`、`::1`、`localhost`），远端必须 `https`，URL 不得带凭据、query 或 fragment。
+- 请求不跟随重定向、不自动重试；默认超时 list/get 30 秒、replay 300 秒；stdin 读取单独使用同一 `--timeout-ms` 上限，超时返回 `timeout`（退出码 1）且不发送 HTTP 请求；响应体超过 4 MiB 被拒绝。
+- `--json` 时 stdout 恰好一个 JSON 文档；失败时 stderr 为 `{"error","message"}`（经 key 脱敏）。退出码 `0` 成功、`1` 请求/服务端/replay 失败、`2` 参数或输入不合法。replay 即使返回的 `error` 非空也会把完整结构写在 stdout。
+- replay 的行为边界（合成工具、不写生产数据、按 Provider 计费）见 [admin-panel.md](admin-panel.md#invocation-重放)；选项全集与响应形状以 [packages/cli/README.md](../packages/cli/README.md) 与源码为准。
+
 ## 日志
 
 用户可见日志写 stdout，格式为单行 JSON；框架 trace 可能写 stderr。至少监控：

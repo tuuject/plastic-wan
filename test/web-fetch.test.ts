@@ -8,7 +8,8 @@ import type { InvocationContext } from '../src/platform/invocation-context.ts';
 import { BucketScheduler } from '../src/orchestration/scheduler.ts';
 import { TelegramIngestion } from '../src/ingress/telegram-ingestion.ts';
 import { BUILTIN_PLUGINS } from '../src/plugins/builtin.ts';
-import { createToolAudit, loadPlugins } from '../src/plugins/plugin.ts';
+import { loadPlugins } from '../src/plugins/plugin.ts';
+import { createToolAudit } from '../src/store/tool-audit.ts';
 import { createWebFetchTool } from '../src/plugins/web-fetch/web-fetch.ts';
 import { renderInvocationContext, testConfigJsonc, testConfigStore, writeTestConfig } from './helpers.ts';
 

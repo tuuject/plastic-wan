@@ -11,7 +11,9 @@
     "plasticwan": "./src/cli.ts"
   },
   "scripts": {
-    "check": "tsc --noEmit && pnpm --filter plasticwan-admin-next run check && pnpm run docs:check",
+    "check": "tsc --noEmit && pnpm run cli:check && pnpm --filter plasticwan-admin-next run check && pnpm run docs:check",
+    "cli:check": "tsc -p packages/cli/tsconfig.json --noEmit",
+    "cli:build": "tsc -p packages/cli/tsconfig.json",
     "test": "vitest run",
     "start": "node src/cli.ts serve",
     "admin:dev": "pnpm --filter plasticwan-admin-next run dev",

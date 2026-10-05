@@ -1,25 +1,11 @@
 import type { ExecutableCapability } from '../capabilities/execute-tool.ts';
 import type { RawConfig } from '../platform/config.ts';
 import type { InvocationContext } from '../platform/invocation-context.ts';
-import { finishToolCall, rejectToolCall, type SqliteStore, startToolCall } from '../store/database.ts';
+import type { SqliteStore } from '../store/database.ts';
 import { LongTaskService, type PluginTaskScope } from '../store/long-tasks.ts';
+import { createToolAudit, type ToolAudit } from '../store/tool-audit.ts';
 
 const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
-
-/**
- * Invocation-bound audit for a capability that records its own `tool_calls`
- * row next to the `execute` row. Plugins get this instead of the store, so
- * audit stays the only database access a stateless plugin has.
- */
-export interface ToolAudit {
-  start(toolCallId: string, toolName: string, argumentsJson: string, sideEffect: boolean): ToolAuditRecord;
-  reject(toolCallId: string, toolName: string, argumentsJson: string, sideEffect: boolean, errorCode: string): void;
-}
-
-export interface ToolAuditRecord {
-  succeed(resultText: string): void;
-  fail(errorCode: string): void;
-}
 
 /**
  * What the host hands a plugin when it assembles tools for one invocation.
@@ -141,24 +127,6 @@ export function loadPlugins(plugins: readonly AgentPlugin[], options: LoadPlugin
         };
         return plugin.capabilities?.(scope) ?? [];
       });
-    },
-  };
-}
-
-export function createToolAudit(store: SqliteStore, invocationId: bigint): ToolAudit {
-  return {
-    start(toolCallId, toolName, argumentsJson, sideEffect) {
-      const startedAt = performance.now();
-      const auditId = startToolCall(store.orm, invocationId, toolCallId, toolName, argumentsJson, sideEffect);
-      return {
-        succeed: (resultText) =>
-          finishToolCall(store.orm, auditId, 'success', resultText, null, { startedAt, pendingOnly: true }),
-        fail: (errorCode) =>
-          finishToolCall(store.orm, auditId, 'error', null, errorCode, { startedAt, pendingOnly: true }),
-      };
-    },
-    reject(toolCallId, toolName, argumentsJson, sideEffect, errorCode) {
-      rejectToolCall(store.orm, invocationId, toolCallId, toolName, argumentsJson, sideEffect, errorCode);
     },
   };
 }

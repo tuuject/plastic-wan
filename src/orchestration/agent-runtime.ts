@@ -38,6 +38,8 @@ import type { SecretStore } from '../platform/secrets.ts';
 import type { SystemResources, SystemSkill } from '../platform/system-resources.ts';
 import { applyToolSchemaKeywords } from '../platform/tool-schema.ts';
 import { resolveChatConfig, type SqliteStore } from '../store/database.ts';
+import { serializeReplayInput } from '../store/replay-input.ts';
+import { createToolAudit } from '../store/tool-audit.ts';
 import {
   agentMessages,
   buckets,
@@ -219,7 +221,7 @@ export class AgentRuntime {
       [
         createReadTool({ store: this.#store, context, resources: this.#systemResources }),
         send,
-        createExecuteTool({ store: this.#store, context, capabilities: [] }),
+        createExecuteTool({ audit: createToolAudit(this.#store, context.invocationId), capabilities: [] }),
         ...additionalTools,
       ],
       model.contextWindow,
@@ -393,6 +395,7 @@ export class AgentRuntime {
       );
       return true;
     };
+    const executableCapabilities = this.#capabilityTools?.(contextState, deadline, capabilities) ?? [];
     const buildTools = (target: InvocationContext, exposeZzz: boolean): readonly AgentTool[] => [
       createReadTool({ store: this.#store, context: target, resources: this.#systemResources }),
       createSendTool({
@@ -409,9 +412,8 @@ export class AgentRuntime {
         ...(this.#imageGeneration === undefined ? {} : { imageGeneration: this.#imageGeneration }),
       }),
       createExecuteTool({
-        store: this.#store,
-        context: target,
-        capabilities: this.#capabilityTools?.(target, deadline, capabilities) ?? [],
+        audit: createToolAudit(this.#store, target.invocationId),
+        capabilities: executableCapabilities,
       }),
       ...(this.#additionalTools?.(target, deadline, capabilities) ?? []),
       ...(exposeZzz ? [zzz] : []),
@@ -576,6 +578,7 @@ export class AgentRuntime {
       return true;
     };
 
+    let firstModelRequest = true;
     agent.streamFunction = async (streamModel, modelContext, options) => {
       if (
         !bypassDailyBudget() &&
@@ -595,6 +598,23 @@ export class AgentRuntime {
         modelContext.tools?.map((tool) => tool.name) ?? [],
       );
       const recordPayloads = this.#configStore.current().config.developer.record_model_payloads;
+      if (firstModelRequest && recordPayloads) {
+        try {
+          this.#store.orm
+            .update(modelCalls)
+            .set({
+              replayInputJson: serializeReplayInput(
+                modelContext,
+                executableCapabilities.map((entry) => entry.tool),
+              ),
+            })
+            .where(eq(modelCalls.id, callId))
+            .run();
+        } catch {
+          // An unrepresentable snapshot must not interrupt a live invocation.
+        }
+      }
+      firstModelRequest = false;
       try {
         const stream = snapshot.models.streamSimple(streamModel, modelContext, {
           ...options,

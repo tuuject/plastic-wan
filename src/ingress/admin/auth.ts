@@ -326,6 +326,7 @@ function assertCredentials(credentials: AdminCredentials): void {
   }
 }
 
-function hashToken(token: string): string {
+/** Digest stored for session tokens and API keys; plaintext is never persisted. */
+export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }

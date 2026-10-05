@@ -258,18 +258,18 @@ export const models = {
     debugDescription: 'Enable only when investigating model calls.',
     recordLabel: 'Record raw request payloads for debugging',
     recordDescription:
-      'When enabled, saves raw request and response snapshots of model calls so they can be inspected in the Invocation detail. May significantly increase database usage.',
+      'When enabled, saves raw request and response snapshots of model calls for the Invocation detail, plus a best-effort text-only input from the first request for replay. May significantly increase database usage.',
     recordHint: 'Off by default. Changes apply to new model calls; turning it off does not clear existing payloads.',
     stateMismatch:
       'The file setting differs from the running state. Current running state: {{status}}. Apply the configuration file in Settings.',
     historyTitle: 'Payload history',
     historyDescription:
-      'Clear saved model request and response snapshots while keeping Invocation, call records, Token, cost, status, and error audit. SQLite reuses the freed space; the database file does not necessarily shrink immediately.',
+      'Clear saved model request and response snapshots while keeping Invocation, call records, Token, cost, status, and error audit. Replay inputs are also deleted; affected historical Invocations can no longer be replayed. SQLite reuses the freed space; the database file does not necessarily shrink immediately.',
     clearButton: 'Clear previously recorded raw request payloads',
     cleared: 'Cleared debug payloads for {{count}} model calls.',
     confirmTitle: 'Clear previously recorded raw request payloads?',
     confirmDescription:
-      'This cannot be undone. Only the model request and response snapshots are cleared; other audit data is kept. While recording is enabled, new payloads continue to be saved. The database file is not compacted.',
+      'This cannot be undone. Model request and response snapshots are cleared; other audit data is kept. Replay inputs are also deleted; affected historical Invocations can no longer be replayed. While recording is enabled, new payloads continue to be saved. The database file is not compacted.',
     confirmClear: 'Confirm clear',
   },
 };

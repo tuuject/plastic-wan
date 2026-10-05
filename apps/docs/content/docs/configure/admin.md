@@ -34,6 +34,7 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
 - **图片设置**：图片功能的启用开关、生图凭据与模型配置。保存后立即应用，不需要重启；禁用会删除整个 `image` 段并清理不再引用的 key jar 条目。
 - **Settings**：对手改配置使用 **Apply config file**，并查看 Saved 与 Running 状态及 `restart_required`。
 - **Developer**：按需记录模型调用的调试报文，或在确认后清除已有报文。
+- **API 密钥 / Invocation 重放**：为 CLI 与评估工具创建密钥，并重放已完成 Invocation 的模型请求；两者目前只在 API 上提供，没有页面入口，见下文。
 
 ## 查看和复制 Telegram ID
 
@@ -61,9 +62,59 @@ Developer 页的「记录原始请求报文以便调试」开关写回 `config.j
 
 整个 `developer` 节和其中的字段均可省略，缺省为 `false`。关闭后仍记录 Invocation、模型与工具调用、Token/缓存用量、费用、状态和错误；已保存的历史报文不会自动删除。开启会增加数据库占用，建议只在排查问题时启用。现有调试快照包含模型请求（内联图片正文替换为摘要）与 HTTP 响应状态，不保存完整响应流。
 
-「清除此前记录的原始请求报文」需要二次确认，只清除模型调用的请求/响应快照。调用记录、关联关系和统计保留；详情页会显示报文未记录或已清除。记录开关仍开启时，新报文会继续保存。清除按批执行；若中途失败，已完成的批次不会恢复，可重试清除。
+「清除此前记录的原始请求报文」需要二次确认，只清除模型调用的请求/响应快照与重放输入快照；被清除快照的历史 Invocation 将无法重放。调用记录、关联关系和统计保留；详情页会显示报文未记录或已清除。记录开关仍开启时，新报文会继续保存。清除按批执行；若中途失败，已完成的批次不会恢复，可重试清除。
 
 SQLite 释放的页可供后续写入复用，但数据库文件不一定立即缩小。此操作不会执行 `VACUUM`，也不清理已有备份；备份与恢复仍遵循[原有维护流程](../operations/backup-restore.md)。
+
+## API 密钥
+
+面板目前**没有** API 密钥管理页面；密钥的创建、查看与撤销在已登录面板的浏览器开发者工具 Console 里用同源请求完成（浏览器自动携带 Session Cookie，与面板自身的请求等价）。密钥用于 CLI 与评估工具，安装与用法见 [CLI 参考](../reference/cli.md)。
+
+创建（明文 key 只在这一条响应里出现，立刻存进密码管理器或环境变量；之后任何接口都不会再返回它）：
+
+```js
+const created = await fetch('/api/api-keys', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'eval-cli' }),
+}).then((r) => r.json());
+copy(created.key); // 浏览器 DevTools 的复制助手，不把密钥打印到日志
+delete created.key;
+```
+
+列出与撤销：
+
+```js
+// 列表只有名称、前缀与时间，永远不含明文
+await fetch('/api/api-keys').then((r) => r.json());
+
+// 撤销立即生效；之后该密钥的请求都会失败
+await fetch(`/api/api-keys/${created.item.id}`, { method: 'DELETE' });
+```
+
+密钥的能力范围只有 Invocation 查询与重放（读取 Invocation 列表/详情、发起重放）；它不能读取其它审计、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
+
+## Invocation 重放
+
+重放用当前配置重新执行一次已经结束的 Invocation，用来观察模型在新 Prompt 或新模型下会怎样选择工具与回复。入口是携带 API 密钥的 CLI/API，面板登录会话不能直接调用。它不会发送 Telegram 消息、不修改生产会话与业务数据（鉴权仍会更新密钥使用时间），但会**真实调用模型并计费**（不计入生产用量预算）。
+
+前提：源 Invocation 发生时已开启 Developer 页的「记录原始请求报文」（`record_model_payloads`），首个模型请求的快照成功保存且没有被清除。快照记录失败不会中断原运行，但该次 Invocation 无法重放；尚未结束的 Invocation、源 Chat 已不在配置中或当前 Chat 的模型不可用时，也会被明确拒绝。
+
+```bash
+plasticwan-debug invocation replay 12345 --json
+# 临时替换 system prompt（最多 64Ki 字符；不写回配置）
+plasticwan-debug invocation replay 12345 --system-prompt prompt.txt --json
+printf '%s' '临时 system prompt' | plasticwan-debug invocation replay 12345 --system-prompt - --json
+```
+
+限制与取舍：
+
+- 只重放**首个模型请求的文本输入**：图片内容被丢弃（输出里只报告丢弃数量），对话中途注入的新消息与之后几轮的输入都不重放。
+- system prompt 默认用记录时的版本（可临时覆盖）；模型与思考强度取**当前**该 Chat 的配置，而不是历史模型。源 Chat 已不在配置中会报错。
+- 工具调用是合成结果：`send` 只记录在输出的 `outputs` 里，不会发 Telegram；记忆、Alarm、生图、`zzz` 都只在内存或假回执中生效；`read` 读的是**当前**系统文档。
+- 网页抓取、Sticker 搜索、读图与 MCP 等外部工具会被拒绝；图片与回复引用不会重新校验，历史时间只作为文本原样重放。
+- 返回的 `fidelity` 字段列出这些边界；`dispatches` 里的 `mode`（`synthetic`/`live_read`/`blocked`）只是调用走的分派路线，不代表调用成功，成功与否看 `tool_calls`。`error` 非空表示重放没有正常完成，完整结构仍会返回。
+- 同时只允许一个重放；轮次、时长、工具尝试次数与 `trace` 记录有上限，超限会明确报错结束。`trace` 的 1 MiB 预算不等于整个响应体的大小上限；CLI 另行拒绝超过 4 MiB 的响应。重放中的模型请求不自动重试。模型选择不发言（输出里没有 `send`）也是正常结果。
 
 ## 验证与风险
 
