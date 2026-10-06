@@ -1,4 +1,0 @@
-interface:
-  display_name: "Plastic Wan Audit"
-  short_description: "Audit why the bot replied or stayed silent"
-  default_prompt: "Use $plastic-wan-audit to audit invocation 564 and explain why the bot did not reply."
