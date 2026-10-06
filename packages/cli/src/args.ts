@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util';
 import { parseEndpoint } from './client.ts';
+import { type Credentials, validateApiKey } from './credentials.ts';
 import { usageError } from './errors.ts';
 
 export const MAX_PAGE_LIMIT = 100;
@@ -17,6 +18,7 @@ const TIMEOUT_PATTERN = /^\d{1,8}$/;
 const OPTIONS = {
   endpoint: { type: 'string' },
   'api-key': { type: 'string' },
+  'api-key-stdin': { type: 'boolean' },
   json: { type: 'boolean' },
   'timeout-ms': { type: 'string' },
   limit: { type: 'string' },
@@ -51,7 +53,18 @@ export interface ReplayCommand {
   readonly systemPromptSource: string | undefined;
 }
 
-export type Command = ListCommand | GetCommand | ReplayCommand;
+export interface LoginCommand {
+  readonly kind: 'login';
+  readonly apiKeyStdin: boolean;
+}
+
+export interface DoctorCommand {
+  readonly kind: 'doctor';
+}
+
+export type InvocationCommand = ListCommand | GetCommand | ReplayCommand;
+export type Command = InvocationCommand | LoginCommand | DoctorCommand;
+export type CredentialSource = 'argument' | 'environment' | 'file';
 
 export interface ParsedCli {
   readonly help: boolean;
@@ -68,10 +81,11 @@ export interface ResolvedCli {
   readonly apiKey: string;
   readonly json: boolean;
   readonly timeoutMs: number;
+  readonly credentialSources: { readonly endpoint: CredentialSource; readonly api_key: CredentialSource };
 }
 
 interface StringFlags {
-  readonly 'api-key': string | undefined;
+  readonly 'api-key-stdin': boolean | undefined;
   readonly 'system-prompt': string | undefined;
   readonly limit: string | undefined;
   readonly cursor: string | undefined;
@@ -88,7 +102,7 @@ export function parseCli(argv: readonly string[]): ParsedCli {
     json: parsed.values.json === true,
     help: parsed.values.help === true,
     flags: {
-      'api-key': parsed.values['api-key'],
+      'api-key-stdin': parsed.values['api-key-stdin'],
       'system-prompt': parsed.values['system-prompt'],
       limit: parsed.values.limit,
       cursor: parsed.values.cursor,
@@ -106,25 +120,41 @@ export function parseCli(argv: readonly string[]): ParsedCli {
   };
 }
 
-export function resolveCli(parsed: ParsedCli, env: Record<string, string | undefined>): ResolvedCli {
+export function resolveCli(
+  parsed: ParsedCli,
+  env: Record<string, string | undefined>,
+  saved?: Credentials,
+): ResolvedCli {
   const command = parsed.command;
   if (command === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-utils invocation list|get|replay');
+    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|invocation');
   }
-  const endpointRaw = parsed.endpointRaw ?? env.PLASTICWAN_ENDPOINT;
+  const endpointRaw = parsed.endpointRaw ?? env.PLASTICWAN_ENDPOINT ?? saved?.endpoint;
   if (endpointRaw === undefined || endpointRaw.trim().length === 0) {
-    throw usageError('missing_endpoint', 'set --endpoint or PLASTICWAN_ENDPOINT to the Admin Panel base URL');
+    throw usageError('missing_endpoint', 'run plasticwan-utils login or set --endpoint / PLASTICWAN_ENDPOINT');
   }
-  const apiKey = parsed.apiKeyRaw ?? env.PLASTICWAN_API_KEY;
+  const endpoint = parseEndpoint(endpointRaw);
+  const explicitKey = parsed.apiKeyRaw ?? env.PLASTICWAN_API_KEY;
+  // A saved key belongs to its saved endpoint. An endpoint override alone must
+  // never send that key to another service, even if both URLs use HTTPS.
+  const savedKey =
+    saved !== undefined && parseEndpoint(saved.endpoint).href === endpoint.href ? saved.apiKey : undefined;
+  const apiKey = explicitKey ?? savedKey;
   if (apiKey === undefined || apiKey.length === 0) {
-    throw usageError('missing_api_key', 'set --api-key or PLASTICWAN_API_KEY');
+    throw usageError('missing_api_key', 'run plasticwan-utils login or supply an API key for this endpoint');
   }
   return {
     command,
-    endpoint: parseEndpoint(endpointRaw),
-    apiKey,
+    endpoint,
+    apiKey: validateApiKey(apiKey),
     json: parsed.json,
     timeoutMs: parseTimeout(parsed.timeoutRaw, command.kind === 'replay'),
+    credentialSources: {
+      endpoint:
+        parsed.endpointRaw !== undefined ? 'argument' : env.PLASTICWAN_ENDPOINT !== undefined ? 'environment' : 'file',
+      api_key:
+        parsed.apiKeyRaw !== undefined ? 'argument' : env.PLASTICWAN_API_KEY !== undefined ? 'environment' : 'file',
+    },
   };
 }
 
@@ -164,11 +194,23 @@ function sanitizeArgumentMessage(error: unknown): string {
 function parseCommand(positionals: readonly string[], flags: StringFlags): Command {
   const [group, subcommand, ...rest] = positionals;
   if (group === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-utils invocation list|get|replay');
+    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|invocation');
+  }
+  if (group === 'login' || group === 'doctor') {
+    if (positionals.length !== 1) {
+      throw usageError('unexpected_argument', `${group} takes no positional arguments`);
+    }
+    rejectUnsupportedFlags(flags, ['system-prompt', 'limit', 'cursor', 'state', 'chat']);
+    if (group === 'doctor') {
+      rejectUnsupportedFlags(flags, ['api-key-stdin']);
+      return { kind: 'doctor' };
+    }
+    return { kind: 'login', apiKeyStdin: flags['api-key-stdin'] === true };
   }
   if (group !== 'invocation') {
-    throw usageError('unknown_command', 'the only command group is "invocation"');
+    throw usageError('unknown_command', 'command must be login, doctor, or invocation');
   }
+  rejectUnsupportedFlags(flags, ['api-key-stdin']);
   switch (subcommand) {
     case 'list':
       return parseList(rest, flags);
@@ -259,7 +301,7 @@ function parseState(text: string): string {
   return text;
 }
 
-function parseTimeout(text: string | undefined, replay: boolean): number {
+export function parseTimeout(text: string | undefined, replay: boolean): number {
   if (text === undefined) {
     return replay ? DEFAULT_REPLAY_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
   }

@@ -113,6 +113,12 @@ describe('npm release selection', () => {
     expect(entry).toContain('(references/replay.md)');
     expect(entry).not.toContain('fidelity.');
     expect(entry).not.toContain('plasticwan-utils invocation replay');
+    expect(entry).toContain('plasticwan-utils doctor --json');
+    expect(entry).toContain('退出码为 `0`');
+    expect(entry).toContain('stdout 的 `status` 为 `ok`');
+    expect(entry).toContain('未通过时立即停止');
+    expect(entry).toContain('不自动执行 `login`');
+    expect(entry).toContain('不要循环重试');
     const audit = readFileSync(new URL('references/invocations.md', skill), 'utf8');
     expect(audit).toContain('plasticwan-utils invocation get');
     expect(audit).toContain('telegram_sends[]');

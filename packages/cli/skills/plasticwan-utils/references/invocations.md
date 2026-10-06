@@ -1,5 +1,7 @@
 # Invocation 查询与审计
 
+本指南的前提是入口的 `plasticwan-utils doctor --json` 已以退出码 `0` 返回 `status: "ok"`；未通过时按入口要求停止并报告，不继续查询。
+
 ## 定位并读取 Invocation
 
 用户给出精确 ID 时直接 `get`；否则先以 Chat、时间线索查小页，再按返回的游标查下一页。以下 ID 仅为示例，执行前替换为实际目标：
@@ -14,7 +16,7 @@ plasticwan-utils invocation get 12345 --json
 - Chat ID 是 Telegram Chat ID，不是内部数据库 ID。把 Invocation、Chat、游标等十进制 ID 当精确字符串处理，不经过 JavaScript `Number` 转换。
 - 不存在按时间或 Topic 的 CLI 过滤参数；在返回项的时间戳、`chat.message_thread_id` 中核对。多个候选不能区分时先确认目标，不批量导出所有详情。
 - `get` 返回 Invocation 详情对象。空列表、404 或缺失记录不等于模型选择沉默；说明查询范围、过滤条件和留存限制。
-- list/get 默认超时 30 秒；`--timeout-ms` 只改客户端等待上限。遇到 `unauthenticated` / `forbidden` 请操作员检查 key、撤销状态和授权范围；不换接口绕过认证。`response_too_large` 表示超过 4 MiB 客户端上限，不能把不可读取写成无记录，也不绕过限制批量抓取。
+- list/get 默认超时 30 秒；`--timeout-ms` 只改客户端等待上限。遇到 `unauthenticated` / `forbidden` 请操作员检查 key、撤销状态和授权范围，并在本机用 `plasticwan-utils login` 重新保存正确凭据；`missing_api_key` 表示当前没有可用的 endpoint/key 组合（显式给空值不会回退到保存文件），同样交回操作员，不自行混搭来源；`invalid_credentials` 表示保存的凭据文件损坏、是符号链接或权限不安全，交回操作员处理：仅内容损坏且文件/目录安全时可在本机重新 `login`；符号链接、非普通文件或不安全权限仍被 `login` 拒绝，需人工处理。Agent 不代为登录、不改权限、不删除或重建凭据；不换接口绕过认证。`response_too_large` 表示超过 4 MiB 客户端上限，不能把不可读取写成无记录，也不绕过限制批量抓取。
 
 ## 建立审计证据链
 

@@ -22,7 +22,9 @@ pnpm test test/image-agent.test.ts test/image-delivery.test.ts test/image-delive
 pnpm test test/agent-runtime.test.ts test/model-request-audit.test.ts
 pnpm test test/admin-developer.test.ts
 pnpm test test/admin-api-keys.test.ts test/invocation-cli.test.ts
+pnpm test test/cli-credentials.test.ts test/cli-login.test.ts test/cli-login-http.test.ts
 pnpm test test/npm-release.test.ts
+pnpm test test/docs-examples.test.ts test/docs-search.test.ts test/docs-markdown.test.ts
 pnpm test test/replay.test.ts test/replay-input.test.ts test/replay-tools.test.ts test/replay-http.test.ts
 pnpm test test/skills.test.ts test/system-resources.test.ts test/plugins.test.ts
 pnpm test test/media.test.ts test/stickers.test.ts
@@ -70,7 +72,11 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `admin-developer.test.ts` | 旧配置缺省关闭、显式开关与 JSONC 持久化/热应用、权限/Origin/revision/类型校验、应用失败后文件与运行态分离、分批清除只置空报文（含 replay 快照）且保留审计/关联/统计、重复清除与并发写入 |
 | `admin-api-keys.test.ts` | 一次性 `pwk_` 明文与 SHA-256 存储、Session-only 管理边界（TypeBox、Bearer 不能管理密钥）、撤销立即生效且保留元数据、Bearer 只覆盖 invocation list/get/replay（其它审计、写端点与未知路由 403）、Authorization 存在时不回退 Cookie、replay 端点只接受 `system_prompt`（空串合法、64Ki 字符与 256 KiB body 上限）、engine 错误映射与失败脱敏、malformed Origin 返回 400 而非 500 且 Origin 只守写 |
 | `invocation-cli.test.ts` | `plasticwan-utils` 的 list/get/replay 请求形状与输出契约、`--api-key` 覆盖环境变量、replay 失败仍保留 stdout 文档、退出码、重定向/超时/超大响应拒绝、stdin 无 EOF（空流或部分输入）超时后非零退出且无 HTTP 请求、参数与端点校验、任何输出（含服务端回显与 JSON 转义形式）都不泄露 key |
+| `cli-credentials.test.ts` | 凭据文件固定路径（忽略 XDG，Windows 同样在 `~/.config/plasticwan-utils/`）与仅含 `{endpoint,apiKey}` 的结构、端点规范化与不安全 endpoint 拒绝、POSIX `0700`/`0600`（更窄亦可）与符号链接/不安全权限拒绝、序列化超出 16384 字节时不创建目录或改写旧凭据、写入失败不覆盖旧凭据且读写错误不泄露文件内容、解析顺序（明确参数 > 环境变量 > 保存文件）、显式 endpoint 不与文件 key 混用（不同 endpoint 且未显式给 key 报 `missing_api_key`）、明确成对来源齐全时不读文件、参数与环境变量不写回文件 |
+| `cli-login.test.ts` | 交互式逐项提示 endpoint 与隐藏输入的 key（无明确参数/环境变量时要求 TTY）、非交互 `--endpoint`+`--api-key` 或环境变量、`--api-key-stdin` 读取至 EOF、最多 4098 字节且仅去掉一次尾部 LF/CRLF（不是 `--api-key -`）、输入超时/中断/EOF 取消并恢复终端、空环境值不回退、任意短 key 的脱敏不破坏 JSON 结构、`login --json` 输出 `{status:"saved",endpoint,credentials_file}` 且不含 key、不访问服务器、失败不覆盖旧凭据 |
+| `cli-login-http.test.ts` | 凭据文件驱动的 doctor 真实 HTTP 链路：`GET /api/invocations?limit=1` 验证连通与鉴权、成功输出 `{status:"ok",endpoint,credential_sources}` 与退出码 0、凭据值缺失或不合法退出码 2、文件校验或请求失败退出码 1、不输出 Invocation 正文、不调用模型/不发送 Telegram/不重试、鉴权仍更新 key 的 `last_used_at` |
 | `npm-release.test.ts` | main canary 版本含 run/attempt/SHA、仅精确稳定 tag 进入 latest、拒绝非 push/其它仓库与非法 ref、GitHub 输出不改源码 manifest、仅独立 CLI 包公开、Skill 分发清单与入口/子文档/元数据结构 |
+| `docs-examples.test.ts` / `docs-search.test.ts` / `docs-markdown.test.ts` | 公开配置示例的离线语义校验、生成字段与部署 URL、已安装搜索组件的键盘回归；Markdown 检查正确区分缩进代码块与真实 H1，LF/CRLF 下不漏提取代码块 |
 | `replay-input.test.ts` | 快照编解码往返（含 tool call 与 tool result）、内联图片丢弃与计数、版本与重复定义拒绝、快照随 Invocation 级联与无 Invocation model call 的保留窗口一起删除 |
 | `replay-tools.test.ts` | 合成 send（text/image/sticker）与参数保留、内存记忆/闹钟（空起步）、`image_generate` 假回执、`zzz` 不写全局状态、`read` 只读当前 `system:///` 并拒绝越界、未知顶层工具与 MCP 全部 blocked、`execute` 拒绝原语与无生产执行器、search/help 限快照注册表、abort 后不再 dispatch、工具层不引入生产接线 |
 | `replay.test.ts` | 首个请求的历史输入 + 当前模型、无生产写入、空 system prompt 覆盖与无 send 成功、来源守卫（未完成/缺快照/非法历史/不回退后续调用）、从 toolResult 尾部续跑、共享模型闸门与并发 429、关停与取消释放、context/turn/tool/trace/wall-clock 预算、脱敏覆盖任意参数键名与 dispatch 元数据 |

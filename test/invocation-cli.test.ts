@@ -94,6 +94,9 @@ function runCli(
   const env: Record<string, string | undefined> = { ...process.env };
   delete env.PLASTICWAN_ENDPOINT;
   delete env.PLASTICWAN_API_KEY;
+  // File fallback must never consult the operator's real saved credentials.
+  env.HOME = workDir;
+  env.USERPROFILE = workDir;
   Object.assign(env, options.env ?? {});
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [BIN, ...args], {

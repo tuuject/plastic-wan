@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { readFile, stat } from 'node:fs/promises';
-import type { Command, GetCommand, ListCommand, ReplayCommand } from './args.ts';
+import type { GetCommand, InvocationCommand, ListCommand, ReplayCommand } from './args.ts';
 import { type AdminClient, isRecord } from './client.ts';
 import { CliError, usageError } from './errors.ts';
 
@@ -22,7 +22,11 @@ export interface CommandContext {
   readonly timeoutMs: number;
 }
 
-export async function executeCommand(command: Command, context: CommandContext, client: AdminClient): Promise<number> {
+export async function executeCommand(
+  command: InvocationCommand,
+  context: CommandContext,
+  client: AdminClient,
+): Promise<number> {
   switch (command.kind) {
     case 'list':
       return await runList(command, context, client);

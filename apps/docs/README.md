@@ -10,7 +10,7 @@
 pnpm install --frozen-lockfile
 pnpm run docs:dev
 pnpm run docs:check
-pnpm test test/docs-examples.test.ts test/docs-search.test.ts
+pnpm test test/docs-examples.test.ts test/docs-search.test.ts test/docs-markdown.test.ts
 pnpm run docs:build
 pnpm run docs:verify
 pnpm run docs:preview

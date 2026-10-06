@@ -2,6 +2,8 @@
 
 ## 仅在明确授权后执行
 
+入口的 `doctor` 门槛同样适用：`plasticwan-utils doctor --json` 必须以退出码 `0` 返回 `status: "ok"`（恰好一次 `GET /api/invocations?limit=1`，无 replay 或模型/Provider 调用），否则停止并报告，不进入重放，也不代为 `login`、不重试；doctor 通过也只证明连通与鉴权，不构成重放授权。
+
 先说明 replay 会真实调用当前配置模型并产生费用，但不发送 Telegram 消息、不修改生产会话和业务数据（鉴权仍会更新 key 使用时间）。取得用户对目标 ID、次数和可选 prompt 覆盖的明确授权；用户仅说“看看为什么没回复”不构成重放授权。已有明确授权时按范围执行，不扩大到批量或自动重试，不尝试用 Session Cookie 重放。
 
 ```bash
@@ -37,7 +39,9 @@ plasticwan-utils invocation replay 12345 --system-prompt prompt.txt --json
 
 | 错误 | 下一步 |
 | --- | --- |
-| `unauthenticated` / `forbidden` | 请操作员检查 key、撤销状态和授权范围；不换接口绕过认证 |
+| `unauthenticated` / `forbidden` | 请操作员检查 key、撤销状态和授权范围，并在本机用 `plasticwan-utils login` 重新保存正确凭据；不换接口绕过认证 |
+| `missing_api_key` | 当前命令没有可用的 endpoint/key 组合（例如提供了新 endpoint 而没有显式 key，或显式给了空值不会回退到保存文件）；请操作员 `login` 重新保存或补全参数/环境变量，不自行混搭来源 |
+| `invalid_credentials` | 保存的凭据文件损坏、是符号链接或权限不安全；仅内容损坏且文件/目录安全时操作员可在本机重新 `login`，符号链接、非普通文件或不安全权限仍被 `login` 拒绝，需人工处理。Agent 不代为登录、不自动改权限、不删除或重建凭据 |
 | `replay_source_unfinished` / `replay_busy` | 源未结束或已有重放；报告并停止，不轮询、不自动重试计费请求 |
 | `replay_input_unavailable` / `replay_input_invalid` | 缺失或损坏快照；可能未录制、已清理或来自旧版本。只能让操作员为未来 Invocation 开启录制；不能补造旧快照 |
 | `replay_chat_unconfigured` / `replay_model_unavailable` / `replay_unavailable` | 请操作员核对当前 Chat、模型或服务装配；不擅改配置 |

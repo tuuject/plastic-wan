@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import Type from 'typebox';
 import { Value } from 'typebox/value';
 import { ConfigSchema } from '../src/platform/config.ts';
+import { CODE_BLOCK_PATTERN } from './docs-markdown.ts';
 import { deploymentSettings, docsRoot, exampleNames, repositoryRoot } from './docs-prepare.ts';
 
 const dist = resolve(docsRoot, 'dist');
@@ -82,7 +83,7 @@ for (const page of pages) {
   const htmlPath = page.replace(/\.md$/, '.html');
   const html = await read(htmlPath);
   assert.equal(
-    [...markdown.replace(/```[^\n]*\n[\s\S]*?\n```/g, '').matchAll(/^# .+$/gm)].length,
+    [...markdown.replace(CODE_BLOCK_PATTERN, '').matchAll(/^# .+$/gm)].length,
     1,
     `Expected one Markdown H1: ${page}`,
   );
@@ -100,9 +101,9 @@ for (const page of pages) {
       assert(!html.includes('rp-last-updated'), 'Generated reference must not show a Git timestamp');
     }
   }
-  for (const match of source.matchAll(/```[^\n]*\r?\n([\s\S]*?)\r?\n```/g)) {
+  for (const match of source.matchAll(CODE_BLOCK_PATTERN)) {
     assert(
-      markdown.includes((match[1] ?? '').replaceAll('\r\n', '\n')),
+      markdown.includes((match[2] ?? '').replaceAll('\r\n', '\n')),
       `Code block lost during Markdown rendering: ${page}`,
     );
   }
