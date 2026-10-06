@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { MAX_SEARCH_LENGTH } from '../packages/cli/src/args.ts';
 import { MAX_RESPONSE_BYTES, parseEndpoint } from '../packages/cli/src/client.ts';
 import { MAX_PROMPT_CHARS } from '../packages/cli/src/commands.ts';
 import { CliError } from '../packages/cli/src/errors.ts';
@@ -25,18 +26,25 @@ const PREFLIGHT = {
   available: true,
   reason: null,
   message: null,
-  source_model_call_id: '11',
-  historical_model: 'test-model',
   prompt_overrides_available: true,
   omitted_images: 0,
-  recording_enabled: true,
-  fidelity: 'exact',
+  fidelity: {
+    input: 'historical_public_chat',
+    model_selection: 'current_chat_config',
+    prompt_selection: 'current_chat_config',
+    tool_selection: 'current_registry',
+    hot_injections: 'not_replayed',
+    external_tools: 'blocked',
+    system_resources: 'current_read_only',
+    side_effects: 'synthetic',
+  },
 };
 
 /** Replay now asks replay-preflight first; route it separately from the POST. */
 function preflightOr(handler: (request: CapturedRequest, response: ServerResponse) => void) {
   return (request: CapturedRequest, response: ServerResponse): void => {
-    if ((request.url ?? '').endsWith('/replay-preflight')) {
+    const path = new URL(request.url, 'http://127.0.0.1').pathname;
+    if (path.endsWith('/replay-preflight')) {
       jsonResponse(response, 200, PREFLIGHT);
       return;
     }
@@ -451,6 +459,37 @@ describe('plasticwan-utils invocation CLI', () => {
     20_000,
   );
 
+  it('refuses a sliced replay without --confirm-paid before reading stdin or sending HTTP', async () => {
+    const server = await startServer(
+      preflightOr((_request, response) => {
+        jsonResponse(response, 200, { status: 'started', error: null });
+      }),
+    );
+    try {
+      const result = await runCli(
+        ['invocation', 'replay', '42', '--before-send', '5', '--global-prompt', '-', '--timeout-ms', '250', '--json'],
+        {
+          env: { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY },
+          stdin: 'override',
+          // stdin is never closed: only an early refusal can finish this run
+          // before the read timeout would report `timeout` instead.
+          keepStdinOpen: true,
+        },
+      );
+      expect(result.code).toBe(2);
+      expect(result.stdout).toBe('');
+      expect(errorDocument(result)).toEqual({
+        error: 'confirm_paid_required',
+        message: 'invocation replay --before-send requires --confirm-paid to confirm the billed model call',
+      });
+      // The billed slice is refused before the preflight, the POST and the
+      // prompt override read: the confirmation is not a post-hoc check.
+      expect(server.requests).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  }, 20_000);
+
   it('aborts on timeout without retrying', async () => {
     const server = await startServer(() => {
       // Never respond: the client must abort the in-flight request itself.
@@ -534,7 +573,23 @@ describe('plasticwan-utils invocation CLI', () => {
           return;
         }
         jsonResponse(response, 200, {
-          items: [{ ...ITEM, chat: { ...ITEM.chat, title: `group ${API_KEY}` } }],
+          items: [
+            {
+              ...ITEM,
+              chat: { ...ITEM.chat, title: `group ${API_KEY}` },
+              // Redaction must also cover the matched-message excerpt the human
+              // list renders from the new filter response.
+              matched_messages: [
+                {
+                  source: 'bot',
+                  telegram_message_id: null,
+                  telegram_send_id: '77',
+                  at: '2026-10-05T00:00:00Z',
+                  text: echo,
+                },
+              ],
+            },
+          ],
           next_cursor: echo,
         });
       }),
@@ -558,6 +613,8 @@ describe('plasticwan-utils invocation CLI', () => {
       expect(human.code).toBe(0);
       expect(human.stdout).not.toContain(API_KEY);
       expect(human.stdout).toContain('group [redacted]');
+      expect(human.stdout).toContain('send=77');
+      expect(human.stdout).toContain('key [redacted]');
     } finally {
       await server.close();
     }
@@ -708,6 +765,46 @@ describe('plasticwan-utils invocation CLI', () => {
         [['invocation', 'list', '--limit', '101', '--json'], 'invalid_limit'],
         [['invocation', 'list', '--limit', 'abc', '--json'], 'invalid_limit'],
         [['invocation', 'list', '--state', 'bad state', '--json'], 'invalid_state'],
+        [['invocation', 'list', '--search', '', '--json'], 'invalid_search'],
+        [['invocation', 'list', '--search', 'a'.repeat(MAX_SEARCH_LENGTH + 1), '--json'], 'invalid_search'],
+        [['invocation', 'list', '--at', '2026-13-01T00:00', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '2026-02-29T00:00', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '2026-04-31T00:00', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '2026-10-06T24:00', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '2026-10-06T12:60', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '2026-10-06T12:00:00.1234', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '20261006T120000', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '2026-10-06T12:00+25:00', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '2026-10-06T12:00+08:60', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--at', '0999-12-31T00:00', '--json'], 'invalid_at'],
+        [['invocation', 'list', '--from', '2026-10-06T12:00:61', '--json'], 'invalid_from'],
+        [['invocation', 'list', '--to', '2026-10-06 12:00:00.Z', '--json'], 'invalid_to'],
+        [['invocation', 'list', '--to', '2026-10-06T12:00+14:01', '--json'], 'invalid_to'],
+        [
+          ['invocation', 'list', '--at', '2026-10-06T12:00', '--from', '2026-10-06T13:00', '--json'],
+          'invalid_time_range',
+        ],
+        [
+          ['invocation', 'list', '--at', '2026-10-06T12:00', '--to', '2026-10-06T13:00', '--json'],
+          'invalid_time_range',
+        ],
+        [
+          ['invocation', 'list', '--from', '2026-10-06T13:00:00Z', '--to', '2026-10-06T12:00:00Z', '--json'],
+          'invalid_time_range',
+        ],
+        [
+          ['invocation', 'list', '--from', '2026-10-06T00:00:00Z', '--to', '2026-10-06T08:00:00+08:00', '--json'],
+          'invalid_time_range',
+        ],
+        [
+          ['invocation', 'list', '--from', '2026-10-06T23:00:00+08:00', '--to', '2026-10-06T12:00:00Z', '--json'],
+          'invalid_time_range',
+        ],
+        [['invocation', 'preflight', '42', '--before-send', '0', '--json'], 'invalid_before_send'],
+        [['invocation', 'preflight', '42', '--before-send', '-1', '--json'], 'invalid_before_send'],
+        [['invocation', 'preflight', '42', '--before-send', 'abc', '--json'], 'invalid_before_send'],
+        [['invocation', 'preflight', '42', '--before-send', '9223372036854775808', '--json'], 'invalid_before_send'],
+        [['invocation', 'replay', '42', '--before-send', '12.5', '--json'], 'invalid_before_send'],
       ];
       for (const [args, code] of cases) {
         const result = await runCli(args, { env });
@@ -755,12 +852,16 @@ describe('plasticwan-utils invocation CLI', () => {
       ).toBe(0);
       expect((await runCli(['invocation', 'replay', '0007', '--json'], { env })).code).toBe(0);
       expect((await runCli(['prompt', 'get', 'group', '--chat', '-0042', '--json'], { env })).code).toBe(0);
+      expect((await runCli(['invocation', 'preflight', '0007', '--before-send', '0042', '--json'], { env })).code).toBe(
+        0,
+      );
       expect(server.requests.map((request) => `${request.method} ${request.url}`)).toEqual([
         'GET /api/invocations/42',
         'GET /api/invocations?cursor=7&chat=-100',
         'GET /api/invocations/7/replay-preflight',
         'POST /api/invocations/7/replay',
         'GET /api/prompts/group?source=active&chat=-42',
+        'GET /api/invocations/7/replay-preflight?before_send_id=42',
       ]);
     } finally {
       await server.close();
@@ -871,6 +972,8 @@ describe('plasticwan-utils invocation CLI', () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('plasticwan-utils - Plastic Wan Admin API 工具客户端');
     expect(result.stdout).toContain('plasticwan-utils invocation replay');
+    expect(result.stdout).toContain('--before-send');
+    expect(result.stdout).toContain('--confirm-paid');
     expect(result.stdout).not.toContain('plasticwan-debug');
     expect(result.stderr).toBe('');
   }, 20_000);

@@ -66,6 +66,10 @@ send Tool → Telegram API → 审计
 
 每个 Conversation 持有一份持久化的 **Conversation Context**（`conversation_contexts` + `context_messages`）：它是 canonical history，进程重启与 Agent 缓存驱逐都不影响它。Pi Agent 实例按 Conversation 缓存在 `ConversationRuntime` 里，启动时从 canonical history 播种，是**可丢弃的缓存**而不是事实源。一次 Invocation 是一个运行窗口——期间可以注入多批新消息、多次调用模型与 Tool、多次 `send`——但 Invocation 最终仍会结束，Context 保留到下一次。Context 的增长由 checkpoint + 丢弃式 GC 控制（见 [Context 生命周期](telegram-agent-flow.md#context-生命周期)），没有 summarization 或 compaction。Conversation 级短期记忆（`memories`）随每一批注入，按创建时间升序排列在注入块内，TTL 到期或 Agent 主动删除后消失。
 
+## 隔离的历史场景重建
+
+Admin 的 Invocation 重放是新的内存 Agent 循环，不是生产 Conversation Context 的续跑。默认重建源开场 Bucket 的公开消息与当时可证明存在的历史；切片模式只取目标 Bot 发送前的公开窗口，拍平可证明在发送前已注入的批次。两者都使用当前配置的 prompt、模型、只读 System Skills 和工具定义，不恢复私有推理或旧工具结果，默认模式不加入后续热注入。生产执行器与 Context 写者不接入；媒体/reply 引用仅在本次场景有效，发送及记忆等副作用合成，模型调用仍真实计费并共享并发闸门。它不依赖开发报文录制，不新增跨 Invocation 的 Context 副本；契约与保真限制见 [Admin Panel：Invocation 重放](admin-panel.md#invocation-重放)。
+
 ## 模块职责
 
 代码按层组织，依赖只允许自上而下：`ingress/` → `orchestration/` → `capabilities/` → `context/` → `store/` → `platform/`；`plugins/` 只被组合根引用，可依赖 `capabilities/` 及以下各层；组合根（`application.ts`、`cli.ts`、`doctor.ts`、`startup-catch-up.ts`、`tui/`）位于 `src` 根，可以引用所有层。

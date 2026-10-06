@@ -4,64 +4,83 @@
 
 入口的 `doctor` 门槛同样适用：`plasticwan-utils doctor --json` 必须以退出码 `0` 返回 `status: "ok"`（恰好一次 `GET /api/invocations?limit=1`，无 replay 或模型/Provider 调用），否则停止并报告，不进入重放，也不代为 `login`、不重试；doctor 通过也只证明连通与鉴权，不构成重放授权。
 
-先说明 replay 会真实调用当前配置模型并产生费用，但不发送 Telegram 消息、不修改生产会话和业务数据（鉴权仍会更新 key 使用时间）。取得用户对目标 ID、次数和可选 prompt 覆盖的明确授权；用户仅说“看看为什么没回复”不构成重放授权。已有明确授权时按范围执行，不扩大到批量或自动重试，不尝试用 Session Cookie 重放。
+先说明 replay 会真实调用当前配置模型并产生费用，但不发送 Telegram 消息、不修改生产会话和业务数据（鉴权仍会更新 key 使用时间）。取得用户对目标 ID、次数和可选 prompt 覆盖的明确授权；用户仅说“看看为什么没回复”不构成重放授权。已有明确授权时按范围执行，不扩大到批量或自动重试，不尝试用 Session Cookie 重放。切片重放还需 `--confirm-paid` 显式确认计费。
 
-免费、无模型调用的只读核对不需要重放授权：`plasticwan-utils invocation preflight <id> --json` 返回 `available`、稳定 `reason`、`prompt_overrides_available`、`omitted_images` 与 `recording_enabled`；`plasticwan-utils invocation prompts <id> --json` 给出源 Invocation 记录的两层模板（仅 v2 快照）；`config show` 与 `prompt get global|group` 给出**当前**配置里的 prompt，可与记录值对比，但不要把当前值当成历史记录。
+免费、无模型调用的只读核对不需要重放授权：`invocation preflight <id> --json`（切片选择加 `--before-send`）返回 `available`、稳定 `reason`、`prompt_overrides_available`、`omitted_images` 与可用时的 `scene`；`invocation prompts <id> --json` 给出该场景将使用的当前两层模板与变量，`source` 为 `active`。这些不是历史 prompt 或历史模型请求；`config show` 与 `prompt get global|group` 也只是当前配置。重放不依赖 Developer 报文录制，不要求源 Invocation 曾调用模型。
 
 ```bash
-# 只读预检与记录 prompt：不调用模型、免费
+# 免费只读预检与当前场景 prompt
 plasticwan-utils invocation preflight 12345 --json
 plasticwan-utils invocation prompts 12345 --json
 
-# 原快照 prompt：仅在本次重放已获授权后执行
+# 当前配置基线：仅在本次重放已获授权后执行
 plasticwan-utils invocation replay 12345 --json
 
 # 分层替换：仅在该覆盖已获授权后执行
 plasticwan-utils invocation replay 12345 --global-prompt prompt.txt --json
 plasticwan-utils invocation replay 12345 --group-prompt group.txt --json
 printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay 12345 --global-prompt - --json
+
+# 切片重放：收窄到某次成功 Bot 发言之前的窗口，需显式确认计费
+plasticwan-utils invocation preflight 12345 --before-send 678 --json
+plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
 ```
 
-- CLI 在 POST 前先请求一次预检；预检不可用时直接用引擎的稳定原因码失败（不发送 replay）；请求了覆盖而 `prompt_overrides_available` 为 false（v1 旧快照）时以 `replay_prompt_parts_unavailable` 失败，同样不 POST。
-- `--global-prompt` 是**完整替换 global 层**而非追加：去空白后不能为空、最多 65,536 字符，否则在发请求前以退出码 `2` 失败；`--group-prompt` 允许空内容以显式清空群指令。`-` 从非终端 stdin 读取，两层不能同时使用 `-`（`conflicting_prompt_input`）。HTML 注释会被剥离，模板只能引用记录中已有的变量，否则服务端返回 `replay_prompt_invalid`。固定 prefix/middle（核心协议、Skill 索引、媒体与 Sticker 说明、会话模式、记忆指引）永远不可覆盖；不存在整体替换 system prompt 的参数（`--system-prompt` 已删除，无别名）。
-- 覆盖是暂时的：不写回 `config.jsonc` 与 key jar，也不改变运行中的配置。只使用用户指定或批准的文件，不把凭据放入 prompt。
+- 切片 replay 缺少 `--confirm-paid` 时，在参数解析阶段以退出码 `2` 和 `confirm_paid_required` 拒绝，不读取 prompt 文件或 stdin，也不发预检或 POST。未切片 replay 不要求该 flag；免费 `preflight` 不接受该 flag。
+- 通过本地校验后，CLI 在 POST 前请求一次预检（切片重放带同一 `--before-send`）；不可用时按引擎原因码失败，不发送 replay。若请求覆盖而 `prompt_overrides_available` 为 false，同样不 POST；`--before-send` 是重放边界而不是 prompt 覆盖，不要求该权限；不要把此字段解释成旧 v1/v2 模型快照版本。
+- `--global-prompt` 是完整替换 global 层：去空白后不能为空、最多 65,536 字符，否则本地以退出码 `2` 失败；`--group-prompt` 可为空以显式清空群指令。`-` 从非终端 stdin 读取，两层不能同时使用 `-`（`conflicting_prompt_input`）。HTML 注释会被剥离；模板按当前变量白名单校验，未知变量返回 `replay_prompt_invalid`。当前固定协议、Skill 索引与能力说明不可覆盖；没有整体 `--system-prompt` 参数或别名。
+- 覆盖不写回配置或 key jar。只使用用户指定或批准的文件，不把凭据放入 prompt。
 - replay 默认超时 300 秒；`--timeout-ms` 只改客户端等待上限，不放宽服务端预算。不要设置短超时再循环重试；请求中断前仍可能发生模型费用。
-- 比较原 prompt 与新 prompt 时，先确定评判点，再分别取得所需调用授权。先确认快照是 v2 且 `prompt_overrides_available` 为 true；v1 只能原样重放。将源 `telegram_sends[]` 与重放 `outputs[]`、源与重放的 `tool_calls[]`、完成原因、错误和用量分开比较。历史结果可作为观察基线，不冒充同条件实验；同条件原 prompt 基线还需要一次获授权的 replay。
+- 比较 prompt 前先确定评判点，并取得基线和覆盖各自所需的调用授权。基线是当前配置在同一公开场景的重新运行，不是恢复旧 prompt；源 `telegram_sends[]` 与 replay `outputs[]`、各自工具错误、完成原因和用量分开比较。历史结果只作观察基线，不冒充同条件实验。跨两次请求的 active 配置可能变化，核对实际模型与模板来源。
+
+## 切片重放
+
+`--before-send <telegram_sends 内部 id>` 把输入收窄到该次成功 Bot 发言之前的一小段公开窗口；`preflight` 与 `replay` 必须使用同一选择，切片重放需要 `--confirm-paid` 显式确认计费：
+
+- 窗口严格位于上一条 Bot 发言之后、目标发言之前（两端不含），没有更早历史；上一条 Bot 发言可以来自同一 Conversation 的另一次 Invocation。没有上一条 Bot 发言时，从保留输入的开头开始。
+- 目标必须是本 Invocation 的成功 `telegram_sends`：失败的、别的 Conversation 的或不存在的目标返回 `replay_slice_target_invalid`；窗口内没有新的公开消息返回 `replay_slice_empty`。两者都在任何模型请求之前拒绝。
+- 输入只包含冻结且已注入的公开消息：目标发言之前已注入的批次会被拍平后一次性灌入，不按 Bucket 或历史节奏等待（模型并发与网络延迟仍可能造成等待）。附加批次的注入时间必须严格早于发送请求开始；同毫秒无法证明先后时保守省略。原 Bot 回答不进入模型，只留在审计里作为对照；不读取历史的 reasoning、工具结果或 system prompt。
+- `scene.slice` 为 `{ before_send_id, before_message_id, after_bot_message_id }`，`history_count` 为 0，`cutoff_at` 取该次发送请求的开始时间（不是交付完成时间）；回复引用不能跨出该窗口。比较原回答与切片结果时分别引用审计里的 `telegram_sends` 与 replay `outputs`，说明它们不是同条件复现。
+- 目标 ID 可以先搜索：`plasticwan-utils invocation list --search '关键词' --at '2026-09-10 07:59' --json`，命中项里 bot 条目的 `telegram_send_id` 是 `--before-send` 候选，仍须用同一 ID 预检。Invocation 可能向另一 Conversation 回复；搜索保留这些真实发送，但跨 Conversation 的发送不能用作该 Invocation 的切片目标。
 
 ## 披露保真限制
 
-读取结果的 `model`、`overrides`、`fidelity`、`error`，不要把一次成功重放称为生产复现或生产已修复：
+读取 `scene`、`model`、`overrides`、`fidelity` 和 `error`，不要把成功重放称为生产复现或生产已修复：
 
-- 仅用源 Invocation **首个 agent 模型请求的归一化纯文本快照**；图片省略数见 `fidelity.omitted_images`，后续热注入不重放。缺少快照时停止，不用 `request_json`、后续模型请求或当前 Context 拼替代输入。
-- system prompt 由快照记录的层重建：v2 保存了固定段、当时的 global/group 模板与渲染变量值，覆盖只替换模板、渲染变量保持历史值；v1 没有层信息，只能原样重放。分层读取或覆盖 v1 会得到 `replay_prompt_parts_unavailable`，不要用当前 prompt 拼一个替代。
-- Provider、模型和 thinking level 来自**当前 Chat 配置**；`fidelity.historical_model` 只是历史信息。`read` 读取当前只读 `system:///` 资源，不是历史资源副本。
-- `send` 只收集到 `outputs[]`；记忆与 Alarm 从空的内存状态开始；图片生成只返回合成回执，`zzz` 不持久化睡眠状态。MCP 和未支持能力被阻止；合成成功不证明生产世界中的引用授权或外部操作可成功。
-- `fidelity.send_nudge = disabled`：不再注入生产可能启用的发送提醒，也不模拟新消息发送闸门（`send_barrier`）。重放无发送不等于生产无发送，反之亦然。
-- `fidelity.dispatches[].mode` 表示执行路径，不代表工具成功；需同时检查 `tool_calls[].is_error`。生产预算不扣减不代表 Provider 免费。
-- 服务端最多 20 轮、128 次工具调用、240 秒、1 MiB trace；当前配置可能进一步收窄轮数和时长，以 `fidelity.limits` 为准。一次只允许一个 replay，且与生产共享模型并发闸门；不要并行压测生产服务。
-- 媒体导出（`invocation media`，见 [Invocation 查询与审计](invocations.md#导出授权媒体)）只读下载快照授权的原文件或服务端规范化预览；它不是重放输入的一部分，也不修复重放中被丢弃的内联图片。
+- 默认输入是源 Invocation 开场 Bucket 的冻结公开消息与 cutoff 时可证明存在的历史，冻结 history 优先，不加入后续 attach；切片重放只取 `--before-send` 窗口内的冻结公开消息，并拍平可证明在发送前已注入的批次，`history_count` 为 0。两种模式都不加入后来修订或迟到消息，当前上下文预算、Topic allowlist 与 `/cut_topic` 仍会收窄输入；默认模式还受当前 history 长度限制。缺失历史或媒体会省略/降级，缺失或损坏开场则拒绝；不以当前私有 Context、`request_json` 或后来请求拼替代输入。
+- system prompt 的 global/group、模板变量、固定段与可见 Skill 索引，以及 Provider/model/thinking level 和工具定义，都来自当前配置。`invocation prompts` 的 `source: active` 必须明确披露，不能当历史记录；`read` 读取当前只读 `system:///` 资源。
+- 不恢复历史 thinking、工具结果或记忆/任务回执。默认模式不加入后续热注入，切片模式仅拍平可证明在目标发送前已注入的公开批次。记忆与 Alarm 从空内存起步，typing/生图/zzz 只产生合成结果；生产全局睡眠与每日预算不阻断 replay，但 zzz 可见性遵循当前低预算门槛，执行不写睡眠、不扣生产预算。
+- `send` 只收集到 `outputs[]`；校验当前 Schema、文本长度/空行限制和本次场景可见的 reply 目标，不发送 Telegram、不复验 Sticker/生成资产的世界状态或真实发送限流。合成成功不证明生产操作可成功。
+- 当前模型支持图片且服务接线时，保留的 Photo、Sticker、图片 Document 获得一次性场景引用，`execute.call read_image` 可按需下载并规范化图片给当前模型；不调用生产 Vision、不写分析缓存，引用不能跨场景。`fidelity.omitted_images` 是渲染时没有可读引用的媒体数量，不保证之后下载成功。文本模型、缺失媒体或下载错误会明确降级/报错；网页抓取、Sticker 搜索、MCP 与未支持工具被阻止。
+- `fidelity.send_nudge = disabled`；不模拟新消息发送闸门（send barrier），重放无发送不等于生产无发送，反之亦然。场景 `current_time` 默认为 cutoff，而不是完整历史运行时钟。
+- `fidelity.dispatches[].mode` 表示执行路径，不代表成功；同时检查 `tool_calls[].is_error`。生产预算不扣减不代表 Provider 免费。模型请求关闭自动重试。
+- 最多 20 轮、128 次工具调用、240 秒、1 MiB trace；当前配置可能进一步收窄轮数和时长，以 `fidelity.limits` 为准。一次只允许一个 replay，并与生产共享模型并发闸门，不并行压测生产。响应 `version: 2` 是场景结果格式，不是旧模型快照版本。
+- 媒体导出（见 [Invocation 查询与审计](invocations.md#导出授权媒体)）仍只下载 Invocation 冻结快照显式授权的媒体，是独立命令；导出文件不会自动注入 replay，也不能扩展场景的引用权限。
 
 ## 处理失败并保留边界
 
 分别读取退出码、stdout、stderr，不因非零退出码丢掉已有结果：
 
 - `0`：命令成功；仍需检查工具错误与保真限制。
-- `1`：网络、服务端或 replay 失败。若 stdout 有结构化 replay 结果且 stderr 为 `replay_failed`，检查 stdout 的 `error.code/message`、`completion_reason` 与已有输出，不把部分输出当完整成功。
-- `2`：参数或输入无效（含 prompt 覆盖为空或过大）；更正参数，不重试原命令。
+- `1`：网络、服务端或 replay 失败。若 stdout 有结构化结果且 stderr 为 `replay_failed`，检查 `error.code/message`、`completion_reason` 与已有输出，不把部分输出当完整成功。
+- `2`：参数或输入无效；更正参数，不重试原命令。
 
 | 错误 | 下一步 |
 | --- | --- |
-| `unauthenticated` / `forbidden` | 请操作员检查 key、撤销状态和授权范围，并在本机用 `plasticwan-utils login` 重新保存正确凭据；不换接口绕过认证 |
-| `missing_api_key` | 当前命令没有可用的 endpoint/key 组合（例如提供了新 endpoint 而没有显式 key，或显式给了空值不会回退到保存文件）；请操作员 `login` 重新保存或补全参数/环境变量，不自行混搭来源 |
-| `invalid_credentials` | 保存的凭据文件损坏、是符号链接或权限不安全；仅内容损坏且文件/目录安全时操作员可在本机重新 `login`，符号链接、非普通文件或不安全权限仍被 `login` 拒绝，需人工处理。Agent 不代为登录、不自动改权限、不删除或重建凭据 |
-| `replay_source_unfinished` / `replay_busy` | 源未结束或已有重放；报告并停止，不轮询、不自动重试计费请求 |
-| `replay_input_unavailable` / `replay_input_invalid` | 缺失或损坏的起始快照；可能未录制、已清理或来自旧版本。只能让操作员为未来 Invocation 开启录制；不能补造旧快照 |
-| `replay_prompt_parts_unavailable` | v1 旧快照没有分层信息：只能原样重放；不要用 `config show`/`prompt get` 的当前值冒充历史层 |
-| `global_prompt_empty` / `global_prompt_too_large` / `group_prompt_too_large` / `*_prompt_read_failed` | 覆盖内容在本地被拒（退出码 `2`）；按提示修正文件或 stdin 后重新取得确认，不重试原命令 |
-| `replay_prompt_empty` / `replay_prompt_invalid` / `replay_prompt_too_large` | 服务端拒绝了覆盖模板（global 清空、NUL/BOM、未知变量、超限）；修正后用同一授权重试一次或报告，不绕过校验 |
-| `replay_chat_unconfigured` / `replay_model_unavailable` / `replay_unavailable` | 请操作员核对当前 Chat、模型或服务装配；不擅改配置 |
-| `timeout` / `network_error` / `redirect_not_allowed` | 核对地址、服务状态和连接；不降级 HTTPS、不自动重放，结果与费用可能不确定 |
-| `response_too_large` | 超过客户端 4 MiB 上限；报告不可读取，勿绕过限制批量抓取或假装无记录 |
-| `body_too_large` | 超过服务端 1 MiB JSON 请求体上限；即使每层字符数合格也可能触发，缩短内容后重新确认，不绕过限制 |
+| `unauthenticated` / `forbidden` | 请操作员核对密钥、撤销状态和授权范围，在本机用 `login` 保存正确凭据；不换接口绕过认证 |
+| `missing_api_key` | 当前没有可用的 endpoint/key 组合；请操作员补全参数/环境变量或 `login`，不自行混搭来源 |
+| `invalid_credentials` | 凭据文件损坏、符号链接或权限不安全；需操作员处理，Agent 不代登录、不改权限或删除/重建凭据 |
+| `confirm_paid_required` | 切片 replay 缺少 `--confirm-paid`，退出码 2；尚未读取 prompt 或发出任何请求。先取得目标、次数和覆盖的计费授权，再显式确认；不自行补 flag 或改成整场重放绕过 |
+| `replay_source_unfinished` / `replay_busy` | 源未结束或已有 replay；报告并停止，不轮询或自动重试计费请求 |
+| `replay_scene_unavailable` / `replay_scene_invalid` | 保留的开场公开消息缺失或场景损坏；报告证据，不补造快照、不用私有 Context/开发报文替代。开启报文录制不能修复此错误 |
+| `replay_slice_empty` / `replay_slice_target_invalid` | 切片窗口内没有新的公开消息，或目标不是本 Invocation 的成功发送（失败的、别的 Conversation 的、不存在的）；核对 `matched_messages` 与 `telegram_sends`，不补造输入、不改成整场重放绕过 |
+| `invalid_before_send` / `invalid_before_send_id` / `invalid_search` / `invalid_at` / `invalid_from` / `invalid_to` / `invalid_time_range` | 新参数校验失败（本地退出码 2；时间与时区语义由服务端判定，400 时退出码 1）；修正时间格式、搜索词或 `--before-send` 并核对授权范围，不重试原命令 |
+| `replay_prompt_parts_unavailable` | CLI 的预检覆盖守卫失败；核对服务版本与预检结果，不据此推断旧快照或绕过预检 |
+| `global_prompt_empty` / `global_prompt_too_large` / `group_prompt_too_large` / `*_prompt_read_failed` | 本地拒绝覆盖内容；按提示修正文件或 stdin 并核对授权范围 |
+| `replay_prompt_empty` / `replay_prompt_invalid` / `replay_prompt_too_large` | 服务端拒绝模板；修正并核对授权，不绕过校验或自动重试 |
+| `replay_chat_unconfigured` / `replay_topic_unconfigured` / `replay_model_unavailable` / `replay_unavailable` | 请操作员核对当前 allowlist、模型或服务装配，不擅改配置 |
+| `timeout` / `network_error` / `redirect_not_allowed` | 核对地址与服务，不降级 HTTPS、不自动重放；结果与费用可能不确定 |
+| `response_too_large` | 超过客户端 4 MiB 上限；报告不可读取，不绕过限制或假装无记录 |
+| `body_too_large` | 超过服务端 1 MiB JSON body 上限；缩短内容并核对授权，不绕过限制 |
 
-结束时交代：目标 ID、实际执行次数、使用的模型与 prompt 覆盖（`overrides`）、关键证据、保真限制和仍未验证的事项。只保存用户需要且已脱敏的最小结果，不自动落盘完整对话或 trace。
+结束时交代目标 ID、实际执行次数、当前模型、prompt 来源与覆盖、关键证据、保真限制及未验证事项。只保存用户需要且已脱敏的最小结果，不自动落盘完整对话或 trace。

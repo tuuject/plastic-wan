@@ -1,41 +1,40 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
-import Type from 'typebox';
+import Type, { type TSchema } from 'typebox';
 import { expect, test } from 'vitest';
 import { SendInputSchema } from '../src/capabilities/send-tool.ts';
 import { AddMemoryInputSchema, DeleteMemoryInputSchema } from '../src/context/memory.ts';
-import { createReplayTools, type ReplayTools } from '../src/orchestration/replay-tools.ts';
+import {
+  createReplayTools,
+  type ReplayTools,
+  type ReplayToolDefinition,
+  type ReplayToolRegistry,
+} from '../src/orchestration/replay-tools.ts';
 import { BUNDLED_SYSTEM_RESOURCES_DIR, SystemResources } from '../src/platform/system-resources.ts';
 import { AlarmInputSchema, DeleteAlarmInputSchema, ListAlarmInputSchema } from '../src/plugins/alarm/alarm.ts';
 import { ImageGenerateInputSchema } from '../src/plugins/image/image.ts';
-import type { ReplayInput, ReplayToolDefinition } from '../src/store/replay-input.ts';
 
-const EMPTY_PARAMETERS = { type: 'object', properties: {}, additionalProperties: false };
-const ReadParameters = {
-  type: 'object',
-  properties: { uri: { type: 'string' }, base: { type: 'string' } },
-  additionalProperties: false,
-};
+const EMPTY_PARAMETERS = Type.Object({}, { additionalProperties: false });
+const ReadParameters = Type.Object(
+  { uri: Type.String(), base: Type.Optional(Type.String()) },
+  { additionalProperties: false },
+);
 
-function definition(name: string, parameters: object = EMPTY_PARAMETERS): ReplayToolDefinition {
+function definition(name: string, parameters: TSchema = EMPTY_PARAMETERS): ReplayToolDefinition {
   return {
     name,
     label: name,
-    description: `${name} snapshot definition`,
-    parameters: parameters as Record<string, unknown>,
+    description: `${name} current definition`,
+    parameters,
   };
 }
 
-function replayInput(options: { tools?: ReplayToolDefinition[]; capabilities?: ReplayToolDefinition[] }): ReplayInput {
-  return {
-    version: 1,
-    system_prompt: 'replay test prompt',
-    messages: ['{"role":"user","content":"hi"}'],
-    tools: options.tools ?? [],
-    capabilities: options.capabilities ?? [],
-    omitted_images: 0,
-  };
+function replayInput(options: {
+  tools?: ReplayToolDefinition[];
+  capabilities?: ReplayToolDefinition[];
+}): ReplayToolRegistry {
+  return { tools: options.tools ?? [], capabilities: options.capabilities ?? [] };
 }
 
 function toolOf(tools: readonly AgentTool[], name: string): AgentTool {
@@ -251,10 +250,10 @@ test('unknown top-level tools and MCP tools are blocked', async () => {
     SystemResources.empty(),
   );
   await expect(toolOf(replay.tools, 'send_file').execute('call-1', { path: 'x' })).rejects.toThrow(
-    'replay blocks tool send_file',
+    'scene test blocks tool send_file',
   );
   await expect(toolOf(replay.tools, 'mcp__demo__search').execute('call-2', { query: 'x' })).rejects.toThrow(
-    'replay blocks tool mcp__demo__search',
+    'scene test blocks tool mcp__demo__search',
   );
   expect(replay.dispatches).toEqual([
     { tool_call_id: 'call-1', tool_name: 'send_file', mode: 'blocked' },
@@ -297,7 +296,7 @@ test('execute denies primitives, unknown names, and side-effect-free production 
   expect(replay.outputs).toEqual([]);
 });
 
-test('execute search and help stay inside the snapshot registry', async () => {
+test('execute search and help stay inside the current registry', async () => {
   const replay = createReplayTools(
     replayInput({
       tools: [definition('execute')],
@@ -312,7 +311,7 @@ test('execute search and help stay inside the snapshot registry', async () => {
   const search = await execute.execute('exec-5', { action: 'search', query: 'fetch a web page' });
   expect(JSON.parse(textOf(search))).toEqual([{ name: 'web_fetch', summary: 'web_fetch' }]);
   const help = await execute.execute('exec-6', { action: 'help', tool: 'add_memory' });
-  expect(JSON.parse(textOf(help))).toMatchObject({ name: 'add_memory', description: 'add_memory snapshot definition' });
+  expect(JSON.parse(textOf(help))).toMatchObject({ name: 'add_memory', description: 'add_memory current definition' });
   expect(replay.dispatches).toEqual([
     { tool_call_id: 'exec-5', tool_name: 'execute', mode: 'synthetic' },
     { tool_call_id: 'exec-6', tool_name: 'execute', mode: 'synthetic' },

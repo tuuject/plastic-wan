@@ -1,5 +1,12 @@
 import { and, desc, eq, gte, lt, or, type SQL, sql } from 'drizzle-orm';
-import type { Orm } from '../../store/database.ts';
+import type { RawConfig } from '../../platform/config.ts';
+import {
+  MessageTimeError,
+  type MessageTimeOptions,
+  parseMessageTimeInstant,
+  parseMessageTimeWindow,
+} from '../../platform/message-time.ts';
+import { type Orm, resolveChatConfig } from '../../store/database.ts';
 import {
   agentMessages,
   chats,
@@ -25,6 +32,8 @@ const DEFAULT_PAGE_SIZE = 25;
 const MAX_SEARCH_LENGTH = 100;
 /** Payload previews are truncated so one huge transcript row cannot bloat the API response. */
 const MAX_PAYLOAD_PREVIEW_LENGTH = 2_000;
+/** Keyword/time searches report only the first few matching messages per invocation. */
+const MAX_MATCHED_MESSAGES = 5;
 
 const num = (value: unknown): number | null => (value === null ? null : Number(value));
 const bit = (value: unknown): boolean => value === 1n;
@@ -42,6 +51,12 @@ export interface ListQuery {
   readonly set?: string | null;
   readonly search?: string | null;
   readonly target?: string | null;
+  /** Whole-minute/second/fraction window, resolved in the Chat or global timezone. */
+  readonly at?: string | null;
+  /** Inclusive lower bound; `YYYY-MM-DD[T ]HH:mm[:ss[.fff]]` with optional Z/±HH:mm. */
+  readonly from?: string | null;
+  /** Exclusive upper bound, same timestamp grammar as `from`. */
+  readonly to?: string | null;
 }
 
 export class AdminQueryError extends Error {
@@ -352,7 +367,250 @@ function optionalFilter(value: string | null | undefined): string | undefined {
   return value;
 }
 
-export function listInvocations(orm: Orm, query: ListQuery): Page<Record<string, unknown>> {
+/**
+ * A keyword/time filter for `listInvocations`: an escaped LIKE pattern and UTC
+ * ISO-8601 bounds, each optional but every present member required to hit the
+ * same public message.
+ */
+interface InvocationMessageFilter {
+  readonly keyword: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+}
+
+/** Correlates a matched-message source with the invocation(s) being listed. */
+type InvocationScope = (column: SQL) => SQL;
+
+interface MatchedMessageRow {
+  readonly invocation_id: bigint;
+  readonly source: string;
+  /** TEXT for frozen snapshots, INTEGER for telegram_sends; both stringified in the API. */
+  readonly telegram_message_id: bigint | string | null;
+  readonly telegram_send_id: bigint | null;
+  readonly at: string;
+  readonly text: string | null;
+}
+
+const INCOMING_INVOCATION = sql`im.invocation_id`;
+const INCOMING_TEXT = sql`json_extract(im.snapshot_json, '$.text')`;
+const INCOMING_CAPTION = sql`json_extract(im.snapshot_json, '$.caption')`;
+// The snapshot froze telegram_date when the invocation ran; later edits never touch it.
+const INCOMING_DATE = sql`json_extract(im.snapshot_json, '$.telegram_date')`;
+const SEND_INVOCATION = sql`tc.invocation_id`;
+// The published text lives in the outgoing message; a send whose outgoing row
+// is gone falls back to the send arguments that Telegram accepted.
+const SEND_TEXT = sql`COALESCE(r.text, r.caption, json_extract(tc.arguments_json, '$.text'))`;
+const SEND_DATE = sql`COALESCE(m.telegram_date, ts.finished_at)`;
+const SEND_SOURCE = sql`FROM telegram_sends ts
+       JOIN tool_calls tc ON tc.id = ts.tool_call_id
+       LEFT JOIN messages m ON m.conversation_id = ts.conversation_id
+         AND m.telegram_message_id = ts.telegram_message_id AND m.sent_by_bot = 1
+       LEFT JOIN message_revisions r ON r.id = m.current_revision_id`;
+
+/**
+ * `search` and `at`/`from`/`to` both look at the invocation's public messages:
+ * frozen `section = 'new'` snapshots and successfully delivered Telegram
+ * sends. Private assistant text and tool results are never candidates, an
+ * unsuccessful send never is, and a keyword must match the same message whose
+ * time satisfies the bounds.
+ */
+function parseInvocationMessageFilter(
+  orm: Orm,
+  query: ListQuery,
+  config: RawConfig | undefined,
+): InvocationMessageFilter | null {
+  const at = optionalFilter(query.at);
+  const from = optionalFilter(query.from);
+  const to = optionalFilter(query.to);
+  const search = optionalFilter(query.search);
+  if (at !== undefined && (from !== undefined || to !== undefined)) {
+    throw new AdminQueryError('invalid_time_range', 'at cannot be combined with from or to');
+  }
+  if (at === undefined && from === undefined && to === undefined && search === undefined) {
+    return null;
+  }
+  if (search !== undefined && search.length > MAX_SEARCH_LENGTH) {
+    throw new AdminQueryError('invalid_search', 'Search text is too long');
+  }
+  const timeOptions: MessageTimeOptions = { timezone: resolveFilterTimezone(orm, query, config) };
+  let lower: string | null = null;
+  let upper: string | null = null;
+  if (at !== undefined) {
+    const window = timeFilterValue('invalid_at', () => parseMessageTimeWindow(at, timeOptions));
+    lower = window.from;
+    upper = window.to;
+  } else {
+    if (from !== undefined) {
+      lower = timeFilterValue('invalid_from', () => parseMessageTimeInstant(from, timeOptions));
+    }
+    if (to !== undefined) {
+      upper = timeFilterValue('invalid_to', () => parseMessageTimeInstant(to, timeOptions));
+    }
+    if (lower !== null && upper !== null && lower >= upper) {
+      throw new AdminQueryError('invalid_time_range', 'from must be earlier than to');
+    }
+  }
+  return { keyword: search === undefined ? null : escapeLike(search), from: lower, to: upper };
+}
+
+/** Literal `%`, `_` and `\` in the writer's text never turn into wildcards. */
+function escapeLike(value: string): string {
+  return `%${value.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+}
+
+/**
+ * Bare timestamps resolve in the Chat's timezone when `chat` names a
+ * configured Chat, otherwise in the global timezone. Timestamps carrying
+ * their own offset ignore both, and the host machine's timezone is never
+ * consulted.
+ */
+function resolveFilterTimezone(orm: Orm, query: ListQuery, config: RawConfig | undefined): string | undefined {
+  if (config === undefined) {
+    return undefined;
+  }
+  const chat = optionalFilter(query.chat);
+  if (chat !== undefined) {
+    const chatTimezone = resolveChatConfig(config, orm, parseId(chat, 'chat'))?.timezone;
+    if (chatTimezone !== undefined && chatTimezone.length > 0) {
+      return chatTimezone;
+    }
+  }
+  return config.timezone;
+}
+
+function timeFilterValue<T>(code: string, parse: () => T): T {
+  try {
+    return parse();
+  } catch (error) {
+    if (error instanceof MessageTimeError) {
+      throw new AdminQueryError(code, error.message);
+    }
+    throw error;
+  }
+}
+
+function incomingMatchedConditions(filter: InvocationMessageFilter, scope: InvocationScope): SQL[] {
+  const conditions: SQL[] = [scope(INCOMING_INVOCATION), sql`im.section = 'new'`];
+  if (filter.keyword !== null) {
+    conditions.push(
+      sql`(${INCOMING_TEXT} LIKE ${filter.keyword} ESCAPE '\\' OR ${INCOMING_CAPTION} LIKE ${filter.keyword} ESCAPE '\\')`,
+    );
+  }
+  if (filter.from !== null) {
+    conditions.push(sql`${INCOMING_DATE} >= ${filter.from}`);
+  }
+  if (filter.to !== null) {
+    conditions.push(sql`${INCOMING_DATE} < ${filter.to}`);
+  }
+  return conditions;
+}
+
+function sendMatchedConditions(filter: InvocationMessageFilter, scope: InvocationScope): SQL[] {
+  const conditions: SQL[] = [scope(SEND_INVOCATION), sql`ts.state = 'success'`];
+  if (filter.keyword !== null) {
+    conditions.push(sql`${SEND_TEXT} LIKE ${filter.keyword} ESCAPE '\\'`);
+  }
+  if (filter.from !== null) {
+    conditions.push(sql`${SEND_DATE} >= ${filter.from}`);
+  }
+  if (filter.to !== null) {
+    conditions.push(sql`${SEND_DATE} < ${filter.to}`);
+  }
+  return conditions;
+}
+
+function matchedMessagesExists(filter: InvocationMessageFilter): SQL {
+  const correlated: InvocationScope = (column) => sql`${column} = i.id`;
+  const incoming = sql.join(incomingMatchedConditions(filter, correlated), sql` AND `);
+  const send = sql.join(sendMatchedConditions(filter, correlated), sql` AND `);
+  return sql`(EXISTS (SELECT 1 FROM invocation_messages im WHERE ${incoming})
+        OR EXISTS (SELECT 1 ${SEND_SOURCE} WHERE ${send}))`;
+}
+
+function matchedMessagesSelect(filter: InvocationMessageFilter, scope: InvocationScope): SQL {
+  const preview =
+    filter.keyword === null
+      ? sql`COALESCE(${INCOMING_TEXT}, ${INCOMING_CAPTION})`
+      : sql`CASE WHEN ${INCOMING_TEXT} LIKE ${filter.keyword} ESCAPE '\\' THEN ${INCOMING_TEXT} ELSE ${INCOMING_CAPTION} END`;
+  const incoming = sql`SELECT im.invocation_id AS invocation_id, 'incoming' AS source,
+              json_extract(im.snapshot_json, '$.message_id') AS telegram_message_id,
+              NULL AS telegram_send_id,
+              ${INCOMING_DATE} AS at,
+              ${preview} AS text
+       FROM invocation_messages im
+       WHERE ${sql.join(incomingMatchedConditions(filter, scope), sql` AND `)}`;
+  const send = sql`SELECT tc.invocation_id AS invocation_id, 'bot' AS source,
+              COALESCE(ts.telegram_message_id, m.telegram_message_id) AS telegram_message_id,
+              ts.id AS telegram_send_id,
+              ${SEND_DATE} AS at,
+              ${SEND_TEXT} AS text
+       ${SEND_SOURCE}
+       WHERE ${sql.join(sendMatchedConditions(filter, scope), sql` AND `)}`;
+  return sql`${incoming} UNION ALL ${send}`;
+}
+
+/**
+ * Total order inside one invocation: newest public time first, then the
+ * Telegram message ID compared as an integer (`json_extract` returns the
+ * snapshots' frozen TEXT ids while `telegram_sends` stores integers), then the
+ * send row ID and source so same-second matches still have one deterministic
+ * order.
+ */
+const matchedMessageOrder = (row: SQL): SQL => sql`${row}.at DESC,
+      CASE WHEN ${row}.telegram_message_id IS NULL THEN 1 ELSE 0 END,
+      CAST(${row}.telegram_message_id AS INTEGER) DESC,
+      CASE WHEN ${row}.telegram_send_id IS NULL THEN 1 ELSE 0 END,
+      ${row}.telegram_send_id DESC,
+      ${row}.source`;
+
+/**
+ * Newest first, at most {@link MAX_MATCHED_MESSAGES} per invocation: the SQL
+ * window keeps each invocation's latest matches only, so a caller can pick the
+ * first matching bot message's `telegram_send_id` as a replay-slice candidate.
+ * Preflight still validates it: an invocation can send to another conversation.
+ */
+function loadMatchedMessages(
+  orm: Orm,
+  invocationIds: readonly bigint[],
+  filter: InvocationMessageFilter,
+): Map<string, Record<string, unknown>[]> {
+  const byInvocation = new Map<string, Record<string, unknown>[]>();
+  if (invocationIds.length === 0) {
+    return byInvocation;
+  }
+  const scope: InvocationScope = (column) =>
+    sql`${column} IN (${sql.join(
+      invocationIds.map((id) => sql`${id}`),
+      sql`, `,
+    )})`;
+  // `rank_no` already encodes the per-invocation order, so the outer query
+  // reuses it instead of repeating the window's ORDER BY expression.
+  const rows = orm.all<MatchedMessageRow>(
+    sql`SELECT mm.invocation_id, mm.source, mm.telegram_message_id, mm.telegram_send_id, mm.at, mm.text
+       FROM (
+         SELECT ranked.*,
+                ROW_NUMBER() OVER (PARTITION BY ranked.invocation_id ORDER BY ${matchedMessageOrder(sql`ranked`)}) AS rank_no
+         FROM (${matchedMessagesSelect(filter, scope)}) ranked
+       ) mm
+       WHERE mm.rank_no <= ${BigInt(MAX_MATCHED_MESSAGES)}
+       ORDER BY mm.invocation_id, mm.rank_no`,
+  );
+  for (const row of rows) {
+    const key = row.invocation_id.toString();
+    const messages = byInvocation.get(key) ?? [];
+    messages.push({
+      source: row.source,
+      telegram_message_id: row.telegram_message_id === null ? null : row.telegram_message_id.toString(),
+      telegram_send_id: row.telegram_send_id === null ? null : row.telegram_send_id.toString(),
+      at: row.at,
+      text: row.text === null ? null : row.text.slice(0, MAX_PAYLOAD_PREVIEW_LENGTH),
+    });
+    byInvocation.set(key, messages);
+  }
+  return byInvocation;
+}
+
+export function listInvocations(orm: Orm, query: ListQuery, config?: RawConfig): Page<Record<string, unknown>> {
   const limit = parseLimit(query.limit);
   const conditions: SQL[] = [];
   appendCursor(conditions, sql`i.id`, query.cursor);
@@ -361,6 +619,10 @@ export function listInvocations(orm: Orm, query: ListQuery): Page<Record<string,
   }
   if (query.chat !== undefined && query.chat !== null && query.chat.length > 0) {
     conditions.push(sql`ch.telegram_chat_id = ${parseId(query.chat, 'chat')}`);
+  }
+  const filter = parseInvocationMessageFilter(orm, query, config);
+  if (filter !== null) {
+    conditions.push(matchedMessagesExists(filter));
   }
   const rows =
     orm.all<InvocationListRow>(sql`SELECT i.id, i.state, i.created_at, i.started_at, i.finished_at, i.completion_reason, i.error_code,
@@ -378,26 +640,40 @@ export function listInvocations(orm: Orm, query: ListQuery): Page<Record<string,
        ${whereSql(conditions)}
        ORDER BY i.id DESC
        LIMIT ${BigInt(limit + 1)}`);
-  return page(rows, limit, (row) => ({
-    id: row.id.toString(),
-    state: row.state,
-    created_at: row.created_at,
-    started_at: row.started_at,
-    finished_at: row.finished_at,
-    completion_reason: row.completion_reason,
-    error_code: row.error_code,
-    sends_used: Number(row.sends_used),
-    tool_calls_used: Number(row.tool_calls_used),
-    turns_used: Number(row.turns_used),
-    side_effect_started: bit(row.side_effect_started),
-    config_hash: row.config_hash,
-    chat: chatSummary(row),
-    tool_call_count: Number(row.tool_call_count),
-    total_tokens: Number(row.total_tokens),
-    cache_read_tokens: Number(row.cache_read_tokens),
-    cache_write_tokens: Number(row.cache_write_tokens),
-    total_cost: row.total_cost,
-  }));
+  const matchedByInvocation =
+    filter === null
+      ? null
+      : loadMatchedMessages(
+          orm,
+          rows.map((row) => row.id),
+          filter,
+        );
+  return page(rows, limit, (row) => {
+    const item = {
+      id: row.id.toString(),
+      state: row.state,
+      created_at: row.created_at,
+      started_at: row.started_at,
+      finished_at: row.finished_at,
+      completion_reason: row.completion_reason,
+      error_code: row.error_code,
+      sends_used: Number(row.sends_used),
+      tool_calls_used: Number(row.tool_calls_used),
+      turns_used: Number(row.turns_used),
+      side_effect_started: bit(row.side_effect_started),
+      config_hash: row.config_hash,
+      chat: chatSummary(row),
+      tool_call_count: Number(row.tool_call_count),
+      total_tokens: Number(row.total_tokens),
+      cache_read_tokens: Number(row.cache_read_tokens),
+      cache_write_tokens: Number(row.cache_write_tokens),
+      total_cost: row.total_cost,
+    };
+    if (matchedByInvocation === null) {
+      return item;
+    }
+    return { ...item, matched_messages: matchedByInvocation.get(row.id.toString()) ?? [] };
+  });
 }
 
 export function getInvocation(orm: Orm, id: bigint): Record<string, unknown> | null {
@@ -623,7 +899,7 @@ export function listMessages(orm: Orm, query: ListQuery): Page<Record<string, un
     if (query.search.length > MAX_SEARCH_LENGTH) {
       throw new AdminQueryError('invalid_search', 'Search text is too long');
     }
-    const like = `%${query.search.replace(/[\\%_]/g, '\\$&')}%`;
+    const like = escapeLike(query.search);
     conditions.push(sql`(r.text LIKE ${like} ESCAPE '\\' OR r.caption LIKE ${like} ESCAPE '\\')`);
   }
   const rows = orm.all<MessageListRow>(
@@ -804,7 +1080,7 @@ export function listStickers(orm: Orm, query: ListQuery): Page<Record<string, un
     if (query.search.length > MAX_SEARCH_LENGTH) {
       throw new AdminQueryError('invalid_search', 'Search text is too long');
     }
-    const like = `%${query.search.replace(/[\\%_]/g, '\\$&')}%`;
+    const like = escapeLike(query.search);
     conditions.push(sql`(ma.description LIKE ${like} ESCAPE '\\' OR s.emoji LIKE ${like} ESCAPE '\\')`);
   }
   const rows =

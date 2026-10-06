@@ -16,6 +16,7 @@ import {
 import type { Update } from 'grammy/types';
 import { AgentRuntime } from '../src/orchestration/agent-runtime.ts';
 import { type LoadedConfig, loadConfig } from '../src/platform/config.ts';
+import { previewContext } from '../src/platform/invocation-context.ts';
 import type { RuntimeConfigurationStore } from '../src/platform/runtime-config.ts';
 import { SqliteStore } from '../src/store/database.ts';
 import { BucketScheduler } from '../src/orchestration/scheduler.ts';
@@ -224,6 +225,25 @@ test('stops a cache-heavy runaway invocation on the daily budget', async () => {
   expect(todayUsage(store)).toBe(300_000n);
   store.close();
 });
+
+test.each([285_000n, 285_001n])(
+  'scene definitions use the current zzz budget gate without writes at %s tokens',
+  async (used) => {
+    const { store, configStore, runtime } = await runtimeSetup(used);
+    try {
+      const before = store.db.prepare('SELECT * FROM daily_usage').all();
+      const registry = runtime.sceneToolDefinitions(previewContext(), configStore.current().config);
+      expect(registry.tools.map((tool) => tool.name)).toEqual(
+        used === 285_000n ? ['read', 'send', 'execute'] : ['read', 'send', 'execute', 'zzz'],
+      );
+      expect(store.db.prepare('SELECT * FROM daily_usage').all()).toEqual(before);
+      expect(store.db.prepare('SELECT * FROM tool_calls').all()).toEqual([]);
+      expect(store.db.prepare('SELECT * FROM app_state').all()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  },
+);
 
 test('does not expose zzz while more than five percent remains', async () => {
   const { store, configStore, runtime, invocationId, faux } = await runtimeSetup(284_999n);

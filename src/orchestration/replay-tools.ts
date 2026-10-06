@@ -13,20 +13,36 @@ import {
 import { SystemResourceError, type SystemResources } from '../platform/system-resources.ts';
 import { AlarmInputSchema, DeleteAlarmInputSchema, ListAlarmInputSchema } from '../plugins/alarm/alarm.ts';
 import { ImageGenerateInputSchema } from '../plugins/image/image.ts';
-import type { ReplayInput, ReplayToolDefinition } from '../store/replay-input.ts';
+import type { ImageContent } from '@earendil-works/pi-ai';
 import type { ToolAudit } from '../store/tool-audit.ts';
 
 /**
- * Replay execution of a captured model payload against the current tool layer,
- * with no production store, provider, or Telegram connection. Only snapshot
- * definitions become tools: each call is either synthesized in memory
- * (`synthetic`), served from the readonly system resource tree (`live_read`),
- * or refused (`blocked`). Nothing that could reach the outside world is wired:
- * web fetching, sticker search, image analysis, unknown capabilities, unknown
+ * Scene execution against current tool definitions, never their production
+ * executors. Each call is either synthesized in memory
+ * (`synthetic`), served from readonly system resources or scene-authorized
+ * image bytes (`live_read`), or refused (`blocked`). Production executors for
+ * web fetching, sticker search, Vision, unknown capabilities, unknown
  * top-level tools, and MCP tools are all deny-by-default.
  */
 
 export type ReplayDispatchMode = 'synthetic' | 'live_read' | 'blocked';
+
+export type ReplayToolDefinition = Pick<AgentTool, 'name' | 'label' | 'description' | 'parameters'>;
+export interface ReplayToolRegistry {
+  readonly tools: readonly ReplayToolDefinition[];
+  readonly capabilities: readonly ReplayToolDefinition[];
+}
+
+export function toolDefinition(tool: ReplayToolDefinition): ReplayToolDefinition {
+  return { name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters };
+}
+
+export interface ReplayToolOptions {
+  readonly readImage?: (ref: string, signal: AbortSignal) => Promise<ImageContent>;
+  readonly maxTextLength?: number;
+  readonly disallowBlankLines?: boolean;
+  readonly replyMessageIds?: ReadonlySet<string>;
+}
 
 /** One successfully synthesized `send`; `arguments` are the call's own input fields. */
 export interface ReplayOutput {
@@ -72,11 +88,13 @@ interface ReplayState {
   readonly dispatches: ReplayDispatch[];
   readonly memories: Map<string, MemoryEntry>;
   readonly alarms: Map<string, AlarmEntry>;
+  readonly imageResults: Map<string, ImageContent>;
   sends: number;
   nextAlarmId: bigint;
+  readonly options: ReplayToolOptions;
 }
 
-/** Current-schema guards: the model-facing schemas come from the snapshot. */
+/** Current-schema guards: model-facing schemas come from the active tool registry. */
 const SendInputValidator = Compile(SendInputSchema);
 const AddMemoryInputValidator = Compile(AddMemoryInputSchema);
 const DeleteMemoryInputValidator = Compile(DeleteMemoryInputSchema);
@@ -112,16 +130,23 @@ const SYNTHETIC_CAPABILITIES: ReadonlySet<string> = new Set([
   'list_alarm',
   'delete_alarm',
   'image_generate',
+  'typing',
 ]);
 
-export function createReplayTools(input: ReplayInput, resources: SystemResources): ReplayTools {
+export function createReplayTools(
+  input: ReplayToolRegistry,
+  resources: SystemResources,
+  options: ReplayToolOptions = {},
+): ReplayTools {
   const state: ReplayState = {
     outputs: [],
     dispatches: [],
     memories: new Map(),
     alarms: new Map(),
+    imageResults: new Map(),
     sends: 0,
     nextAlarmId: 0n,
+    options,
   };
   // The runner captures audit events from the tool results; replay only needs a
   // no-op sink so the same createExecuteTool dispatch path can run.
@@ -160,7 +185,7 @@ function replayTool(
     return replaySendTool(definition, state);
   }
   if (definition.name === 'execute') {
-    return replayExecuteTool(definition, execute, state.dispatches, registeredCapabilities);
+    return replayExecuteTool(definition, execute, state, registeredCapabilities);
   }
   if (definition.name === 'zzz') {
     return replayZzzTool(definition, state.dispatches);
@@ -168,7 +193,7 @@ function replayTool(
   return replayBlockedTool(definition, state.dispatches);
 }
 
-/** The snapshot definition supplies name, label, description, and parameters. */
+/** The current registry supplies name, label, description, and parameters. */
 function replayToolBase(definition: ReplayToolDefinition): {
   name: string;
   label: string;
@@ -179,7 +204,7 @@ function replayToolBase(definition: ReplayToolDefinition): {
     name: definition.name,
     label: definition.label,
     description: definition.description,
-    parameters: definition.parameters as unknown as TSchema,
+    parameters: definition.parameters,
   };
 }
 
@@ -223,6 +248,21 @@ function replaySendTool(definition: ReplayToolDefinition, state: ReplayState): A
       if (!sendKindResolvable(input)) {
         throw new Error('send input fields do not match its kind');
       }
+      if (typeof input.text === 'string') {
+        if (input.text.length > (state.options.maxTextLength ?? 4_096)) {
+          throw new Error('send text exceeds the current configured length limit');
+        }
+        if (state.options.disallowBlankLines === true && /\n\s*\n/.test(input.text)) {
+          throw new Error('send text contains blank lines disallowed by current configuration');
+        }
+      }
+      if (
+        typeof input.reply_to_message_id === 'string' &&
+        state.options.replyMessageIds !== undefined &&
+        !state.options.replyMessageIds.has(input.reply_to_message_id)
+      ) {
+        throw new Error('reply_to_message_id is not visible in this scene');
+      }
       state.dispatches.push({ tool_call_id: toolCallId, tool_name: 'send', mode: 'synthetic' });
       state.sends += 1;
       const messageId = String(state.sends);
@@ -263,15 +303,30 @@ function replayZzzTool(definition: ReplayToolDefinition, dispatches: ReplayDispa
 function replayExecuteTool(
   definition: ReplayToolDefinition,
   inner: AgentTool,
-  dispatches: ReplayDispatch[],
+  state: ReplayState,
   registeredCapabilities: ReadonlySet<string>,
 ): AgentTool {
   return {
     ...replayToolBase(definition),
     execute: async (toolCallId, params, signal) => {
       signal?.throwIfAborted();
-      recordExecuteDispatch(dispatches, toolCallId, params, registeredCapabilities);
-      return inner.execute(toolCallId, params, signal);
+      recordExecuteDispatch(
+        state.dispatches,
+        toolCallId,
+        params,
+        registeredCapabilities,
+        state.options.readImage !== undefined,
+      );
+      const imageCallId = `${toolCallId}:read_image`;
+      try {
+        // The shared execute gateway validates and audits text envelopes. Scene
+        // reads additionally return bytes to this image-capable model, not Vision.
+        const result = await inner.execute(toolCallId, params, signal);
+        const image = state.imageResults.get(imageCallId);
+        return image === undefined ? result : { ...result, content: [...result.content, image] };
+      } finally {
+        state.imageResults.delete(imageCallId);
+      }
     },
   };
 }
@@ -282,12 +337,43 @@ function replayBlockedTool(definition: ReplayToolDefinition, dispatches: ReplayD
     execute: async (toolCallId, _params, signal) => {
       signal?.throwIfAborted();
       dispatches.push({ tool_call_id: toolCallId, tool_name: definition.name, mode: 'blocked' });
-      throw new Error(`replay blocks tool ${definition.name}: only snapshot-defined synthetic tools are wired`);
+      throw new Error(`scene test blocks tool ${definition.name}: no production executor is wired`);
     },
   };
 }
 
 function replayCapability(definition: ReplayToolDefinition, state: ReplayState): ExecutableCapability {
+  if (definition.name === 'typing') {
+    return capability(
+      {
+        ...replayToolBase(definition),
+        execute: async (_id, _params, signal) => {
+          signal?.throwIfAborted();
+          return { content: [{ type: 'text', text: 'Typing requested; use send to publish the reply.' }], details: {} };
+        },
+      },
+      false,
+    );
+  }
+  const readImage = state.options.readImage;
+  if (definition.name === 'read_image' && readImage !== undefined) {
+    return capability(
+      {
+        ...replayToolBase(definition),
+        execute: async (id, params, signal) => {
+          const input = params as { image_ref?: unknown };
+          if (typeof input.image_ref !== 'string') {
+            throw new Error('read_image input does not match the tool schema');
+          }
+          const image = await readImage(input.image_ref, signal ?? new AbortController().signal);
+          signal?.throwIfAborted();
+          state.imageResults.set(id, image);
+          return { content: [{ type: 'text', text: 'Scene image loaded.' }], details: { scene_image: true } };
+        },
+      },
+      false,
+    );
+  }
   if (definition.name === 'add_memory') {
     return capability(replayAddMemoryTool(definition, state), true);
   }
@@ -449,7 +535,11 @@ function sendKindResolvable(input: Record<string, unknown>): boolean {
     (input.text !== undefined && input.sticker_ref === undefined && input.image_generation_id === undefined
       ? 'text'
       : undefined);
-  if (kind === undefined || (kind === 'sticker' && input.parse_mode !== undefined)) {
+  if (
+    kind === undefined ||
+    (kind === 'sticker' && input.parse_mode !== undefined) ||
+    (kind !== 'image' && input.resend !== undefined)
+  ) {
     return false;
   }
   if (kind === 'text') {
@@ -466,6 +556,7 @@ function recordExecuteDispatch(
   toolCallId: string,
   params: unknown,
   registeredCapabilities: ReadonlySet<string>,
+  readImage: boolean,
 ): void {
   if (typeof params !== 'object' || params === null) {
     return;
@@ -478,7 +569,12 @@ function recordExecuteDispatch(
     dispatches.push({
       tool_call_id: toolCallId,
       tool_name: 'execute',
-      mode: synthetic ? 'synthetic' : 'blocked',
+      mode:
+        registeredCapabilities.has(target) && target === 'read_image' && readImage
+          ? 'live_read'
+          : synthetic
+            ? 'synthetic'
+            : 'blocked',
       capability: target,
     });
     return;

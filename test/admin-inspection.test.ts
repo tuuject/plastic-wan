@@ -101,15 +101,27 @@ async function fixture() {
     secrets,
     replayPreflight: () => ({
       available: false,
-      reason: 'replay_input_unavailable',
+      reason: 'replay_scene_unavailable',
       message: secret,
-      recording_enabled: false,
+      prompt_overrides_available: false,
+      omitted_images: null,
+      fidelity: {
+        input: 'historical_public_chat',
+        model_selection: 'current_chat_config',
+        prompt_selection: 'current_chat_config',
+        tool_selection: 'current_registry',
+        hot_injections: 'not_replayed',
+        external_tools: 'blocked',
+        system_resources: 'current_read_only',
+        side_effects: 'synthetic',
+      },
     }),
     invocationPrompts: (id) => ({
-      source: 'recorded',
+      source: 'active',
       source_invocation_id: id.toString(),
       global_prompt: secret,
-      group_prompt: 'historical group',
+      group_prompt: 'active group',
+      template_values: null,
       core_read_only: true,
     }),
     replayInvocation: async () => {
@@ -289,7 +301,7 @@ test('inspection rejects path inputs, repeated filters, unknown routes and every
   }
 });
 
-test('retained prompt and preflight reads redact metadata without any model request', async () => {
+test('active prompt and preflight reads redact metadata without any model request', async () => {
   const f = await fixture();
   for (const headers of [auth(f.key), { cookie: f.cookie }]) {
     const preflight = await f.server.handle(
@@ -297,13 +309,14 @@ test('retained prompt and preflight reads redact metadata without any model requ
     );
     expect(await preflight.json()).toMatchObject({
       available: false,
-      reason: 'replay_input_unavailable',
+      reason: 'replay_scene_unavailable',
       message: '[REDACTED]',
     });
     const prompts = await f.server.handle(request(`/api/invocations/${f.seeded.invocationA}/prompts`, { headers }));
     expect(await prompts.json()).toMatchObject({
       global_prompt: '[REDACTED]',
-      group_prompt: 'historical group',
+      source: 'active',
+      group_prompt: 'active group',
       core_read_only: true,
     });
   }

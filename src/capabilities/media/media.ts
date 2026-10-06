@@ -116,10 +116,39 @@ export class MediaService {
    * it like the direct-image path, but addressed by media id so a caller can
    * turn a conversation-authorized media reference into image bytes. Returns
    * base64 plus the normalized mime type; the temporary file is removed.
+   * Stickers are rejected: generation input is a photo or image document only.
    */
   async prepareInputImage(
     mediaId: bigint,
     signal: AbortSignal,
+  ): Promise<{ readonly base64: string; readonly mime: string }> {
+    return await this.#prepareImageBytes(mediaId, signal, false);
+  }
+
+  /**
+   * Prepares one stored media row as raw image input for a scene: the same
+   * download/normalize/temporary-file path as `prepareInputImage`, but stickers
+   * are allowed so an authorized scene reference reads as the picture the
+   * conversation actually saw. Read-only: it selects the media row, downloads
+   * and normalizes it, and writes no analysis, audit, usage or context rows; the
+   * caller decides what the current multimodal agent receives.
+   */
+  async prepareSceneImage(
+    mediaId: bigint,
+    signal: AbortSignal,
+  ): Promise<{ readonly base64: string; readonly mime: string }> {
+    return await this.#prepareImageBytes(mediaId, signal, true);
+  }
+
+  /**
+   * Shared engine behind the generation and scene reads. `allowSticker` is the
+   * only difference: generation never accepts a sticker, while a scene read
+   * resolves one through the same normalization the vision path uses.
+   */
+  async #prepareImageBytes(
+    mediaId: bigint,
+    signal: AbortSignal,
+    allowSticker: boolean,
   ): Promise<{ readonly base64: string; readonly mime: string }> {
     const media = this.#store.orm
       .select({
@@ -134,13 +163,16 @@ export class MediaService {
       .from(mediaTable)
       .where(eq(mediaTable.id, mediaId))
       .get();
-    if (media === undefined || media.kind === 'sticker') {
-      throw new Error('Media is unavailable as generation input');
+    if (media === undefined || (media.kind === 'sticker' && !allowSticker)) {
+      throw new Error(
+        allowSticker ? 'Media is unavailable as scene input' : 'Media is unavailable as generation input',
+      );
     }
     if (media.fileSize !== null && media.fileSize > BigInt(MAX_DOWNLOAD_BYTES)) {
       throw new Error('Telegram media exceeds 20 MB');
     }
     const mediaCache = this.#configStore.current().config.paths.media_cache;
+    await mkdir(mediaCache, { recursive: true, mode: 0o700 });
     const temporaryDirectory = await mkdtemp(join(mediaCache, 'gen-input-'));
     if (process.platform !== 'win32') {
       await chmod(temporaryDirectory, 0o700);

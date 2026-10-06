@@ -21,8 +21,8 @@ import {
   registerBotCommands,
 } from './orchestration/bot-commands.ts';
 import { ConversationRuntime } from './orchestration/conversation-runtime.ts';
-import { BucketScheduler } from './orchestration/scheduler.ts';
 import { ReplayError, ReplayRunner } from './orchestration/replay.ts';
+import { BucketScheduler } from './orchestration/scheduler.ts';
 import { KeyedSemaphore } from './platform/concurrency.ts';
 import { assertConfigPermissions, loadConfig } from './platform/config.ts';
 import { ConfigReloader } from './platform/config-reload.ts';
@@ -314,12 +314,18 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     startedScheduler.start();
     if (loaded.config.admin?.enabled === true) {
       const replay = new ReplayRunner({
-        orm: store.orm,
+        store,
         configStore,
         secrets,
         systemResources,
         modelGate,
         shutdownSignal: replayShutdown.signal,
+        toolDefinitions: (context, config) => runtime.sceneToolDefinitions(context, config),
+        skillVisibility: (skill) => skill.name !== 'image-generation' || (imageBridge?.enabled() ?? false),
+        imageLoader: async (mediaId, signal) => {
+          const image = await media.prepareSceneImage(mediaId, signal);
+          return { type: 'image', data: image.base64, mimeType: image.mime };
+        },
       });
       const adminServer = new AdminServer({
         store,
@@ -334,9 +340,9 @@ export async function serve(configPath: string, takeover = false): Promise<void>
         imageBridge,
         mediaDownloader: mediaClient,
         shutdownSignal: replayShutdown.signal,
-        replayPreflight: (id) => {
+        replayPreflight: (id, selection) => {
           try {
-            return replay.inspect(id);
+            return replay.inspect(id, selection);
           } catch (error) {
             if (error instanceof ReplayError) {
               throw new AdminQueryError(error.code, error.message, error.status);

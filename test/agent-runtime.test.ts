@@ -1,4 +1,4 @@
-import { afterAll, expect, test, vi } from 'vitest';
+import { afterAll, expect, test } from 'vitest';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -9,8 +9,6 @@ import Type from 'typebox';
 import type { Update } from 'grammy/types';
 import sharp from 'sharp';
 import { AgentRuntime } from '../src/orchestration/agent-runtime.ts';
-import { ContextBuilder } from '../src/context/context-builder.ts';
-import { composeAgentPrompt } from '../src/platform/agent-prompt.ts';
 import { KeyedSemaphore } from '../src/platform/concurrency.ts';
 import { loadConfig } from '../src/platform/config.ts';
 import { SqliteStore } from '../src/store/database.ts';
@@ -170,32 +168,13 @@ test.each([undefined, false, true])(
       expect(nextCall?.response_json).toBe('{"status":200}');
     }
     const auditedCalls = store.orm.select().from(modelCalls).all();
-    expect(auditedCalls[0]?.replayInputJson !== null).toBe(recordPayloads === true);
-    expect(auditedCalls[1]?.replayInputJson).toBeNull();
-    if (recordPayloads === true) {
-      const record = JSON.parse(auditedCalls[0]!.replayInputJson!) as {
-        version: number;
-        system_prompt: string;
-        prompt_parts: {
-          prefix: string;
-          global: string;
-          middle: string;
-          group: string;
-          template_values: Parameters<typeof composeAgentPrompt>[1];
-        };
-      };
-      expect(record).toMatchObject({
-        version: 2,
-        tools: [
-          expect.objectContaining({ name: 'read' }),
-          expect.objectContaining({ name: 'send' }),
-          expect.objectContaining({ name: 'execute' }),
-        ],
-      });
-      // The recorded layers must reproduce the exact prompt the model saw.
-      expect(composeAgentPrompt(record.prompt_parts, record.prompt_parts.template_values)).toBe(record.system_prompt);
-      expect(record.prompt_parts.prefix).toContain('Core agent protocol');
-    }
+    // The replay snapshot path is retired: whichever recording mode is active,
+    // the migrated schema has no column left to hold one.
+    const callColumns = store.db
+      .prepare<[], { name: string }>('PRAGMA table_info(model_calls)')
+      .all()
+      .map((column) => column.name);
+    expect(callColumns).not.toContain('replay_input_json');
     for (const call of auditedCalls) {
       expect(call.outputTokens).toBeGreaterThan(0n);
       expect(call.totalTokens).toBe(
@@ -1103,284 +1082,97 @@ test('a model that declares minimal tool-schema keywords is sent reduced tool de
   store.close();
 });
 
-test('a failed replay snapshot write keeps the invocation auditable and logs identifiers only', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'plasticwan-agent-replay-write-'));
-  directories.push(directory);
-  const configPath = join(directory, 'config.jsonc');
-  await writeTestConfig(
-    directory,
-    configPath,
-    testConfigJsonc(directory, (config) => {
-      config.developer = { record_model_payloads: true };
-      // One turn without a nudge: this test is about the failed snapshot write.
-      config.agent.send_nudge_enabled = false;
-    }),
-  );
-  const loaded = await loadConfig(configPath);
-  const faux = fauxProvider({
-    provider: 'agent',
-    models: [{ id: 'agent-model', input: ['text'], contextWindow: 200_000, maxTokens: 32_768 }],
-  });
-  const configStore = await testConfigStore(loaded, fauxRegistry(faux));
-  const store = await SqliteStore.open(loaded.config);
-  // Fail the real store write rather than the serializer: the snapshot is built
-  // and carries prompt content, then the UPDATE of `replay_input_json` aborts.
-  // The runtime cannot tell this apart from a serialization failure and must
-  // treat both as a best-effort recording failure.
-  const triggerMessage = 'replay-write-refused SENTINEL-ERROR-MESSAGE telegram-secret';
-  store.db.exec(
-    `CREATE TRIGGER replay_input_write_failure
-     BEFORE UPDATE OF replay_input_json ON model_calls
-     FOR EACH ROW WHEN NEW.replay_input_json IS NOT NULL
-     BEGIN
-       SELECT RAISE(ABORT, '${triggerMessage}');
-     END`,
-  );
-  const userText = 'hello SENTINEL-USER-TEXT';
-  const ingestion = new TelegramIngestion(store, configStore, { id: 999 });
-  const received = new Date('2026-08-15T00:00:00.000Z');
-  ingestion.ingest(
-    {
-      update_id: 7,
-      message: {
-        message_id: 13,
-        date: 1_700_000_000,
-        chat: { id: 123456789, type: 'private', first_name: 'Owner' },
-        from: { id: 42, is_bot: false, first_name: 'Alice' },
-        text: userText,
+test.each([true, false])(
+  'payload recording %s writes request/response only, never a replay snapshot',
+  async (recordPayloads) => {
+    const directory = await mkdtemp(join(tmpdir(), 'plasticwan-agent-replay-'));
+    directories.push(directory);
+    const configPath = join(directory, 'config.jsonc');
+    await writeTestConfig(
+      directory,
+      configPath,
+      testConfigJsonc(directory, (config) => {
+        config.developer = { record_model_payloads: recordPayloads };
+        // One turn without a nudge: this test is about what a run records.
+        config.agent.send_nudge_enabled = false;
+      }),
+    );
+    const loaded = await loadConfig(configPath);
+    const faux = fauxProvider({
+      provider: 'agent',
+      models: [{ id: 'agent-model', input: ['text'], contextWindow: 200_000, maxTokens: 32_768 }],
+    });
+    const configStore = await testConfigStore(loaded, fauxRegistry(faux));
+    const store = await SqliteStore.open(loaded.config);
+    // The migrated schema no longer carries the retired replay snapshot column,
+    // so no recording mode has a place to write one.
+    const columns = store.db
+      .prepare<[], { name: string }>('PRAGMA table_info(model_calls)')
+      .all()
+      .map((column) => column.name);
+    expect(columns).not.toContain('replay_input_json');
+
+    const ingestion = new TelegramIngestion(store, configStore, { id: 999 });
+    const received = new Date('2026-08-15T00:00:00.000Z');
+    ingestion.ingest(
+      {
+        update_id: 7,
+        message: {
+          message_id: 13,
+          date: 1_700_000_000,
+          chat: { id: 123456789, type: 'private', first_name: 'Owner' },
+          from: { id: 42, is_bot: false, first_name: 'Alice' },
+          text: 'hello',
+        },
       },
-    },
-    received,
-  );
-  const scheduler = new BucketScheduler(store, configStore, async () => ({
-    state: 'completed',
-    reason: 'done',
-  }));
-  const [invocationId] = scheduler.processDue(new Date(received.getTime() + 15_000));
-  if (invocationId === undefined) {
-    throw new Error('Expected a due invocation');
-  }
-
-  faux.setResponses([fauxAssistantMessage('private assistant text')]);
-  const runtime = new AgentRuntime({
-    store,
-    configStore,
-    secrets: new SecretStore(),
-    telegramApi: {
-      sendMessage: async () => ({ message_id: 500, date: 1_700_000_100, chat: { id: 123456789 } }),
-      sendSticker: async () => ({ message_id: 501, date: 1_700_000_100, chat: { id: 123456789 } }),
-    },
-    bot: { id: 999n, displayName: 'Plastic Wan', username: 'plasticwan' },
-    systemResources: SystemResources.empty(),
-  });
-
-  // Capture the audit line while making the failure log itself throw: a log
-  // line that fails must never interrupt the invocation it was meant to explain.
-  const logLines: string[] = [];
-  const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-    const line = args.map((value) => String(value)).join(' ');
-    logLines.push(line);
-    if (line.includes('replay_input_serialize_failed')) {
-      throw new Error(`the failure log itself failed: ${triggerMessage}`);
+      received,
+    );
+    const scheduler = new BucketScheduler(store, configStore, async () => ({
+      state: 'completed',
+      reason: 'done',
+    }));
+    const [invocationId] = scheduler.processDue(new Date(received.getTime() + 15_000));
+    if (invocationId === undefined) {
+      throw new Error('Expected a due invocation');
     }
-  });
-  let outcome: Awaited<ReturnType<AgentRuntime['run']>> | undefined;
-  try {
-    outcome = await runtime.run(invocationId, configStore.beginInvocation(), new AbortController().signal);
-  } finally {
-    logSpy.mockRestore();
-  }
 
-  // The invocation completed with a normal model audit; only the snapshot is gone.
-  expect(outcome).toEqual({ state: 'completed', reason: 'completed' });
-  const auditedCalls = store.orm.select().from(modelCalls).all();
-  expect(auditedCalls).toHaveLength(1);
-  const [call] = auditedCalls;
-  expect(call?.state).toBe('success');
-  expect(call?.finishedAt).not.toBeNull();
-  expect(call?.outputTokens).toBeGreaterThan(0n);
-  expect(call?.replayInputJson).toBeNull();
-
-  // The failure is visible as metadata only: identifiers plus a failure class.
-  const failedLine = logLines.find((line) => line.includes('replay_input_serialize_failed'));
-  expect(logLines.filter((line) => line.includes('replay_input_serialize_failed'))).toHaveLength(1);
-  expect(failedLine).toBeDefined();
-  const failed = JSON.parse(failedLine!) as Record<string, unknown>;
-  expect(Object.keys(failed).sort()).toEqual(['at', 'error_name', 'event', 'invocation_id', 'model_call_id', 'reason']);
-  expect(failed.event).toBe('replay_input_serialize_failed');
-  expect(failed.invocation_id).toBe(invocationId.toString());
-  expect(failed.model_call_id).toBe(call?.id.toString());
-  expect(failed.error_name).toBe('SqliteError');
-  expect(failed.reason).toBe('serialization_failed');
-  for (const forbidden of [
-    userText,
-    triggerMessage,
-    'telegram-secret',
-    'private assistant text',
-    'Publish exactly one warranted',
-    '"messages"',
-    '"tools"',
-    'the failure log itself failed',
-  ]) {
-    expect(failedLine).not.toContain(forbidden);
-  }
-
-  // Canonical history is written as usual and stays tied to this invocation.
-  const history = store.db
-    .prepare<[], { role: string; payload_json: string; invocation_id: bigint }>(
-      'SELECT role, payload_json, invocation_id FROM context_messages ORDER BY seq',
-    )
-    .all();
-  expect(history.map((row) => row.role)).toEqual(['user', 'assistant']);
-  expect(history[0]?.payload_json).toContain(userText);
-  expect(history[1]?.payload_json).toContain('private assistant text');
-  expect(history.map((row) => row.invocation_id)).toEqual([invocationId, invocationId]);
-  const context = store.db
-    .prepare<[], { head_seq: bigint; next_seq: bigint }>('SELECT head_seq, next_seq FROM conversation_contexts')
-    .get();
-  expect(context?.head_seq).toBe(1n);
-  expect(context?.next_seq).toBe(3n);
-  store.close();
-});
-
-test('a serializer mismatch is logged with its own code and never stops the invocation', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'plasticwan-agent-replay-serialize-'));
-  directories.push(directory);
-  const configPath = join(directory, 'config.jsonc');
-  await writeTestConfig(
-    directory,
-    configPath,
-    testConfigJsonc(directory, (config) => {
-      config.developer = { record_model_payloads: true };
-      // One turn without a nudge: this test is about the failed snapshot record.
-      config.agent.send_nudge_enabled = false;
-    }),
-  );
-  const loaded = await loadConfig(configPath);
-  const faux = fauxProvider({
-    provider: 'agent',
-    models: [{ id: 'agent-model', input: ['text'], contextWindow: 200_000, maxTokens: 32_768 }],
-  });
-  const configStore = await testConfigStore(loaded, fauxRegistry(faux));
-  const store = await SqliteStore.open(loaded.config);
-  const userText = 'hello SENTINEL-USER-TEXT';
-  const ingestion = new TelegramIngestion(store, configStore, { id: 999 });
-  const received = new Date('2026-08-15T00:00:00.000Z');
-  ingestion.ingest(
-    {
-      update_id: 8,
-      message: {
-        message_id: 14,
-        date: 1_700_000_000,
-        chat: { id: 123456789, type: 'private', first_name: 'Owner' },
-        from: { id: 42, is_bot: false, first_name: 'Alice' },
-        text: userText,
+    faux.setResponses([
+      (context, options) => {
+        // The faux provider never touches the network, so the audit hooks are
+        // triggered manually to mirror what real adapters do.
+        options?.onPayload?.({ model: 'agent-model', messages: context.messages }, faux.getModel());
+        void options?.onResponse?.({ status: 200, headers: {} }, faux.getModel());
+        return fauxAssistantMessage('private assistant text');
       },
-    },
-    received,
-  );
-  const scheduler = new BucketScheduler(store, configStore, async () => ({
-    state: 'completed',
-    reason: 'done',
-  }));
-  const [invocationId] = scheduler.processDue(new Date(received.getTime() + 15_000));
-  if (invocationId === undefined) {
-    throw new Error('Expected a due invocation');
-  }
-
-  faux.setResponses([fauxAssistantMessage('private assistant text')]);
-  const runtime = new AgentRuntime({
-    store,
-    configStore,
-    secrets: new SecretStore(),
-    telegramApi: {
-      sendMessage: async () => ({ message_id: 500, date: 1_700_000_100, chat: { id: 123456789 } }),
-      sendSticker: async () => ({ message_id: 501, date: 1_700_000_100, chat: { id: 123456789 } }),
-    },
-    bot: { id: 999n, displayName: 'Plastic Wan', username: 'plasticwan' },
-    systemResources: SystemResources.empty(),
-  });
-
-  // The real serializer runs; only the recorded global layer drifts away from
-  // the system prompt the model saw, which is exactly the `prompt_parts_mismatch`
-  // it must refuse to record.
-  const original = ContextBuilder.prototype.buildSystemPrompt;
-  const buildSpy = vi.spyOn(ContextBuilder.prototype, 'buildSystemPrompt').mockImplementation(function (
-    this: ContextBuilder,
-    ...args: Parameters<typeof original>
-  ) {
-    const stable = original.apply(this, args);
-    return {
-      ...stable,
-      promptLayers: { ...stable.promptLayers, global: `${stable.promptLayers.global}\nDRIFTED GLOBAL LAYER` },
-    };
-  });
-  const logLines: string[] = [];
-  const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-    logLines.push(args.map((value) => String(value)).join(' '));
-  });
-  try {
+    ]);
+    const runtime = new AgentRuntime({
+      store,
+      configStore,
+      secrets: new SecretStore(),
+      telegramApi: {
+        sendMessage: async () => ({ message_id: 500, date: 1_700_000_100, chat: { id: 123456789 } }),
+        sendSticker: async () => ({ message_id: 501, date: 1_700_000_100, chat: { id: 123456789 } }),
+      },
+      bot: { id: 999n, displayName: 'Plastic Wan', username: 'plasticwan' },
+      systemResources: SystemResources.empty(),
+    });
     const outcome = await runtime.run(invocationId, configStore.beginInvocation(), new AbortController().signal);
-
-    // A snapshot that cannot reproduce the prompt is dropped, not the run: the
-    // invocation completes and its model audit stays intact.
     expect(outcome).toEqual({ state: 'completed', reason: 'completed' });
+
+    // Exactly one model call: no extra snapshot row, and nothing beyond the
+    // opt-in request/response payload audit in either recording mode.
     const auditedCalls = store.orm.select().from(modelCalls).all();
     expect(auditedCalls).toHaveLength(1);
     const [call] = auditedCalls;
     expect(call?.state).toBe('success');
     expect(call?.finishedAt).not.toBeNull();
-    expect(call?.outputTokens).toBeGreaterThan(0n);
-    expect(call?.replayInputJson).toBeNull();
-
-    // The failure reports the serializer's own code as `reason`, and the line
-    // stays metadata only: identifiers plus a failure class.
-    const failedLine = logLines.find((line) => line.includes('replay_input_serialize_failed'));
-    expect(logLines.filter((line) => line.includes('replay_input_serialize_failed'))).toHaveLength(1);
-    expect(failedLine).toBeDefined();
-    const failed = JSON.parse(failedLine!) as Record<string, unknown>;
-    expect(Object.keys(failed).sort()).toEqual([
-      'at',
-      'error_name',
-      'event',
-      'invocation_id',
-      'model_call_id',
-      'reason',
-    ]);
-    expect(failed.event).toBe('replay_input_serialize_failed');
-    expect(failed.invocation_id).toBe(invocationId.toString());
-    expect(failed.model_call_id).toBe(call?.id.toString());
-    expect(failed.error_name).toBe('ReplayInputSerializationError');
-    expect(failed.reason).toBe('prompt_parts_mismatch');
-    for (const forbidden of [
-      userText,
-      'DRIFTED GLOBAL LAYER',
-      'private assistant text',
-      'Publish exactly one warranted',
-      '"messages"',
-      '"tools"',
-    ]) {
-      expect(failedLine).not.toContain(forbidden);
+    if (recordPayloads) {
+      expect(call?.requestJson).toContain('"messages"');
+      expect(call?.responseJson).toBe('{"status":200}');
+    } else {
+      expect(call?.requestJson).toBeNull();
+      expect(call?.responseJson).toBeNull();
     }
-
-    // Canonical history is written as usual and stays tied to this invocation.
-    const history = store.db
-      .prepare<[], { role: string; payload_json: string; invocation_id: bigint }>(
-        'SELECT role, payload_json, invocation_id FROM context_messages ORDER BY seq',
-      )
-      .all();
-    expect(history.map((row) => row.role)).toEqual(['user', 'assistant']);
-    expect(history[0]?.payload_json).toContain(userText);
-    expect(history[1]?.payload_json).toContain('private assistant text');
-    expect(history.map((row) => row.invocation_id)).toEqual([invocationId, invocationId]);
-    const context = store.db
-      .prepare<[], { head_seq: bigint; next_seq: bigint }>('SELECT head_seq, next_seq FROM conversation_contexts')
-      .get();
-    expect(context?.head_seq).toBe(1n);
-    expect(context?.next_seq).toBe(3n);
-  } finally {
-    logSpy.mockRestore();
-    buildSpy.mockRestore();
     store.close();
-  }
-});
+  },
+);

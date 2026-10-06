@@ -27,7 +27,7 @@ const MediaSnapshotSchema = Type.Object(
   },
   Strict,
 );
-const MessageSnapshotSchema = Type.Object(
+export const MessageSnapshotSchema = Type.Object(
   {
     message_id: Type.String(),
     message_thread_id: Type.Optional(Type.String()),
@@ -119,12 +119,7 @@ export interface ContextIdentity {
 export interface StablePrompt {
   readonly systemPrompt: string;
   readonly systemPromptHash: string;
-  /**
-   * The four layers `systemPrompt` was composed from, plus the values its
-   * templates rendered with. Replay retains them so a later invocation can
-   * rebuild the prompt exactly, or swap only the replaceable global/group
-   * templates without touching the runtime-owned prefix and middle.
-   */
+  /** Current prompt layers and template values; scene tests replace only global/group. */
   readonly promptLayers: AgentPromptLayers;
   readonly templateValues: PromptTemplateValues;
 }
@@ -232,7 +227,10 @@ export class ContextBuilder {
     supportsImages: boolean,
     agentModel: PromptTemplateModel,
     /** Optional per-invocation visibility rule; hides capability skills that are off. */
-    options?: { readonly skillFilter?: (skill: SystemSkill) => boolean },
+    options?: {
+      readonly skillFilter?: (skill: SystemSkill) => boolean;
+      readonly imageInput?: 'direct' | 'on_demand';
+    },
   ): StablePrompt {
     const chatConfig = resolveChatConfig(config, this.#store.orm, identity.chatId);
     if (chatConfig === undefined) {
@@ -245,9 +243,10 @@ export class ContextBuilder {
     };
     const conversationMode =
       identity.chatType === 'private' ? 'Conversation mode: private chat.' : 'Conversation mode: group chat.';
-    const imageHandling = supportsImages
-      ? 'Photos and supported image Documents from the newest injected messages are attached directly to the multimodal Agent input, in the same order as the [kind figure_N img_ref] media lines inside the messages. Treat each attached image as the media of the message that lists the matching figure_N. Attachments are not kept: older images, including earlier figure_N images, are inspected on demand with the read_image capability (called via execute) using their img_ refs. read_image never accepts figure_N refs.'
-      : 'Telegram images and Stickers are available through the read_image capability (called via execute). Call it when visual details are needed.';
+    const imageHandling =
+      supportsImages && options?.imageInput !== 'on_demand'
+        ? 'Photos and supported image Documents from the newest injected messages are attached directly to the multimodal Agent input, in the same order as the [kind figure_N img_ref] media lines inside the messages. Treat each attached image as the media of the message that lists the matching figure_N. Attachments are not kept: older images, including earlier figure_N images, are inspected on demand with the read_image capability (called via execute) using their img_ refs. read_image never accepts figure_N refs.'
+        : 'Telegram images and Stickers are available through the read_image capability (called via execute). Call it when visual details are needed.';
     const stickerCatalog = this.#stickerCatalog();
     const stickerCatalogHandling =
       stickerCatalog.length === 0
@@ -255,8 +254,8 @@ export class ContextBuilder {
         : 'An untrusted sticker catalog is included as sticker_id:emoji entries. Emoji is only a coarse hint. To inspect one or more candidates and authorize sending, call the search_stickers capability via execute with ids; use only the returned sticker_ref with send. search_stickers also supports semantic queries.';
     // Everything in this array is hashed below, so a change to the skill index or
     // to the sticker catalog's presence restarts each Conversation Context on its
-    // next invocation. The same layers are returned so a replay snapshot can
-    // rebuild the exact bytes, with only the global/group templates replaceable.
+    // next invocation. Scene tests reuse the same current layers, with only the
+    // global/group templates replaceable.
     const skillIndex = options?.skillFilter === undefined ? this.#skills : this.#skills.filter(options.skillFilter);
     const promptLayers: AgentPromptLayers = {
       prefix: [CORE_AGENT_PROTOCOL, renderSkillIndexPrompt(skillIndex), imageHandling, stickerCatalogHandling]
@@ -621,7 +620,7 @@ export class ContextBuilder {
   }
 }
 
-interface PreparedSnapshot extends Omit<MessageSnapshot, 'revision' | 'media'> {
+export interface PreparedSnapshot extends Omit<MessageSnapshot, 'revision' | 'media'> {
   readonly media: readonly {
     readonly image_ref: string;
     readonly figure?: string;
@@ -656,7 +655,7 @@ interface ReplySnapshot {
  * it on a single line. Every Telegram-controlled line is indented, so no message
  * content can forge a header, a runtime block tag, or a readback line.
  */
-function formatSnapshot(snapshot: PreparedSnapshot, options: FormatOptions): string {
+export function formatSnapshot(snapshot: PreparedSnapshot, options: FormatOptions): string {
   const tokens = [snapshot.message_id, formatTime(snapshot.telegram_date, options.timezone, options.now)];
   if (options.showTopic && snapshot.message_thread_id !== undefined) {
     tokens.push(`topic:${snapshot.message_thread_id}`);

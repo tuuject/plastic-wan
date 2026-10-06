@@ -337,7 +337,6 @@ export const modelCalls = sqliteTable(
     toolsJson: text('tools_json'),
     requestJson: text('request_json'),
     responseJson: text('response_json'),
-    replayInputJson: text('replay_input_json'),
     createdAt: text('created_at').notNull(),
     finishedAt: text('finished_at'),
   },

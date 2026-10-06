@@ -4,6 +4,7 @@ import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { type ServerType, serve } from '@hono/node-server';
 import Type from 'typebox';
 import { Compile } from 'typebox/compile';
+import type { MediaDownloader } from '../../capabilities/media/media-download.ts';
 import { DEFAULT_MEMORY_TTL_WARNING_DAYS } from '../../context/memory.ts';
 import type { ImageBridge } from '../../image/bridge.ts';
 import type { ImageService } from '../../image/service.ts';
@@ -52,14 +53,13 @@ import {
 import {
   configurationView,
   configuredPromptView,
-  inspectionQuery,
   inspectConfiguration,
+  inspectionQuery,
   redactInspection,
 } from './config-inspection.ts';
 import { clearModelPayloads, parseDeveloperSettings } from './developer-admin.ts';
-import { createInvocationMediaReader, listInvocationMedia } from './invocation-media.ts';
-import type { MediaDownloader } from '../../capabilities/media/media-download.ts';
 import { createImageAdminHandler, type ImageAdminResponse, reusableImageCredentials } from './image-admin.ts';
+import { createInvocationMediaReader, listInvocationMedia } from './invocation-media.ts';
 import {
   createMemory,
   deleteMemory,
@@ -111,6 +111,7 @@ const replayBodyValidator = Compile(
     {
       global_prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH })),
       group_prompt: Type.Optional(Type.String({ maxLength: MAX_PROMPT_LENGTH })),
+      before_send_id: Type.Optional(Type.String({ pattern: '^[1-9]\\d{0,18}$' })),
     },
     { additionalProperties: false },
   ),
@@ -145,6 +146,7 @@ export type AdminConfig = NonNullable<RawConfig['admin']>;
 export interface ReplayInvocationInput {
   readonly global_prompt?: string;
   readonly group_prompt?: string;
+  readonly before_send_id?: string;
 }
 
 export interface AdminServerOptions {
@@ -165,7 +167,7 @@ export interface AdminServerOptions {
   /** Replays one audit invocation; absent when the agent runtime is not wired. */
   readonly replayInvocation?: (id: bigint, input: ReplayInvocationInput, signal: AbortSignal) => Promise<unknown>;
   /** Read-only replay checks and retained editable templates; neither calls a model. */
-  readonly replayPreflight?: (id: bigint) => unknown;
+  readonly replayPreflight?: (id: bigint, selection?: Pick<ReplayInvocationInput, 'before_send_id'>) => unknown;
   readonly invocationPrompts?: (id: bigint) => unknown;
   /** Telegram bytes stay on the server; the caller can only name invocation-associated media IDs. */
   readonly mediaDownloader?: MediaDownloader;
@@ -207,7 +209,7 @@ export class AdminServer {
   readonly #replayInvocation:
     | ((id: bigint, input: ReplayInvocationInput, signal: AbortSignal) => Promise<unknown>)
     | undefined;
-  readonly #replayPreflight: ((id: bigint) => unknown) | undefined;
+  readonly #replayPreflight: AdminServerOptions['replayPreflight'];
   readonly #invocationPrompts: ((id: bigint) => unknown) | undefined;
   readonly #readInvocationMedia: ReturnType<typeof createInvocationMediaReader> | undefined;
   readonly #staticDir: string;
@@ -619,7 +621,9 @@ export class AdminServer {
       return json(usage(this.#store.orm, days));
     }
     if (route === 'invocations') {
-      return json(listInvocations(this.#store.orm, query));
+      return json(
+        redactInspection(listInvocations(this.#store.orm, query, this.#configStore.current().config), this.#secrets),
+      );
     }
     if (segments[0] === 'invocations' && segments.length === 2) {
       const found = getInvocation(this.#store.orm, parseId(segments[1] ?? '', 'id'));
@@ -679,7 +683,13 @@ export class AdminServer {
       return json({ error: 'forbidden', message: 'API keys may only access inspection and invocation routes' }, 403);
     }
     if (segments.length === 1 && request.method === 'GET') {
-      return json(listInvocations(this.#store.orm, listQuery(url)));
+      return json(
+        redactInspection(
+          listInvocations(this.#store.orm, listQuery(url), this.#configStore.current().config),
+          this.#secrets,
+          token,
+        ),
+      );
     }
     if (segments.length === 2 && request.method === 'GET') {
       const found = getInvocation(this.#store.orm, parseId(segments[1] ?? '', 'id'));
@@ -725,15 +735,24 @@ export class AdminServer {
     }
     const action = segments[2];
     if (segments.length === 3 && (action === 'replay-preflight' || action === 'prompts')) {
-      if (url.searchParams.size > 0) {
-        throw new AdminQueryError('invalid_query', 'This inspection route takes no query parameters');
+      for (const key of url.searchParams.keys()) {
+        if (action !== 'replay-preflight' || key !== 'before_send_id' || url.searchParams.getAll(key).length !== 1) {
+          throw new AdminQueryError('invalid_query', 'Only replay preflight accepts one before_send_id parameter');
+        }
       }
       const id = parseId(segments[1] ?? '', 'id');
-      const read = action === 'replay-preflight' ? this.#replayPreflight : this.#invocationPrompts;
-      if (read === undefined) {
+      const beforeSendId = url.searchParams.get('before_send_id');
+      const selection = beforeSendId === null ? {} : { before_send_id: validateBeforeSendId(beforeSendId) };
+      if (action === 'replay-preflight') {
+        if (this.#replayPreflight === undefined) {
+          throw new AdminQueryError('replay_unavailable', 'Invocation replay inspection is not wired', 503);
+        }
+        return inspectedJson(await this.#replayPreflight(id, selection));
+      }
+      if (this.#invocationPrompts === undefined) {
         throw new AdminQueryError('replay_unavailable', 'Invocation replay inspection is not wired', 503);
       }
-      return inspectedJson(await read(id));
+      return inspectedJson(await this.#invocationPrompts(id));
     }
     if (action !== 'media') {
       return undefined;
@@ -1438,6 +1457,9 @@ function listQuery(url: URL): ListQuery {
     set: url.searchParams.get('set'),
     search: url.searchParams.get('search'),
     target: url.searchParams.get('target'),
+    at: url.searchParams.get('at'),
+    from: url.searchParams.get('from'),
+    to: url.searchParams.get('to'),
   };
 }
 
@@ -1445,8 +1467,18 @@ function parseReplayInput(value: unknown): ReplayInvocationInput {
   if (!replayBodyValidator.Check(value)) {
     throw new AdminQueryError(
       'invalid_body',
-      `Only global_prompt and group_prompt templates of at most ${MAX_PROMPT_LENGTH} characters are accepted; system prompt overrides are forbidden`,
+      `Only before_send_id and global_prompt/group_prompt templates of at most ${MAX_PROMPT_LENGTH} characters are accepted; system prompt overrides are forbidden`,
     );
+  }
+  if (value.before_send_id !== undefined) {
+    validateBeforeSendId(value.before_send_id);
+  }
+  return value;
+}
+
+function validateBeforeSendId(value: string): string {
+  if (!/^[1-9]\d{0,18}$/.test(value) || BigInt(value) > 9_223_372_036_854_775_807n) {
+    throw new AdminQueryError('invalid_before_send_id', 'before_send_id must be a positive 64-bit decimal ID');
   }
   return value;
 }

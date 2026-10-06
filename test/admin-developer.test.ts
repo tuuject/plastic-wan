@@ -181,29 +181,10 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
         errorDetail: 'retain error',
         requestJson: index % 2 === 0 ? '{"large":"request"}' : null,
         responseJson: '{"status":500}',
-        replayInputJson: index % 5 === 0 ? '{"replay":"mixed"}' : null,
         createdAt: new Date().toISOString(),
       })),
     )
     .run();
-  const replayOnly = f.store.orm
-    .insert(modelCalls)
-    .values(
-      Array.from({ length: 6 }, (_, index) => ({
-        role: 'doctor',
-        provider: 'fixture',
-        model: 'replay-only',
-        attempt: 1n,
-        state: 'success',
-        requestJson: null,
-        responseJson: null,
-        replayInputJson: JSON.stringify({ replay: index }),
-        createdAt: new Date().toISOString(),
-      })),
-    )
-    .returning({ id: modelCalls.id })
-    .all();
-  expect(replayOnly).toHaveLength(6);
   const before = f.store.orm.select().from(modelCalls).all();
   const snapshot = () => ({
     invocations: f.store.db.prepare('SELECT * FROM invocations ORDER BY id').all(),
@@ -225,7 +206,6 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
       attempt: 1n,
       state: 'success',
       requestJson: '{"new":true}',
-      replayInputJson: '{"new":"replay"}',
       createdAt: new Date().toISOString(),
     })
     .returning({ id: modelCalls.id })
@@ -233,21 +213,15 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
   const response = await clearing;
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({
-    cleared_model_calls: before.filter(
-      (row) => row.requestJson !== null || row.responseJson !== null || row.replayInputJson !== null,
-    ).length,
+    cleared_model_calls: before.filter((row) => row.requestJson !== null || row.responseJson !== null).length,
   });
   const after = f.store.orm.select().from(modelCalls).all();
   expect(after.filter((row) => row.id !== newCall.id)).toEqual(
-    before.map((row) => ({ ...row, requestJson: null, responseJson: null, replayInputJson: null })),
+    before.map((row) => ({ ...row, requestJson: null, responseJson: null })),
   );
   expect(after.find((row) => row.id === newCall.id)?.requestJson).toBe('{"new":true}');
-  expect(after.find((row) => row.id === newCall.id)?.replayInputJson).toBe('{"new":"replay"}');
-  // Only the concurrent write keeps a replay snapshot: every row the sweep was
-  // bounded to — mixed payloads and replay-only rows alike — lost all three.
-  expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM model_calls WHERE replay_input_json IS NOT NULL').get()).toEqual(
-    { n: 1n },
-  );
+  // Only the concurrent write keeps its payload: every row the sweep was
+  // bounded to — mixed request/response rows included — lost both.
   expect(snapshot()).toEqual(auditBefore);
   expect(f.store.db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   expect(getInvocation(f.store.orm, seed.invocationA)).toMatchObject({
@@ -256,11 +230,55 @@ test('batched payload cleanup preserves audit rows, associations and totals whil
   expect(await (await f.call('/developer/model-payloads', { method: 'DELETE' })).json()).toEqual({
     cleared_model_calls: 1,
   });
-  expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM model_calls WHERE replay_input_json IS NOT NULL').get()).toEqual(
-    { n: 0n },
-  );
   expect(await (await f.call('/developer/model-payloads', { method: 'DELETE' })).json()).toEqual({
     cleared_model_calls: 0,
   });
   expect(await f.view()).toMatchObject({ record_model_payloads: true });
+});
+
+test('migration 030 drops the retired replay snapshot column on fresh and upgraded databases', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'plasticwan-developer-mig-'));
+  const path = join(directory, 'config.jsonc');
+  await writeTestConfig(directory, path);
+  const loaded = await loadConfig(path);
+  try {
+    // A fresh database runs 029 (add column) and 030 (drop it) in one open, so
+    // the column must be absent and the migration recorded.
+    const fresh = await SqliteStore.open(loaded.config);
+    try {
+      const columns = fresh.db.prepare<[], { name: string }>('PRAGMA table_info(model_calls)').all();
+      expect(columns.map((column) => column.name)).not.toContain('replay_input_json');
+      expect(fresh.db.prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 30').get()).toEqual({
+        n: 1n,
+      });
+      // Recreate the pre-030 state: the column back with a legacy snapshot and
+      // an audit row that must survive the drop, with 030 forgotten.
+      fresh.db.exec('ALTER TABLE model_calls ADD COLUMN replay_input_json TEXT');
+      fresh.db.prepare('DELETE FROM schema_migrations WHERE version = 30').run();
+      fresh.db
+        .prepare(
+          `INSERT INTO model_calls(id, role, provider, model, attempt, state, created_at, request_json, replay_input_json)
+           VALUES (9001, 'doctor', 'fixture', 'fixture', 1, 'success', '2026-01-01T00:00:00.000Z', '{"request":true}', '{"version":2}')`,
+        )
+        .run();
+    } finally {
+      fresh.close();
+    }
+    // Reopening applies the pending 030 against the upgraded database.
+    const upgraded = await SqliteStore.open(loaded.config);
+    try {
+      const columns = upgraded.db.prepare<[], { name: string }>('PRAGMA table_info(model_calls)').all();
+      expect(columns.map((column) => column.name)).not.toContain('replay_input_json');
+      expect(upgraded.db.prepare('SELECT request_json FROM model_calls WHERE id = 9001').get()).toEqual({
+        request_json: '{"request":true}',
+      });
+      expect(upgraded.db.prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 30').get()).toEqual({
+        n: 1n,
+      });
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

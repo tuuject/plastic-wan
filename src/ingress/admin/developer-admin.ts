@@ -39,16 +39,12 @@ export async function clearModelPayloads(orm: Orm): Promise<number> {
     }
     const result = orm
       .update(modelCalls)
-      .set({ requestJson: null, responseJson: null, replayInputJson: null })
+      .set({ requestJson: null, responseJson: null })
       .where(
         and(
           gt(modelCalls.id, cursor),
           lte(modelCalls.id, last),
-          or(
-            isNotNull(modelCalls.requestJson),
-            isNotNull(modelCalls.responseJson),
-            isNotNull(modelCalls.replayInputJson),
-          ),
+          or(isNotNull(modelCalls.requestJson), isNotNull(modelCalls.responseJson)),
         ),
       )
       .run();

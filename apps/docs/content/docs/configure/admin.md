@@ -35,7 +35,7 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
 - **Settings**：对手改配置使用 **Apply config file**，并查看 Saved 与 Running 状态及 `restart_required`。
 - **Developer**：按需记录模型调用的调试报文，或在确认后清除已有报文。
 - **API keys**（Manage 组）：创建、查看与撤销供 CLI 与评估工具使用的密钥，明文只在创建弹窗中出现一次，见下文。
-- **Invocation 重放**：仍只有携带 API 密钥的 CLI/API 入口，没有页面入口；只读的配置/prompt 检查、记录 prompt、重放预检与媒体导出同样在 CLI/API 层提供，见下文。
+- **Invocation 重放**：仍只有携带 API 密钥的 CLI/API 入口，没有页面入口；只读的配置/prompt 检查、场景 prompt、Invocation 搜索、重放预检与媒体导出同样在 CLI/API 层提供，见下文。
 
 ## 查看和复制 Telegram ID
 
@@ -63,7 +63,7 @@ Developer 页的「记录原始请求报文以便调试」开关写回 `config.j
 
 整个 `developer` 节和其中的字段均可省略，缺省为 `false`。关闭后仍记录 Invocation、模型与工具调用、Token/缓存用量、费用、状态和错误；已保存的历史报文不会自动删除。开启会增加数据库占用，建议只在排查问题时启用。现有调试快照包含模型请求（内联图片正文替换为摘要）与 HTTP 响应状态，不保存完整响应流。
 
-「清除此前记录的原始请求报文」需要二次确认，只清除模型调用的请求/响应快照与重放输入快照；被清除快照的历史 Invocation 将无法重放。调用记录、关联关系和统计保留；详情页会显示报文未记录或已清除。记录开关仍开启时，新报文会继续保存。清除按批执行；若中途失败，已完成的批次不会恢复，可重试清除。
+「清除此前记录的原始请求报文」需要二次确认，只清除模型调用的请求/响应调试快照，不影响基于公开消息的场景重放。调用记录、关联关系和统计保留；详情页会显示报文未记录或已清除。记录开关仍开启时，新报文会继续保存。清除按批执行；若中途失败，已完成的批次不会恢复，可重试清除。
 
 SQLite 释放的页可供后续写入复用，但数据库文件不一定立即缩小。此操作不会执行 `VACUUM`，也不清理已有备份；备份与恢复仍遵循[原有维护流程](../operations/backup-restore.md)。
 
@@ -76,18 +76,18 @@ SQLite 释放的页可供后续写入复用，但数据库文件不一定立即�
 - 页面不把明文写入浏览器 `localStorage`/`sessionStorage` 或查询缓存，列表接口也不返回它。复制失败时弹窗保留文字并提示手动复制。
 - 点行内 **Revoke** 后需在确认框点 **Revoke key**；撤销立即生效且不可恢复，密钥行与元数据保留，**Status** 变为 **Revoked**，不再提供撤销操作。
 
-密钥的能力范围是只读检查与 Invocation 读/重放：允许查看当前配置与 global/group prompt 的脱敏视图、比较磁盘配置、读取 Invocation 记录的两层 prompt、运行免费的重放预检、下载该 Invocation 快照授权的媒体，以及读取 Invocation 列表/详情并发起重放；它不能读取其它审计（Overview、Messages、Contexts、记忆等）、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
+密钥的能力范围是只读检查与 Invocation 读/重放：允许查看当前配置与 global/group prompt 的脱敏视图、比较磁盘配置、读取 Invocation 场景将使用的当前两层 prompt、运行免费的重放预检、下载该 Invocation 快照授权的媒体，以及读取 Invocation 列表/详情并发起重放；它不能读取其它审计（Overview、Messages、Contexts、记忆等）、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
 
 ## Invocation 重放
 
-重放用当前配置重新执行一次已经结束的 Invocation，用来观察模型在新 Prompt 或新模型下会怎样选择工具与回复。入口是携带 API 密钥的 CLI/API，面板登录会话不能直接调用重放；只读的预检、记录 prompt、配置/prompt 查看与媒体导出也没有页面入口。它不会发送 Telegram 消息、不修改生产会话与业务数据（鉴权仍会更新密钥使用时间），但会**真实调用模型并计费**（不计入生产用量预算）。
+重放从已经结束的 Invocation 重建一段历史公开聊天场景，用当前 Prompt、模型与工具定义观察它会怎样回复。入口是携带 API 密钥的 CLI/API，面板登录会话不能直接重放；免费的预检、场景 prompt 查看与媒体导出也没有页面入口。它不会发送 Telegram 消息、不修改生产会话与业务数据（鉴权仍更新密钥使用时间），但会**真实调用模型并计费**，不计入生产用量预算。交给 Agent 时，明确授权目标 ID、次数与可选覆盖，不把查询授权当重放授权。
 
-前提：源 Invocation 发生时已开启 Developer 页的「记录原始请求报文」（`record_model_payloads`），首个模型请求的快照成功保存且没有被清除。快照记录失败不会中断原运行，但该次 Invocation 无法重放；尚未结束的 Invocation、源 Chat 已不在配置中或当前 Chat 的模型不可用时，也会被明确拒绝。
+不需要开启 Developer 报文录制；关闭录制或清除调试报文不影响场景重建，也不要求源 Invocation 曾调用模型。需要仍在保留期内的开场公开消息；尚未结束、开场缺失或损坏、Chat/Topic 已不允许或当前模型不可用时会明确拒绝，先用免费预检确认。
 
 ```bash
 # 免费预检：能否重放、能否覆盖 prompt；不调用模型
 plasticwan-utils invocation preflight 12345 --json
-# 查看该 Invocation 记录的两层 prompt（仅版本 2 快照）
+# 查看该场景使用的当前两层 prompt（source: active，不是历史记录）
 plasticwan-utils invocation prompts 12345 --json
 
 plasticwan-utils invocation replay 12345 --json
@@ -95,15 +95,29 @@ plasticwan-utils invocation replay 12345 --json
 plasticwan-utils invocation replay 12345 --global-prompt prompt.txt --json
 plasticwan-utils invocation replay 12345 --group-prompt group.txt --json
 printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay 12345 --global-prompt - --json
+
+# 切片重放：只重放某次成功 Bot 发言之前的一小段公开输入，需确认计费
+plasticwan-utils invocation preflight 12345 --before-send 678 --json
+plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
 ```
+
+### 切片重放
+
+给出 `--before-send <telegram_sends 内部 ID>` 时，重放不再从整个开场批次重建场景，而是只取该次成功 Bot 发言之前的一小段公开输入：
+
+- 窗口严格位于上一条 Bot 发言之后、目标发言之前（两端不含），目标必须是本 Invocation 的成功发送；上一条 Bot 发言可以来自同一 Conversation 的另一次 Invocation。没有上一条 Bot 发言时，从保留输入的开头开始。
+- 只包含冻结且已注入的公开消息：目标发言之前已注入的批次会被拍平后一次性灌入，不按 Bucket 或历史节奏等待（模型并发与网络延迟仍可能造成等待）；附加批次的注入时间必须严格早于发送请求开始，同毫秒无法证明先后时保守省略。没有更早历史，也不读取历史的 reasoning、工具结果或 system prompt。
+- 原 Bot 回答不进入模型，只保留在审计里作为对照；回复引用不能跨出该窗口。返回的 `scene.slice` 为 `{ before_send_id, before_message_id, after_bot_message_id }`，`history_count` 为 0，`cutoff_at` 取该次发送请求的开始时间（不是交付完成时间）。
+- 窗口内没有新的公开消息返回 `replay_slice_empty`，目标不是本 Invocation 的成功发送返回 `replay_slice_target_invalid`。切片重放同样真实调用模型并计费，需要显式 `--confirm-paid`；缺失时 CLI 以 `confirm_paid_required`、退出码 2 拒绝，不读取 prompt 或 stdin，也不发预检或 POST。免费预检不接受该确认参数；预检与重放必须使用同一个 `--before-send`。
+- 目标发言 ID 可以先搜索：`plasticwan-utils invocation list --search '关键词' --at '2026-09-10 07:59' --json`，命中项里的 bot 条目带 `telegram_send_id`，可作为 `--before-send` 候选，再用同一 ID 预检。搜索也保留该 Invocation 向其他 Conversation 的真实发送；这类发送不能作为该 Invocation 的切片目标。
 
 限制与取舍：
 
-- 只重放**首个模型请求的文本输入**：图片内容被丢弃（输出里只报告丢弃数量），对话中途注入的新消息与之后几轮的输入都不重放。
-- system prompt 默认按记录重建：版本 2 快照保存固定段、当时的 global/group 模板与渲染变量值，覆盖只替换某一层的模板，变量保持历史值；固定段与整体 system prompt **不能**覆盖。版本 1 旧快照没有分层信息，只能原样重放，请求覆盖或分层读取会返回 `replay_prompt_parts_unavailable`。global 层不能清空，group 层可以清空；覆盖内容会用与配置相同的模板校验。
-- 模型与思考强度取**当前**该 Chat 的配置，而不是历史模型。源 Chat 已不在配置中会报错。
-- 工具调用是合成结果：`send` 只记录在输出的 `outputs` 里，不会发 Telegram；记忆、Alarm、生图、`zzz` 都只在内存或假回执中生效；`read` 读的是**当前**系统文档。
-- 网页抓取、Sticker 搜索、读图与 MCP 等外部工具会被拒绝；图片与回复引用不会重新校验，历史时间只作为文本原样重放。
+- 默认输入是开场批次的冻结公开消息与当时可证明存在的历史，不加入后续批次与热注入；切片重放只取 `--before-send` 窗口内的冻结输入，并拍平可证明在发送前已注入的批次。两种模式都不加入后来编辑，当前上下文预算、Topic 范围与话题切点仍可能收窄场景；默认模式还受当前历史长度限制。不是恢复历史私有推理、工具结果或完整 Conversation Context。
+- prompt、模板变量、模型、思考强度与工具定义都取**当前**该 Chat 的配置；`invocation prompts` 返回 `source: active`，不能当历史记录。只允许覆盖 global/group，固定协议和整体 system prompt **不能**覆盖；global 不能清空，group 可以清空，模板按当前白名单校验。
+- `send` 只收集到 `outputs`，校验当前参数、文字限制与场景内的回复目标，不执行真实发送限流或 Sticker/生成资产的世界状态检查。记忆和 Alarm 从空内存开始，typing、生图、`zzz` 只合成；`read` 读取当前系统文档。
+- 当前模型支持图片时，可按需读取本次场景授权且仍保留的 Photo、Sticker 与图片 Document，引用不跨场景；读图只下载/规范化图片给当前模型，不调用生产 Vision 或写分析缓存。缺失、不支持或下载失败会明确省略/报错，`omitted_images` 不代表之后下载成功的保证。网页抓取、Sticker 搜索、MCP 和未支持能力被拒绝。
+- 场景时间默认为开场冻结时间，切片模式取目标发送请求的开始时间（不是交付完成时间）；不恢复当时记忆/回执，不模拟全局睡眠、发送提醒或新消息发送屏障。当前低预算可暴露 `zzz`，但执行不写睡眠状态。
 - 返回的 `fidelity` 与 `overrides` 字段列出这些边界；`dispatches` 里的 `mode`（`synthetic`/`live_read`/`blocked`）只是调用走的分派路线，不代表调用成功，成功与否看 `tool_calls`。`error` 非空表示重放没有正常完成，完整结构仍会返回。
 - 同时只允许一个重放；轮次、时长、工具尝试次数与 `trace` 记录有上限，超限会明确报错结束。`trace` 的 1 MiB 预算不等于整个响应体的大小上限；CLI 另行拒绝超过 4 MiB 的响应。重放中的模型请求不自动重试。模型选择不发言（输出里没有 `send`）也是正常结果。
 - CLI 在重放前先跑预检，不可重放或不允许覆盖时不会发送 POST。媒体导出（`invocation media`）只读下载 Invocation 快照授权的媒体，不是视觉保真修复，也不改变重放输入。

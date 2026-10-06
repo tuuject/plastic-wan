@@ -74,6 +74,18 @@ async function runList(command: ListCommand, context: CommandContext, client: Ad
   if (command.chat !== undefined) {
     query.set('chat', command.chat);
   }
+  if (command.search !== undefined) {
+    query.set('search', command.search);
+  }
+  if (command.at !== undefined) {
+    query.set('at', command.at);
+  }
+  if (command.from !== undefined) {
+    query.set('from', command.from);
+  }
+  if (command.to !== undefined) {
+    query.set('to', command.to);
+  }
   const raw = await client.get('api/invocations', query);
   if (!isRecord(raw) || !Array.isArray(raw.items)) {
     throw new CliError('invalid_response', 'invocation list response has an unexpected shape');
@@ -99,22 +111,21 @@ async function runPrompts(command: PromptsCommand, context: CommandContext, clie
   const raw = await client.get(`api/invocations/${command.id}/prompts`);
   if (
     !isRecord(raw) ||
-    raw.source !== 'recorded' ||
+    raw.source !== 'active' ||
     typeof raw.source_invocation_id !== 'string' ||
-    !isNullableString(raw.source_model_call_id) ||
     typeof raw.global_prompt !== 'string' ||
     typeof raw.group_prompt !== 'string' ||
     raw.core_read_only !== true ||
     !isNullableRecord(raw.template_values)
   ) {
-    throw new CliError('invalid_response', 'recorded prompt response has an unexpected shape');
+    throw new CliError('invalid_response', 'active prompt response has an unexpected shape');
   }
   writeDocument(raw, context);
   return 0;
 }
 
 async function runPreflight(command: PreflightCommand, context: CommandContext, client: AdminClient): Promise<number> {
-  const raw = await client.get(`api/invocations/${command.id}/replay-preflight`);
+  const raw = await client.get(`api/invocations/${command.id}/replay-preflight`, preflightQuery(command.beforeSendId));
   if (!isPreflight(raw)) {
     throw new CliError('invalid_response', 'replay preflight response has an unexpected shape');
   }
@@ -125,14 +136,22 @@ async function runPreflight(command: PreflightCommand, context: CommandContext, 
 async function runReplay(command: ReplayCommand, context: CommandContext, client: AdminClient): Promise<number> {
   // Prompt input is fully resolved (including stdin) before any request, so a
   // stalled stdin never sends a preflight the old contract would not have sent.
+  // A sliced replay missing --confirm-paid is already refused while parsing
+  // arguments, so this path never reads stdin or reaches the preflight either.
   const body: Record<string, string> = {};
+  let hasPromptOverrides = false;
   if (command.globalPromptSource !== undefined) {
     body.global_prompt = await readPromptPart('global', command.globalPromptSource, context, false);
+    hasPromptOverrides = true;
   }
   if (command.groupPromptSource !== undefined) {
     body.group_prompt = await readPromptPart('group', command.groupPromptSource, context, true);
+    hasPromptOverrides = true;
   }
-  const preflight = await client.get(`api/invocations/${command.id}/replay-preflight`);
+  const preflight = await client.get(
+    `api/invocations/${command.id}/replay-preflight`,
+    preflightQuery(command.beforeSendId),
+  );
   if (!isPreflight(preflight)) {
     throw new CliError('invalid_response', 'replay preflight response has an unexpected shape');
   }
@@ -141,11 +160,16 @@ async function runReplay(command: ReplayCommand, context: CommandContext, client
     // exactly the failure a POST would have produced instead of a new one.
     throw unavailableError(preflight);
   }
-  if (Object.keys(body).length > 0 && preflight.prompt_overrides_available !== true) {
+  // `before_send_id` selects a replay boundary; it is not a prompt override, so
+  // it must not require the prompt-overrides permission.
+  if (hasPromptOverrides && preflight.prompt_overrides_available !== true) {
     throw new CliError(
       'replay_prompt_parts_unavailable',
-      'this invocation cannot replay with prompt overrides (prompt_overrides_available is false)',
+      'this scene cannot replay with prompt overrides (prompt_overrides_available is false)',
     );
+  }
+  if (command.beforeSendId !== undefined) {
+    body.before_send_id = command.beforeSendId;
   }
   const raw = await client.post(`api/invocations/${command.id}/replay`, body);
   if (!isRecord(raw)) {
@@ -214,7 +238,6 @@ interface PreflightDocument {
   readonly prompt_overrides_available: boolean;
   readonly reason: string | null;
   readonly message: string | null;
-  readonly source_model_call_id: string | null;
 }
 
 function isPreflight(value: unknown): value is PreflightDocument {
@@ -225,8 +248,7 @@ function isPreflight(value: unknown): value is PreflightDocument {
     typeof value.available === 'boolean' &&
     typeof value.prompt_overrides_available === 'boolean' &&
     isNullableString(value.reason) &&
-    isNullableString(value.message) &&
-    isNullableString(value.source_model_call_id)
+    isNullableString(value.message)
   );
 }
 
@@ -236,15 +258,28 @@ function unavailableError(preflight: PreflightDocument): CliError {
   return new CliError(reason ?? 'replay_unavailable', message ?? reason ?? 'replay is not available');
 }
 
+/** An absent selection keeps the old request URL byte-for-byte. */
+function preflightQuery(beforeSendId: string | undefined): URLSearchParams {
+  const query = new URLSearchParams();
+  if (beforeSendId !== undefined) {
+    query.set('before_send_id', beforeSendId);
+  }
+  return query;
+}
+
 function humanList(items: readonly unknown[], nextCursor: string | null): string {
   if (items.length === 0) {
     return 'no invocations\n';
   }
-  const lines = items.map((item) => humanListLine(item));
+  const lines = items.flatMap((item) => humanListLines(item));
   if (nextCursor !== null) {
     lines.push(`next_cursor: ${nextCursor}`);
   }
   return `${lines.join('\n')}\n`;
+}
+
+function humanListLines(item: unknown): string[] {
+  return [humanListLine(item), ...humanMatchedLines(item)];
 }
 
 function humanListLine(item: unknown): string {
@@ -275,6 +310,54 @@ function humanListLine(item: unknown): string {
     parts.push(`cost=${item.total_cost}`);
   }
   return parts.join(' ');
+}
+
+/** Longest matched-message excerpt kept in the human list; the JSON output is untouched. */
+const MAX_MATCH_SUMMARY_CHARS = 160;
+
+/**
+ * `matched_messages` describes which messages made a filtered invocation match.
+ * It keeps the invocation's own `created_at` as the leading timestamp; a matched
+ * message's `at` is never presented as the invocation time.
+ */
+function humanMatchedLines(item: unknown): string[] {
+  if (!isRecord(item) || !Array.isArray(item.matched_messages)) {
+    return [];
+  }
+  const lines: string[] = [];
+  for (const entry of item.matched_messages) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const source = entry.source === 'incoming' || entry.source === 'bot' ? entry.source : undefined;
+    if (source === undefined) {
+      continue;
+    }
+    const parts = ['  matched', source];
+    if (typeof entry.at === 'string' && entry.at.length > 0) {
+      parts.push(entry.at);
+    }
+    if (typeof entry.telegram_message_id === 'string') {
+      parts.push(`msg=${entry.telegram_message_id}`);
+    }
+    if (typeof entry.telegram_send_id === 'string') {
+      parts.push(`send=${entry.telegram_send_id}`);
+    }
+    const text = matchSummary(entry.text);
+    if (text.length > 0) {
+      parts.push(text);
+    }
+    lines.push(parts.join(' '));
+  }
+  return lines;
+}
+
+function matchSummary(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  const collapsed = value.replace(/\s+/g, ' ').trim();
+  return collapsed.length > MAX_MATCH_SUMMARY_CHARS ? `${collapsed.slice(0, MAX_MATCH_SUMMARY_CHARS)}…` : collapsed;
 }
 
 function describeError(value: unknown): string {

@@ -259,12 +259,18 @@ describe('plasticwan-utils login and doctor', () => {
             available: true,
             reason: null,
             message: null,
-            source_model_call_id: '1',
-            historical_model: null,
             prompt_overrides_available: true,
             omitted_images: 0,
-            recording_enabled: true,
-            fidelity: {},
+            fidelity: {
+              input: 'historical_public_chat',
+              model_selection: 'current_chat_config',
+              prompt_selection: 'current_chat_config',
+              tool_selection: 'current_registry',
+              hot_injections: 'not_replayed',
+              external_tools: 'blocked',
+              system_resources: 'current_read_only',
+              side_effects: 'synthetic',
+            },
           });
           return;
         }

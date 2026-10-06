@@ -10,7 +10,7 @@ export const MAX_PROMPT_OVERRIDE_CHARS = 65_536;
  * handling, conversation mode, memory guidance) and are never replaceable;
  * `global` and `group` are the raw comment-stripped templates of
  * `agent.system_prompt` and the chat's `instructions`. A replay can rebuild the
- * exact prompt from these four layers plus the recorded template values.
+ * current prompt from these four layers plus the active template values.
  */
 export interface AgentPromptLayers {
   readonly prefix: string;
@@ -36,8 +36,7 @@ export class PromptOverrideError extends Error {
  * Rebuilds a system prompt from its layers exactly as `ContextBuilder` does:
  * fixed prefix, rendered global template, fixed middle, rendered group template,
  * empty segments dropped, segments joined by a blank line. The templates render
- * with the values they were recorded with, so a later configuration change
- * cannot leak into a replay.
+ * with the values supplied by the caller's pinned runtime configuration.
  */
 export function composeAgentPrompt(layers: AgentPromptLayers, values: PromptTemplateValues): string {
   return [
@@ -55,7 +54,7 @@ export function composeAgentPrompt(layers: AgentPromptLayers, values: PromptTemp
  * boundary as the configuration loader's prompt files — HTML comments stripped
  * before the text reaches the model — plus BOM and NUL checks and the template
  * variable allowlist. The returned text is a raw template: rendering happens
- * later against the values recorded with the source invocation.
+ * later against the values from the active configuration.
  */
 export function preparePromptOverride(value: string, layer: PromptLayer): string {
   if (value.length > MAX_PROMPT_OVERRIDE_CHARS) {

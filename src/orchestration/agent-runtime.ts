@@ -39,7 +39,6 @@ import type { SecretStore } from '../platform/secrets.ts';
 import type { SystemResources, SystemSkill } from '../platform/system-resources.ts';
 import { applyToolSchemaKeywords } from '../platform/tool-schema.ts';
 import { resolveChatConfig, type SqliteStore } from '../store/database.ts';
-import { ReplayInputSerializationError, serializeReplayInput } from '../store/replay-input.ts';
 import { createToolAudit } from '../store/tool-audit.ts';
 import {
   agentMessages,
@@ -229,6 +228,76 @@ export class AgentRuntime {
     );
   }
 
+  /** Current definitions only; scene tests never receive these production executors. */
+  sceneToolDefinitions(
+    context: InvocationContext,
+    config: RawConfig,
+  ): {
+    readonly tools: readonly AgentTool[];
+    readonly capabilities: readonly AgentTool[];
+  } {
+    const resolver = unavailableCapabilities();
+    const deadline = Number.MAX_SAFE_INTEGER;
+    const capabilities = [
+      capability(
+        createTyping(this.#telegramApi, context.chatId.toString(), context.threadId, new AbortController().signal).tool,
+        false,
+      ),
+      ...(this.#capabilityTools?.(context, deadline, resolver) ?? []),
+    ];
+    return {
+      tools: this.#buildTools(
+        context,
+        config,
+        deadline,
+        resolver,
+        capabilities,
+        isLowDailyTokenBudget(readDailyTokenBudget(this.#store.orm, config.agent.daily_budget.max_tokens))
+          ? createZzzTool({
+              orm: this.#store.orm,
+              invocationId: context.invocationId,
+              chatId: context.chatId,
+              onSleep: () => {},
+            })
+          : undefined,
+      ),
+      capabilities: capabilities.map((entry) => entry.tool),
+    };
+  }
+
+  #buildTools(
+    target: InvocationContext,
+    config: RawConfig,
+    deadline: number,
+    capabilities: CapabilityRefResolver,
+    executableCapabilities: readonly ExecutableCapability[],
+    zzz?: AgentTool,
+    holdForNewMessages?: () => boolean,
+  ): readonly AgentTool[] {
+    return [
+      createReadTool({ store: this.#store, context: target, resources: this.#systemResources }),
+      createSendTool({
+        store: this.#store,
+        api: this.#telegramApi,
+        context: target,
+        capabilities,
+        sendRateLimit: this.#sendRateLimit(config),
+        maxTextLength: config.agent.send_max_text_length,
+        disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+        deadline,
+        bot: this.#bot,
+        ...(holdForNewMessages === undefined ? {} : { holdForNewMessages }),
+        ...(this.#imageGeneration === undefined ? {} : { imageGeneration: this.#imageGeneration }),
+      }),
+      createExecuteTool({
+        audit: createToolAudit(this.#store, target.invocationId),
+        capabilities: executableCapabilities,
+      }),
+      ...(this.#additionalTools?.(target, deadline, capabilities) ?? []),
+      ...(zzz === undefined ? [] : [zzz]),
+    ];
+  }
+
   async run(
     invocationId: bigint,
     snapshot: InvocationConfigSnapshot,
@@ -403,28 +472,16 @@ export class AgentRuntime {
       capability(typing.tool, false),
       ...(this.#capabilityTools?.(contextState, deadline, capabilities) ?? []),
     ];
-    const buildTools = (target: InvocationContext, exposeZzz: boolean): readonly AgentTool[] => [
-      createReadTool({ store: this.#store, context: target, resources: this.#systemResources }),
-      createSendTool({
-        store: this.#store,
-        api: this.#telegramApi,
-        context: target,
-        capabilities,
-        sendRateLimit: this.#sendRateLimit(config),
-        maxTextLength: config.agent.send_max_text_length,
-        disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+    const buildTools = (target: InvocationContext, exposeZzz: boolean): readonly AgentTool[] =>
+      this.#buildTools(
+        target,
+        config,
         deadline,
-        bot: this.#bot,
-        ...(config.agent.send_barrier_enabled === true ? { holdForNewMessages } : {}),
-        ...(this.#imageGeneration === undefined ? {} : { imageGeneration: this.#imageGeneration }),
-      }),
-      createExecuteTool({
-        audit: createToolAudit(this.#store, target.invocationId),
-        capabilities: executableCapabilities,
-      }),
-      ...(this.#additionalTools?.(target, deadline, capabilities) ?? []),
-      ...(exposeZzz ? [zzz] : []),
-    ];
+        capabilities,
+        executableCapabilities,
+        exposeZzz ? zzz : undefined,
+        config.agent.send_barrier_enabled === true ? holdForNewMessages : undefined,
+      );
     const tools = applyToolSchemaKeywords(buildTools(contextState, zzzExposed), toolSchemaKeywords);
     validateToolRegistry(tools, model.contextWindow);
     const toolDefinitionCharacters = estimateToolRegistryCharacters(tools);
@@ -584,7 +641,6 @@ export class AgentRuntime {
       return true;
     };
 
-    let firstModelRequest = true;
     agent.streamFunction = async (streamModel, modelContext, options) => {
       if (
         !bypassDailyBudget() &&
@@ -604,28 +660,6 @@ export class AgentRuntime {
         modelContext.tools?.map((tool) => tool.name) ?? [],
       );
       const recordPayloads = this.#configStore.current().config.developer.record_model_payloads;
-      if (firstModelRequest && recordPayloads) {
-        try {
-          this.#store.orm
-            .update(modelCalls)
-            .set({
-              replayInputJson: serializeReplayInput(
-                modelContext,
-                executableCapabilities.map((entry) => entry.tool),
-                { layers: stable.promptLayers, templateValues: stable.templateValues },
-              ),
-            })
-            .where(eq(modelCalls.id, callId))
-            .run();
-        } catch (error) {
-          // A snapshot that cannot reproduce the recorded prompt is not worth
-          // keeping, but the failure must be visible. The payload can carry
-          // conversation text, so the event records identifiers and a failure
-          // code only — never the error message or the content.
-          this.#logReplayInputSerializationFailure(invocationId, callId, error);
-        }
-      }
-      firstModelRequest = false;
       try {
         const stream = snapshot.models.streamSimple(streamModel, modelContext, {
           ...options,
@@ -1243,28 +1277,6 @@ export class AgentRuntime {
       );
     } catch {
       // A failing log line must never replace the error it was meant to explain.
-    }
-  }
-
-  /**
-   * The replay snapshot is recorded best-effort, and a silent failure used to be
-   * invisible. The payload can carry conversation text, so this event records
-   * only identifiers and the failure class: never the message, never the content.
-   */
-  #logReplayInputSerializationFailure(invocationId: bigint, modelCallId: bigint, error: unknown): void {
-    try {
-      console.log(
-        JSON.stringify({
-          event: 'replay_input_serialize_failed',
-          invocation_id: invocationId.toString(),
-          model_call_id: modelCallId.toString(),
-          error_name: error instanceof Error ? error.name : typeof error,
-          reason: error instanceof ReplayInputSerializationError ? error.code : 'serialization_failed',
-          at: new Date().toISOString(),
-        }),
-      );
-    } catch {
-      // A failing log line must never interrupt a live invocation.
     }
   }
 

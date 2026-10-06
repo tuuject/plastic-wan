@@ -1,27 +1,29 @@
-import { afterEach, expect, test } from 'vitest';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
 import { eq } from 'drizzle-orm';
 import Type from 'typebox';
-import { SendInputSchema } from '../src/capabilities/send-tool.ts';
+import { afterEach, expect, test } from 'vitest';
 import { createExecuteTool } from '../src/capabilities/execute-tool.ts';
+import { SendInputSchema } from '../src/capabilities/send-tool.ts';
+import { ContextBuilder } from '../src/context/context-builder.ts';
+import { ContextRefStore } from '../src/context/context-refs.ts';
 import { AddMemoryInputSchema } from '../src/context/memory.ts';
 import { AdminQueryError } from '../src/ingress/admin/audit.ts';
 import { AdminServer } from '../src/ingress/admin/server.ts';
 import { ReplayError, ReplayRunner } from '../src/orchestration/replay.ts';
-import { composeAgentPrompt, type AgentPromptLayers } from '../src/platform/agent-prompt.ts';
+import { composeAgentPrompt } from '../src/platform/agent-prompt.ts';
 import { KeyedSemaphore } from '../src/platform/concurrency.ts';
 import { loadConfig } from '../src/platform/config.ts';
 import { SecretStore } from '../src/platform/secrets.ts';
 import { SystemResources } from '../src/platform/system-resources.ts';
 import { AlarmInputSchema, ListAlarmInputSchema } from '../src/plugins/alarm/alarm.ts';
 import { SqliteStore } from '../src/store/database.ts';
-import { serializeReplayInput } from '../src/store/replay-input.ts';
-import { modelCalls } from '../src/store/schema.ts';
+import { snapshotInvocation } from '../src/store/invocation-snapshot.ts';
+import { bucketMessages, invocationMessages, messageRevisions, messages, telegramSends } from '../src/store/schema.ts';
 import { seedAdminFixture } from './fixtures/admin-seed.ts';
 import { fauxRegistry, testConfigJsonc, testConfigStore, writeTestConfig } from './helpers.ts';
 
@@ -50,35 +52,19 @@ const definition = (name: string, parameters = Type.Object({})) => ({
   description: `fixture ${name}`,
   parameters,
 });
-const defaultMessages: Message[] = [{ role: 'user', content: 'recorded user input', timestamp: 1 }];
 const OVERRIDE_PROMPT = 'You are the overridden replay prompt.';
-const RECORDED_LAYERS: AgentPromptLayers = {
-  prefix: 'recorded fixed prefix',
-  global: 'recorded global prompt',
-  middle: 'recorded fixed middle',
-  group: 'recorded group prompt',
-};
-const RECORDED_VALUES = {
-  agent: { provider: 'snapshot-agent', model: 'snapshot-model' },
-  vision: { provider: 'snapshot-vision', model: 'snapshot-vision-model' },
-  timezone: 'Snapshot/Zone',
-};
-function replayInput(messages: Message[] = defaultMessages): string {
-  return serializeReplayInput(
-    {
-      systemPrompt: composeAgentPrompt(RECORDED_LAYERS, RECORDED_VALUES),
-      messages,
-      tools: [
-        definition('send', SendInputSchema),
-        createExecuteTool({
-          capabilities: [],
-          audit: { start: () => ({ succeed: () => {}, fail: () => {} }), reject: () => {} },
-        }),
-        definition('zzz'),
-        definition('mcp_remote_write'),
-      ],
-    },
-    [
+function sceneRegistry() {
+  return {
+    tools: [
+      definition('send', SendInputSchema),
+      createExecuteTool({
+        capabilities: [],
+        audit: { start: () => ({ succeed: () => {}, fail: () => {} }), reject: () => {} },
+      }),
+      definition('zzz'),
+      definition('mcp_remote_write'),
+    ],
+    capabilities: [
       {
         ...definition('add_memory', AddMemoryInputSchema),
         execute: async () => {
@@ -98,8 +84,7 @@ function replayInput(messages: Message[] = defaultMessages): string {
         },
       },
     ],
-    { layers: RECORDED_LAYERS, templateValues: RECORDED_VALUES },
-  );
+  };
 }
 
 async function fixture() {
@@ -137,16 +122,51 @@ async function fixture() {
   const configStore = await testConfigStore(loaded, fauxRegistry(faux));
   const store = await SqliteStore.open(loaded.config);
   const seed = seedAdminFixture(store);
+  const opening = seed.messageIds[1]!;
+  store.orm.delete(invocationMessages).where(eq(invocationMessages.invocationId, seed.invocationA)).run();
+  store.orm
+    .insert(bucketMessages)
+    .values({ bucketId: seed.bucketA, messageId: opening, sourceBucketId: seed.bucketA, sequenceNo: 1n })
+    .run();
+  // Align this synthetic seed with a real freeze moment. The writer itself
+  // supplies complete snapshots; no historical model payload is installed.
+  store.orm
+    .update(messages)
+    .set({ telegramDate: '2026-09-10T07:59:40.000Z', receivedAt: '2026-09-10T07:59:40.000Z' })
+    .where(eq(messages.id, opening))
+    .run();
+  const revision = store.orm
+    .select({ id: messageRevisions.id })
+    .from(messageRevisions)
+    .where(eq(messageRevisions.messageId, opening))
+    .orderBy(messageRevisions.revisionNo)
+    .get()!;
+  store.orm.update(messages).set({ currentRevisionId: revision.id }).where(eq(messages.id, opening)).run();
+  store.orm
+    .update(messageRevisions)
+    .set({ createdAt: '2026-09-10T07:59:40.000Z' })
+    .where(eq(messageRevisions.id, revision.id))
+    .run();
+  snapshotInvocation(store, 0, seed.invocationA, seed.bucketA, seed.conversationId, false);
+  const builder = new ContextBuilder(
+    store,
+    new ContextRefStore(store, { ttlHours: loaded.config.agent.context.ref_ttl_hours }),
+  );
+  const stable = builder.buildSystemPrompt(loaded.config, builder.identity(loaded.config, seed.invocationA), false, {
+    provider: 'agent',
+    model: 'agent-model',
+  });
   const secrets = new SecretStore();
   const shutdown = new AbortController();
   const gate = new KeyedSemaphore();
   const runner = new ReplayRunner({
-    orm: store.orm,
+    store,
     configStore,
     secrets,
     systemResources: SystemResources.empty(),
     modelGate: gate,
     shutdownSignal: shutdown.signal,
+    toolDefinitions: () => sceneRegistry(),
   });
   // Same wiring as `serve` in src/application.ts: ReplayError becomes an
   // AdminQueryError with the engine's code and status, anything else is 500.
@@ -160,9 +180,9 @@ async function fixture() {
     store,
     configStore,
     secrets,
-    replayPreflight: (id) => {
+    replayPreflight: (id, selection) => {
       try {
-        return runner.inspect(id);
+        return runner.inspect(id, selection);
       } catch (error) {
         return toAdminQueryError(error);
       }
@@ -192,8 +212,8 @@ async function fixture() {
     store.close();
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
-  const setInput = (input: string | null) =>
-    store.orm.update(modelCalls).set({ replayInputJson: input }).where(eq(modelCalls.id, 7_001n)).run();
+  const clearScene = () =>
+    store.orm.delete(invocationMessages).where(eq(invocationMessages.invocationId, seed.invocationA)).run();
   const rows = () => stateRows(store);
   return {
     directory,
@@ -205,7 +225,8 @@ async function fixture() {
     secrets,
     listening,
     baseUrl: `http://127.0.0.1:${listening.port}`,
-    setInput,
+    clearScene,
+    stable,
     rows,
   };
 }
@@ -225,6 +246,17 @@ function stateRows(store: SqliteStore): Record<string, unknown[]> {
 /** The API key layer records use, which is the one expected auth write. */
 function productionTables(rows: Record<string, unknown[]>): Record<string, unknown[]> {
   return Object.fromEntries(Object.entries(rows).filter(([name]) => name !== 'admin_api_keys'));
+}
+
+/** Session-authenticated reads also update the existing session activity clock. */
+function expectSessionActivityOnly(before: Record<string, unknown[]>, after: Record<string, unknown[]>): void {
+  expect(after).toEqual({
+    ...before,
+    admin_sessions: before.admin_sessions?.map((row) => ({
+      ...(row as Record<string, unknown>),
+      last_seen_at: expect.any(String),
+    })),
+  });
 }
 
 /** SQLite INTEGER columns come back as bigint; JSON needs a string form to search. */
@@ -333,7 +365,6 @@ function runCli(args: readonly string[], env: Record<string, string>): Promise<C
 interface ReplayResult {
   readonly version: number;
   readonly source_invocation_id: string;
-  readonly source_model_call_id: string;
   readonly conversation_id: string;
   readonly chat_id: string;
   readonly thread_id: string;
@@ -352,7 +383,6 @@ interface ReplayResult {
   }[];
   readonly usage: { readonly model_calls: number; readonly total_tokens: number };
   readonly fidelity: {
-    readonly historical_model: { readonly provider: string; readonly id: string };
     readonly model_selection: string;
     readonly side_effects: string;
     readonly external_tools: string;
@@ -368,18 +398,18 @@ test('CLI replay over real HTTP runs ReplayRunner with synthetic side effects an
   expect(f.listening.hostname).toBe('127.0.0.1');
   expect(f.listening.port).toBeGreaterThan(0);
   const admin = await setupAdminSession(f.baseUrl);
-  f.setInput(replayInput());
   const promptFile = join(f.directory, 'override-prompt.txt');
   await writeFile(promptFile, OVERRIDE_PROMPT);
 
   f.faux.setResponses([
     (context, options) => {
-      // The recorded layers are rebuilt with only the global template swapped;
-      // the fixed prefix, middle and the recorded group layer stay verbatim.
+      // Only the current global template is replaced; runtime and group remain.
       expect(context.systemPrompt).toBe(
-        composeAgentPrompt({ ...RECORDED_LAYERS, global: OVERRIDE_PROMPT }, RECORDED_VALUES),
+        composeAgentPrompt({ ...f.stable.promptLayers, global: OVERRIDE_PROMPT }, f.stable.templateValues),
       );
-      expect(context.messages).toEqual(defaultMessages);
+      expect(context.messages).toHaveLength(1);
+      expect(JSON.stringify(context.messages)).toContain('plain text message with a reply');
+      expect(JSON.stringify(context.messages)).not.toContain('long payload fixture');
       expect(options).toMatchObject({ maxRetries: 0, maxTokens: 128 });
       return fauxAssistantMessage(
         [
@@ -417,13 +447,13 @@ test('CLI replay over real HTTP runs ReplayRunner with synthetic side effects an
   expect(JSON.parse(get.stdout)).toMatchObject({ id: '4001', state: 'completed' });
 
   const replay = await runCli(['invocation', 'replay', '4001', '--global-prompt', promptFile, '--json'], env);
-  expect(replay.code).toBe(0);
+  expect(replay.code, replay.stderr).toBe(0);
   expect(replay.stderr).toBe('');
   const result = JSON.parse(replay.stdout) as ReplayResult;
   expect(result).toMatchObject({
-    version: 1,
+    version: 2,
     source_invocation_id: '4001',
-    source_model_call_id: '7001',
+    scene: { source_bucket_id: '3001', message_count: 1, history_count: 0 },
     conversation_id: '2001',
     chat_id: '123456789',
     thread_id: '0',
@@ -435,7 +465,9 @@ test('CLI replay over real HTTP runs ReplayRunner with synthetic side effects an
     overrides: { global_prompt: true, group_prompt: false },
     usage: { model_calls: 2 },
     fidelity: {
-      historical_model: { provider: 'openai', id: 'gpt-4.1-mini' },
+      input: 'historical_public_chat',
+      prompt_selection: 'current_chat_config',
+      tool_selection: 'current_registry',
       model_selection: 'current_chat_config',
       side_effects: 'synthetic',
       external_tools: 'blocked',
@@ -485,10 +517,201 @@ test('CLI replay over real HTTP runs ReplayRunner with synthetic side effects an
   expect(keyAfter?.last_used_at).toEqual(expect.any(String));
 }, 120_000);
 
-test('cleared replay input fails the CLI with replay_input_unavailable and a revoked key fails unauthenticated', async () => {
+test('bot-sliced CLI replay injects its window immediately and validates selection before model work', async () => {
   const f = await fixture();
   const admin = await setupAdminSession(f.baseUrl);
-  f.setInput(null);
+  const env = { PLASTICWAN_ENDPOINT: f.baseUrl, PLASTICWAN_API_KEY: admin.key };
+  const send = f.store.orm.select().from(telegramSends).get()!;
+  f.store.orm.update(messages).set({ sentByBot: true }).where(eq(messages.id, f.seed.messageIds[0]!)).run();
+  const frozen = f.store.orm
+    .select()
+    .from(invocationMessages)
+    .where(eq(invocationMessages.invocationId, f.seed.invocationA))
+    .get()!;
+  const snapshot = JSON.parse(frozen.snapshotJson) as Record<string, unknown>;
+  f.store.orm
+    .update(invocationMessages)
+    .set({
+      snapshotJson: JSON.stringify({
+        ...snapshot,
+        reply_to_message_id: '900',
+        reply_snapshot: { sender: 'Bot', content: 'old answer outside window' },
+      }),
+    })
+    .where(eq(invocationMessages.invocationId, f.seed.invocationA))
+    .run();
+  const before = productionTables(f.rows());
+  const selection = ['--before-send', send.id.toString()];
+  const preflight = await runCli(['invocation', 'preflight', '4001', ...selection, '--json'], env);
+  expect(preflight.code, preflight.stderr).toBe(0);
+  expect(JSON.parse(preflight.stdout)).toMatchObject({
+    available: true,
+    scene: {
+      cutoff_at: send.createdAt,
+      message_count: 1,
+      history_count: 0,
+      slice: { before_send_id: send.id.toString(), before_message_id: '902', after_bot_message_id: '900' },
+    },
+  });
+  expect(f.faux.state.callCount).toBe(0);
+  f.faux.setResponses([
+    (context) => {
+      expect(context.messages).toHaveLength(1);
+      const text = JSON.stringify(context.messages);
+      expect(text).toContain('plain text message with a reply');
+      for (const excluded of [
+        'old answer outside window',
+        'first caption',
+        're:900',
+        'Hello from the seeded invocation',
+        'private reasoning',
+      ]) {
+        expect(text).not.toContain(excluded);
+      }
+      return fauxAssistantMessage(
+        [fauxToolCall('send', { text: 'synthetic slice answer', reply_to_message_id: '901' })],
+        { stopReason: 'toolUse' },
+      );
+    },
+    fauxAssistantMessage('private finish'),
+  ]);
+  const replay = await runCli(['invocation', 'replay', '4001', ...selection, '--confirm-paid', '--json'], env);
+  expect(replay.code, replay.stderr).toBe(0);
+  expect(JSON.parse(replay.stdout)).toMatchObject({
+    error: null,
+    send_count: 1,
+    overrides: { global_prompt: false, group_prompt: false },
+    scene: {
+      message_count: 1,
+      history_count: 0,
+      slice: { before_send_id: send.id.toString() },
+    },
+  });
+  expect(f.faux.state.callCount).toBe(2);
+  for (const params of [
+    'before_send_id=0',
+    'before_send_id=9223372036854775808',
+    'before_send_id=1&before_send_id=2',
+    'unknown=1',
+  ]) {
+    const invalid = await fetch(`${f.baseUrl}/api/invocations/4001/replay-preflight?${params}`, {
+      headers: { authorization: `Bearer ${admin.key}` },
+    });
+    expect(invalid.status).toBe(400);
+  }
+  const empty = await runCli(
+    ['invocation', 'replay', '4001', '--before-send', '999999', '--confirm-paid', '--json'],
+    env,
+  );
+  expect(empty.code).toBe(1);
+  expect(empty.stderr).toContain('replay_slice_target_invalid');
+  for (const input of [
+    { before_send_id: 1 },
+    { before_send_id: '0' },
+    { before_send_id: '9223372036854775808' },
+    { before_send_id: send.id.toString(), extra: true },
+  ]) {
+    const invalid = await fetch(`${f.baseUrl}/api/invocations/4001/replay`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${admin.key}`, 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    expect(invalid.status).toBe(400);
+  }
+  const invalidTarget = await fetch(`${f.baseUrl}/api/invocations/4001/replay`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${admin.key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ before_send_id: '999999' }),
+  });
+  expect(invalidTarget.status).toBe(409);
+  expect(await invalidTarget.json()).toMatchObject({ error: 'replay_slice_target_invalid' });
+  const sessionReplay = await fetch(`${f.baseUrl}/api/invocations/4001/replay`, {
+    method: 'POST',
+    headers: { cookie: admin.cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ before_send_id: send.id.toString() }),
+  });
+  expect(sessionReplay.status).toBe(405);
+  expect(await sessionReplay.json()).toMatchObject({ error: 'method_not_allowed' });
+  expect(f.faux.state.callCount).toBe(2);
+  expectSessionActivityOnly(before, productionTables(f.rows()));
+}, 120_000);
+
+test('a sliced replay without --confirm-paid is refused before any request', async () => {
+  const f = await fixture();
+  const admin = await setupAdminSession(f.baseUrl);
+  const env = { PLASTICWAN_ENDPOINT: f.baseUrl, PLASTICWAN_API_KEY: admin.key };
+  const send = f.store.orm.select().from(telegramSends).get()!;
+  const before = f.rows();
+  const refused = await runCli(['invocation', 'replay', '4001', '--before-send', send.id.toString(), '--json'], env);
+  expect(refused.code).toBe(2);
+  expect(refused.stdout).toBe('');
+  expect(JSON.parse(refused.stderr)).toEqual({
+    error: 'confirm_paid_required',
+    message: 'invocation replay --before-send requires --confirm-paid to confirm the billed model call',
+  });
+  // No HTTP request reached the server at all: not even the free preflight ran,
+  // so nothing moved — including the API key's last_used_at clock — and the
+  // model was never asked to bill anything.
+  expect(f.rows()).toEqual(before);
+  expect(f.faux.state.callCount).toBe(0);
+}, 120_000);
+
+test('keyword and precise public-message time search work through key and session HTTP without model work', async () => {
+  const f = await fixture();
+  const admin = await setupAdminSession(f.baseUrl);
+  const env = { PLASTICWAN_ENDPOINT: f.baseUrl, PLASTICWAN_API_KEY: admin.key };
+  const before = productionTables(f.rows());
+  const incoming = await runCli(
+    ['invocation', 'list', '--search', 'plain text', '--at', '2026-09-10 07:59', '--json'],
+    env,
+  );
+  expect(incoming.code, incoming.stderr).toBe(0);
+  expect(JSON.parse(incoming.stdout)).toMatchObject({
+    items: [
+      expect.objectContaining({
+        id: '4001',
+        matched_messages: [expect.objectContaining({ source: 'incoming', telegram_message_id: '901' })],
+      }),
+    ],
+  });
+  const bot = await runCli(
+    ['invocation', 'list', '--search', 'seeded invocation', '--at', '2026-09-10T08:00:03Z', '--json'],
+    env,
+  );
+  expect(bot.code, bot.stderr).toBe(0);
+  expect(JSON.parse(bot.stdout)).toMatchObject({
+    items: [
+      expect.objectContaining({
+        id: '4001',
+        matched_messages: [
+          expect.objectContaining({ source: 'bot', telegram_message_id: '902', telegram_send_id: expect.any(String) }),
+        ],
+      }),
+    ],
+  });
+  const noMatch = await runCli(['invocation', 'list', '--search', 'private reasoning', '--json'], env);
+  expect(noMatch.code).toBe(0);
+  expect(JSON.parse(noMatch.stdout)).toEqual({ items: [], next_cursor: null });
+  const key = await fetch(`${f.baseUrl}/api/invocations?search=plain&at=2026-09-10T07%3A59Z`, {
+    headers: { authorization: `Bearer ${admin.key}` },
+  });
+  const session = await fetch(`${f.baseUrl}/api/invocations?search=plain&at=2026-09-10T07%3A59Z`, {
+    headers: { cookie: admin.cookie },
+  });
+  expect(session.status).toBe(200);
+  expect(await session.json()).toEqual(await key.json());
+  const invalid = await fetch(`${f.baseUrl}/api/invocations?at=2026-02-30T10%3A00Z`, {
+    headers: { authorization: `Bearer ${admin.key}` },
+  });
+  expect(invalid.status).toBe(400);
+  expect(f.faux.state.callCount).toBe(0);
+  expectSessionActivityOnly(before, productionTables(f.rows()));
+}, 120_000);
+
+test('missing opening scene fails the CLI and a revoked key fails unauthenticated', async () => {
+  const f = await fixture();
+  const admin = await setupAdminSession(f.baseUrl);
+  f.clearScene();
   const env = { PLASTICWAN_ENDPOINT: f.baseUrl, PLASTICWAN_API_KEY: admin.key };
 
   // The CLI preflights first and reports the engine's stable reason verbatim.
@@ -496,7 +719,7 @@ test('cleared replay input fails the CLI with replay_input_unavailable and a rev
   expect(cleared.code).toBe(1);
   expect(cleared.stdout).toBe('');
   expect(JSON.parse(cleared.stderr)).toEqual({
-    error: 'replay_input_unavailable',
+    error: 'replay_scene_unavailable',
     message: expect.any(String),
   });
   expect(f.faux.state.callCount).toBe(0);
@@ -509,7 +732,7 @@ test('cleared replay input fails the CLI with replay_input_unavailable and a rev
     body: JSON.stringify({}),
   });
   expect(direct.status).toBe(409);
-  expect(await asObject(direct)).toMatchObject({ error: 'replay_input_unavailable' });
+  expect(await asObject(direct)).toMatchObject({ error: 'replay_scene_unavailable' });
   expect(f.faux.state.callCount).toBe(0);
 
   // Revocation over the session-authenticated panel surface disables the same
@@ -526,10 +749,9 @@ test('cleared replay input fails the CLI with replay_input_unavailable and a rev
   expect(f.faux.state.callCount).toBe(0);
 }, 120_000);
 
-test('preflight and recorded prompts are read-only HTTP reads that never call the model', async () => {
+test('preflight and active prompts are read-only HTTP reads that never call the model', async () => {
   const f = await fixture();
   const admin = await setupAdminSession(f.baseUrl);
-  f.setInput(replayInput());
   const headers = { authorization: `Bearer ${admin.key}` };
   const before = productionTables(f.rows());
 
@@ -539,14 +761,20 @@ test('preflight and recorded prompts are read-only HTTP reads that never call th
     available: true,
     reason: null,
     message: null,
-    source_model_call_id: '7001',
-    historical_model: { provider: 'openai', id: 'gpt-4.1-mini' },
+    scene: {
+      cutoff_at: '2026-09-10T07:59:45.000Z',
+      source_bucket_id: '3001',
+      message_count: 1,
+      history_count: 0,
+      omitted_messages: 0,
+    },
     prompt_overrides_available: true,
     omitted_images: 0,
-    recording_enabled: false,
     fidelity: {
-      input: 'first_model_request_text_only',
+      input: 'historical_public_chat',
       model_selection: 'current_chat_config',
+      prompt_selection: 'current_chat_config',
+      tool_selection: 'current_registry',
       hot_injections: 'not_replayed',
       external_tools: 'blocked',
       system_resources: 'current_read_only',
@@ -557,12 +785,11 @@ test('preflight and recorded prompts are read-only HTTP reads that never call th
   const prompts = await fetch(`${f.baseUrl}/api/invocations/4001/prompts`, { headers });
   expect(prompts.status).toBe(200);
   expect(await asObject(prompts)).toMatchObject({
-    source: 'recorded',
+    source: 'active',
     source_invocation_id: '4001',
-    source_model_call_id: '7001',
-    global_prompt: RECORDED_LAYERS.global,
-    group_prompt: RECORDED_LAYERS.group,
-    template_values: RECORDED_VALUES,
+    global_prompt: f.stable.promptLayers.global,
+    group_prompt: f.stable.promptLayers.group,
+    template_values: f.stable.templateValues,
     core_read_only: true,
   });
   expect(f.faux.state.callCount).toBe(0);
@@ -571,13 +798,12 @@ test('preflight and recorded prompts are read-only HTTP reads that never call th
 
   // Clearing the payload makes the same preflight unavailable, and a missing
   // invocation is still a 404 rather than an "unavailable" document.
-  f.setInput(null);
+  f.clearScene();
   const cleared = await fetch(`${f.baseUrl}/api/invocations/4001/replay-preflight`, { headers });
   expect(cleared.status).toBe(200);
   expect(await asObject(cleared)).toMatchObject({
     available: false,
-    reason: 'replay_input_unavailable',
-    source_model_call_id: '7001',
+    reason: 'replay_scene_unavailable',
   });
   const missing = await fetch(`${f.baseUrl}/api/invocations/999999/replay-preflight`, { headers });
   expect(missing.status).toBe(404);

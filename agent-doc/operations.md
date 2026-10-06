@@ -146,11 +146,13 @@ plasticwan-utils doctor --json         # 一次 GET /api/invocations?limit=1；�
 node packages/cli/dist/bin.js invocation list --limit 20 --state completed --chat -1001234567890 --json
 plasticwan-utils invocation get 12345 --json                       # 全局安装后
 plasticwan-utils invocation replay 12345 --json
-plasticwan-utils invocation replay 12345 --system-prompt prompt.txt --json
-printf '%s' '临时替换的 system prompt' | plasticwan-utils invocation replay 12345 --system-prompt - --json
+plasticwan-utils invocation preflight 12345 --json
+plasticwan-utils invocation prompts 12345 --json
+plasticwan-utils invocation replay 12345 --global-prompt prompt.txt --json
+printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay 12345 --global-prompt - --json
 ```
 
-- 凭据：`login` 把 endpoint 与 key 成对保存到固定路径 `~/.config/plasticwan-utils/credentials.json`（所有平台一致，与 Bot 的 `config.jsonc`/`key.json` 无关），文件未加密；POSIX 上目录 `0700`、文件 `0600`（更窄权限亦可），拒绝符号链接与不安全权限且不自动修复，Windows 不做 POSIX mode 检查、沿用用户目录 ACL（不承诺 `chmod` 级别的保护）；key 全来源统一为 1–4096 字符且禁空白/控制字符，序列化凭据超过 16384 字节拒绝，写入失败不覆盖旧凭据。`login` 不访问服务器，保存后必须跑 `doctor`。非交互时可用 `--endpoint` 加 `--api-key`/环境变量，或用 `--api-key-stdin`：login 把 stdin 读到 EOF（不是读完一行就停），累计不超过 4098 字节，读取结束后只去掉一个尾部 LF/CRLF，剩余换行/空白/控制字符非法（`invalid_api_key`，退出码 2；受 `--timeout-ms` 约束，超时 `timeout` 退出码 1，不保存），不能与 `--api-key`/环境变量 key 同时给出，不是 `--api-key -`；stdin 读取只限 login 的 key 与 replay 的 `--system-prompt -`。
+- 凭据：`login` 把 endpoint 与 key 成对保存到固定路径 `~/.config/plasticwan-utils/credentials.json`（所有平台一致，与 Bot 的 `config.jsonc`/`key.json` 无关），文件未加密；POSIX 上目录 `0700`、文件 `0600`（更窄权限亦可），拒绝符号链接与不安全权限且不自动修复，Windows 不做 POSIX mode 检查、沿用用户目录 ACL（不承诺 `chmod` 级别的保护）；key 全来源统一为 1–4096 字符且禁空白/控制字符，序列化凭据超过 16384 字节拒绝，写入失败不覆盖旧凭据。`login` 不访问服务器，保存后必须跑 `doctor`。非交互时可用 `--endpoint` 加 `--api-key`/环境变量，或用 `--api-key-stdin`：login 把 stdin 读到 EOF（不是读完一行就停），累计不超过 4098 字节，读取结束后只去掉一个尾部 LF/CRLF，剩余换行/空白/控制字符非法（`invalid_api_key`，退出码 2；受 `--timeout-ms` 约束，超时 `timeout` 退出码 1，不保存），不能与 `--api-key`/环境变量 key 同时给出，不是 `--api-key -`；stdin 读取只限 login 的 key 与 replay 的 `--global-prompt -` / `--group-prompt -`。
 - 凭据解析顺序（doctor 与 invocation list/get/replay 相同）：明确参数 > 环境变量 > 保存文件。参数或环境变量显式给出的空串按缺失/非法处理，不回退到下一来源或改为交互提示；endpoint 与 key 都明确给出时完全不读凭据文件（文件损坏或不安全也不影响），只给其一才读文件、文件问题以 `invalid_credentials`（退出码 1）失败。保存的 key 只用于与其规范化 endpoint 一致的地址：endpoint 经 `parseEndpoint` 规范化后不同且未显式给 key 时报 `missing_api_key`（不把文件 key 发往别的服务），规范化后一致时仍可复用；参数与环境变量不写回文件。
 - `doctor --json` 按同一顺序解析凭据后恰好一次 `GET /api/invocations?limit=1`：没有 replay、没有模型/Provider 调用；成功输出 `{status:"ok",endpoint,credential_sources:{endpoint,api_key}}`，来源取值为 `argument`/`environment`/`file`；不输出 Invocation 正文，不发送 Telegram、不重试，鉴权仍会更新 key 的 `last_used_at`。失败走既有 JSON stderr 路径：参数/环境变量凭据缺失或不合法退出码 `2`，保存文件无效（`invalid_credentials`）或请求失败退出码 `1`。
 - 发布由 `.github/workflows/npm.yml` 承担，独立于 Docker workflow：只有 `tuuject/plastic-wan` 的 push 会发布，`main` 产出 canary（`0.0.0-canary.<run>.<attempt>.g<sha12>`，dist-tag `canary`），严格 `vMAJOR.MINOR.PATCH` tag 产出稳定版（dist-tag `latest`）；版本只在 CI checkout 内改写、不回写源码，发布用 OIDC 且没有 `NPM_TOKEN`。首次发布 bootstrap 与 trusted publisher 配置见 [packages/cli/README.md](../packages/cli/README.md#首次发布-bootstrap)：包必须先在 npm 上存在，之后手工打稳定 tag 才走 CI。Docker workflow 用 `GITHUB_TOKEN` 推送的 `v0.0.0-next-*` tag 不会触发它，手推 prerelease tag 会被版本 guard 拒绝。

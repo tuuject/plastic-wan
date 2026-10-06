@@ -14,12 +14,12 @@ export const USAGE = `plasticwan-utils - Plastic Wan Admin API 工具客户端
   plasticwan-utils config show [--source active|file] [--json]
   plasticwan-utils prompt get global [--source active|file] [--json]
   plasticwan-utils prompt get group --chat <id> [--source active|file] [--json]
-  plasticwan-utils invocation list [--limit N] [--cursor ID] [--state STATE] [--chat ID] [--json]
+  plasticwan-utils invocation list [--limit N] [--cursor ID] [--state STATE] [--chat ID] [--search <keyword>] [--at <time>] [--from <time>] [--to <time>] [--json]
   plasticwan-utils invocation get <id> [--json]
   plasticwan-utils invocation prompts <id> [--json]
-  plasticwan-utils invocation preflight <id> [--json]
+  plasticwan-utils invocation preflight <id> [--before-send <send-id>] [--json]
   plasticwan-utils invocation media <id> [--variant original|preview] [--json]
-  plasticwan-utils invocation replay <id> [--global-prompt <file|->] [--group-prompt <file|->] [--json]
+  plasticwan-utils invocation replay <id> [--before-send <send-id> --confirm-paid] [--global-prompt <file|->] [--group-prompt <file|->] [--json]
 
 全局选项:
   --endpoint <url>    Admin Panel 基地址（覆盖环境变量与登录文件）；明文 http 仅允许 loopback
@@ -29,15 +29,22 @@ export const USAGE = `plasticwan-utils - Plastic Wan Admin API 工具客户端
   --variant <original|preview>  仅 invocation media：下载原始文件或预览（默认 original）
   --global-prompt <file|->  仅 invocation replay：替换 global prompt；- 表示 stdin
   --group-prompt <file|->   仅 invocation replay：替换 group prompt（允许空）；- 表示 stdin
+  --search <keyword>  仅 invocation list：按字面关键词过滤消息（1-100 字符，不解释通配符）
+  --at <time>         仅 invocation list：筛选该时刻的 Invocation，与 --from/--to 互斥
+  --from <time> / --to <time>  仅 invocation list：筛选时间范围
+  --before-send <send-id>  仅 invocation preflight/replay：从该 telegram_sends 内部 id（已成功发送）之前开始回放
+  --confirm-paid      仅 invocation replay：切片重放（--before-send）会真实调用模型并计费，需显式确认，否则在发请求前拒绝
   --timeout-ms <ms>   请求/每次输入超时；默认非 replay 命令 30000，replay 300000，不自动重试
   --json              输出稳定 JSON
   -h, --help          显示本帮助
 
+时间格式: YYYY-MM-DD[ |T]HH:mm[:ss[.1-3位]][Z|±HH:mm]；日期必须有效。不带 Z/offset 时由服务端按 --chat 对应群或全局时区解释。
 登录文件: ~/.config/plasticwan-utils/credentials.json（未加密，包含 API key）。
 login 只保存凭据；doctor 用只读请求验证连接与鉴权，不调用模型。
 config show 与 prompt get 只读取脱敏后的配置与 prompt，不修改服务端状态。
 invocation media 顺序下载到 mkdtemp 新建目录，stdout 输出 manifest，每个文件不超过 20MiB、总计不超过 100MiB 且至多 32 项。
-invocation replay 先请求 replay-preflight；不可重放或不允许 prompt 覆盖时不发送 replay 请求。
+invocation list 默认保持旧输出；服务端返回 matched_messages 时人类可读输出会追加命中摘要。
+invocation replay 先请求 replay-preflight；不可重放或不允许 prompt 覆盖时不发送 replay 请求；--before-send 只选择回放边界，不属于 prompt 覆盖。切片重放必须显式给出 --confirm-paid：缺失时在读取 stdin 与发送任何请求前以 confirm_paid_required（退出码 2）拒绝；未切片的 replay 无需该 flag。
 退出码: 0 成功；1 请求、replay、超时或凭据文件失败；2 参数/输入/凭据不合法。错误以 JSON 写到 stderr。`;
 
 export interface RunOptions {

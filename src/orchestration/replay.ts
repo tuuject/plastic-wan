@@ -1,10 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { Agent } from '@earendil-works/pi-agent-core';
-import type { Api, Model } from '@earendil-works/pi-ai';
-import { and, asc, eq } from 'drizzle-orm';
-import { composeAgentPrompt, preparePromptOverride, PromptOverrideError } from '../platform/agent-prompt.ts';
+import type { Api, ImageContent, Model } from '@earendil-works/pi-ai';
+import { eq } from 'drizzle-orm';
+import { createExecuteTool } from '../capabilities/execute-tool.ts';
+import { createReadTool } from '../capabilities/read-tool.ts';
+import { createSendTool } from '../capabilities/send-tool.ts';
+import { ContextBuilder, type StablePrompt } from '../context/context-builder.ts';
 import { estimateMessageTokens } from '../context/context-codec.ts';
-import { isRenderable } from '../context/context-gc.ts';
+import { ContextRefStore } from '../context/context-refs.ts';
+import { buildSceneContext, type SceneContext, SceneSliceError } from '../context/scene-context.ts';
+import { composeAgentPrompt, PromptOverrideError, preparePromptOverride } from '../platform/agent-prompt.ts';
 import type { KeyedSemaphore } from '../platform/concurrency.ts';
 import {
   type AgentSettings,
@@ -12,14 +17,14 @@ import {
   type RawConfig,
   resolveAgentSettings,
 } from '../platform/config.ts';
+import { type InvocationContext, unavailableCapabilities } from '../platform/invocation-context.ts';
 import type { InvocationConfigSnapshot, RuntimeConfigurationStore } from '../platform/runtime-config.ts';
 import type { SecretStore } from '../platform/secrets.ts';
-import type { SystemResources } from '../platform/system-resources.ts';
+import type { SystemResources, SystemSkill } from '../platform/system-resources.ts';
 import { applyToolSchemaKeywords } from '../platform/tool-schema.ts';
-import { type Orm, resolveChatConfig } from '../store/database.ts';
-import { parseReplayInput, replayPromptParts, type ReplayInput } from '../store/replay-input.ts';
-import { chats, conversations, invocations, modelCalls } from '../store/schema.ts';
-import { createReplayTools } from './replay-tools.ts';
+import { resolveChatConfig, type SqliteStore } from '../store/database.ts';
+import { chats, conversations, invocations } from '../store/schema.ts';
+import { createReplayTools, type ReplayToolRegistry, toolDefinition } from './replay-tools.ts';
 
 const MAX_TRACE_BYTES = 1_048_576;
 const MAX_TOOL_CALLS = 128;
@@ -38,12 +43,15 @@ export class ReplayError extends Error {
 }
 
 interface ReplayOptions {
-  readonly orm: Orm;
+  readonly store: SqliteStore;
   readonly configStore: RuntimeConfigurationStore;
   readonly secrets: SecretStore;
   readonly systemResources: SystemResources;
   readonly modelGate: KeyedSemaphore;
   readonly shutdownSignal: AbortSignal;
+  readonly toolDefinitions?: (context: InvocationContext, config: RawConfig) => ReplayToolRegistry;
+  readonly skillVisibility?: (skill: SystemSkill) => boolean;
+  readonly imageLoader?: (mediaId: bigint, signal: AbortSignal) => Promise<ImageContent>;
 }
 
 interface ReplayFailure {
@@ -59,24 +67,18 @@ interface ReplayToolCall {
   is_error: boolean;
 }
 
-/** Prompt overrides for one replay; absent means the recorded layer is kept. */
+/** Prompt overrides for one scene test; absent means the current layer is kept. */
 export interface ReplayPromptOverrides {
   readonly global_prompt?: string;
   readonly group_prompt?: string;
+  readonly before_send_id?: string;
 }
 
-/** One replayable source: the finished invocation and its retained first request. */
+/** Source identity only; no historical model requests or private agent history. */
 interface ReplaySource {
   readonly conversationId: bigint;
   readonly chatId: bigint;
   readonly threadId: bigint;
-}
-
-interface ReplayCall {
-  readonly id: bigint;
-  readonly provider: string;
-  readonly model: string;
-  readonly input: string | null;
 }
 
 interface ReplayRuntime {
@@ -86,14 +88,8 @@ interface ReplayRuntime {
 }
 
 type ReplayCheck =
-  | {
-      readonly ok: true;
-      readonly source: ReplaySource;
-      readonly call: ReplayCall;
-      readonly input: ReplayInput;
-      readonly messages: ReturnType<typeof parseReplayInput>['messages'];
-    }
-  | { readonly ok: false; readonly code: string; readonly message: string; readonly call: ReplayCall | null };
+  | { readonly ok: true; readonly source: ReplaySource }
+  | { readonly ok: false; readonly code: string; readonly message: string };
 
 type ReplayRuntimeCheck =
   | { readonly ok: true; readonly runtime: ReplayRuntime }
@@ -108,26 +104,25 @@ export interface ReplayPreflight {
   readonly available: boolean;
   readonly reason: string | null;
   readonly message: string | null;
-  readonly source_model_call_id: string | null;
-  readonly historical_model: { readonly provider: string; readonly id: string } | null;
   readonly prompt_overrides_available: boolean;
   readonly omitted_images: number | null;
-  readonly recording_enabled: boolean;
+  readonly scene?: ReturnType<typeof sceneMetadata>;
   readonly fidelity: {
-    readonly input: 'first_model_request_text_only';
+    readonly input: 'historical_public_chat';
     readonly model_selection: 'current_chat_config';
-    readonly hot_injections: 'not_replayed';
+    readonly prompt_selection: 'current_chat_config';
+    readonly tool_selection: 'current_registry';
+    readonly hot_injections: 'not_replayed' | 'flattened_before_send';
     readonly external_tools: 'blocked';
     readonly system_resources: 'current_read_only';
     readonly side_effects: 'synthetic';
   };
 }
 
-/** The recorded global and group prompt templates; the runtime-owned layers are not returned. */
+/** Active global/group templates; runtime-owned layers remain read-only. */
 export interface ReplayPrompts {
-  readonly source: 'recorded';
+  readonly source: 'active';
   readonly source_invocation_id: string;
-  readonly source_model_call_id: string;
   readonly global_prompt: string;
   readonly group_prompt: string;
   readonly template_values: {
@@ -138,9 +133,30 @@ export interface ReplayPrompts {
   readonly core_read_only: true;
 }
 
+function sceneMetadata(scene: SceneContext) {
+  return {
+    cutoff_at: scene.cutoffAt,
+    source_bucket_id: scene.bucketId.toString(),
+    message_count: scene.messageCount,
+    history_count: scene.historyCount,
+    omitted_messages: scene.omittedMessages,
+    ...(scene.slice === undefined
+      ? {}
+      : {
+          slice: {
+            before_send_id: scene.slice.beforeSendId,
+            before_message_id: scene.slice.beforeMessageId,
+            after_bot_message_id: scene.slice.afterBotMessageId,
+          },
+        }),
+  };
+}
+
 const PREFLIGHT_FIDELITY = {
-  input: 'first_model_request_text_only',
+  input: 'historical_public_chat',
   model_selection: 'current_chat_config',
+  prompt_selection: 'current_chat_config',
+  tool_selection: 'current_registry',
   hot_injections: 'not_replayed',
   external_tools: 'blocked',
   system_resources: 'current_read_only',
@@ -163,62 +179,44 @@ export class ReplayRunner {
    * invocation still throws; every other failure is reported in the result so a
    * panel or CLI can explain it.
    */
-  inspect(id: bigint): ReplayPreflight {
-    const recordingEnabled = this.#options.configStore.current().config.developer.record_model_payloads;
-    const check = this.#checkSource(id);
-    if (!check.ok) {
+  inspect(id: bigint, selection: Pick<ReplayPromptOverrides, 'before_send_id'> = {}): ReplayPreflight {
+    try {
+      const { scene } = this.#prepare(id, selection.before_send_id);
+      return {
+        available: true,
+        reason: null,
+        message: null,
+        prompt_overrides_available: true,
+        omitted_images: scene.omittedImages,
+        fidelity: {
+          ...PREFLIGHT_FIDELITY,
+          hot_injections: scene.slice === undefined ? 'not_replayed' : 'flattened_before_send',
+        },
+        scene: sceneMetadata(scene),
+      };
+    } catch (error) {
+      if (!(error instanceof ReplayError) || error.status === 404) {
+        throw error;
+      }
       return {
         available: false,
-        reason: check.code,
-        message: check.message,
-        source_model_call_id: check.call === null ? null : check.call.id.toString(),
-        historical_model: check.call === null ? null : { provider: check.call.provider, id: check.call.model },
+        reason: error.code,
+        message: error.message,
         prompt_overrides_available: false,
         omitted_images: null,
-        recording_enabled: recordingEnabled,
         fidelity: PREFLIGHT_FIDELITY,
       };
     }
-    const runtime = this.#checkRuntime(check.source);
-    const promptParts = replayPromptParts(check.input);
-    return {
-      available: runtime.ok,
-      reason: runtime.ok ? null : runtime.code,
-      message: runtime.ok ? null : runtime.message,
-      source_model_call_id: check.call.id.toString(),
-      historical_model: { provider: check.call.provider, id: check.call.model },
-      prompt_overrides_available: promptParts !== null,
-      omitted_images: check.input.omitted_images,
-      recording_enabled: recordingEnabled,
-      fidelity: PREFLIGHT_FIDELITY,
-    };
   }
 
-  /**
-   * The global and group templates as they were recorded, with the values their
-   * variables rendered with. Version 1 records never retained layers, so they
-   * are reported as unavailable instead of being guessed from current
-   * configuration or the assembled prompt string.
-   */
   prompts(id: bigint): ReplayPrompts {
-    const check = this.#checkSource(id);
-    if (!check.ok) {
-      throw new ReplayError(check.code, check.message);
-    }
-    const parts = replayPromptParts(check.input);
-    if (parts === null) {
-      throw new ReplayError(
-        'replay_prompt_parts_unavailable',
-        'The invocation was recorded before prompt layers were retained; only an as-recorded replay is available',
-      );
-    }
+    const { stable } = this.#prepare(id);
     return {
-      source: 'recorded',
+      source: 'active',
       source_invocation_id: id.toString(),
-      source_model_call_id: check.call.id.toString(),
-      global_prompt: parts.global,
-      group_prompt: parts.group,
-      template_values: parts.template_values,
+      global_prompt: stable.promptLayers.global,
+      group_prompt: stable.promptLayers.group,
+      template_values: stable.templateValues,
       core_read_only: true,
     };
   }
@@ -227,21 +225,7 @@ export class ReplayRunner {
     if (this.#running) {
       throw new ReplayError('replay_busy', 'Another replay is running', 429);
     }
-    // Never search later calls, current Context, or request_json for a replacement:
-    // doing so would bypass the opt-in/clear boundary and silently change the starting point.
-    const check = this.#checkSource(id);
-    if (!check.ok) {
-      throw new ReplayError(check.code, check.message);
-    }
-    const { source, call } = check;
-    const parts = replayPromptParts(check.input);
-    const wantsOverride = override.global_prompt !== undefined || override.group_prompt !== undefined;
-    if (parts === null && wantsOverride) {
-      throw new ReplayError(
-        'replay_prompt_parts_unavailable',
-        'The invocation was recorded before prompt layers were retained; only an as-recorded replay is available',
-      );
-    }
+    const { source, runtime, stable, scene, registry } = this.#prepare(id, override.before_send_id);
     let globalTemplate: string | undefined;
     let groupTemplate: string | undefined;
     try {
@@ -255,29 +239,34 @@ export class ReplayRunner {
       }
       throw error;
     }
-    // The recorded prompt either replays byte for byte, or is rebuilt from its
-    // stored layers with only the overridden templates swapped. Layout, order
-    // and empty-segment filtering all come from the recorded layers.
-    const systemPrompt =
-      parts === null
-        ? check.input.system_prompt
-        : composeAgentPrompt(
-            {
-              prefix: parts.prefix,
-              global: globalTemplate ?? parts.global,
-              middle: parts.middle,
-              group: groupTemplate ?? parts.group,
-            },
-            parts.template_values,
-          );
-    const runtime = this.#checkRuntime(source);
-    if (!runtime.ok) {
-      throw new ReplayError(runtime.code, runtime.message);
-    }
-    const { snapshot, settings, model } = runtime.runtime;
+    const systemPrompt = composeAgentPrompt(
+      {
+        ...stable.promptLayers,
+        global: globalTemplate ?? stable.promptLayers.global,
+        group: groupTemplate ?? stable.promptLayers.group,
+      },
+      stable.templateValues,
+    );
+    const { snapshot, settings, model } = runtime;
     const { secrets, systemResources, modelGate, shutdownSignal } = this.#options;
     const config = snapshot.config;
-    const capture = createReplayTools(check.input, systemResources);
+    const imageLoader = this.#options.imageLoader;
+    const capture = createReplayTools(registry, systemResources, {
+      ...(config.agent.send_max_text_length === undefined ? {} : { maxTextLength: config.agent.send_max_text_length }),
+      disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+      replyMessageIds: new Set(scene.replyMessageIds),
+      ...(imageLoader === undefined || !model.input.includes('image')
+        ? {}
+        : {
+            readImage: async (ref: string, imageSignal: AbortSignal) => {
+              const mediaId = scene.mediaRefs.get(ref);
+              if (mediaId === undefined) {
+                throw new Error('image_ref is not visible in this scene');
+              }
+              return await imageLoader(mediaId, AbortSignal.any([signal, imageSignal]));
+            },
+          }),
+    });
     const tools = applyToolSchemaKeywords(
       capture.tools,
       configuredToolSchemaKeywords(config, settings.provider, settings.model),
@@ -314,7 +303,13 @@ export class ReplayRunner {
         }),
       );
     const agent = new Agent({
-      initialState: { systemPrompt, model, thinkingLevel: settings.thinking_level, messages: check.messages, tools },
+      initialState: {
+        systemPrompt,
+        model,
+        thinkingLevel: settings.thinking_level,
+        messages: [{ role: 'user', content: scene.text, timestamp: Date.parse(scene.cutoffAt) }],
+        tools,
+      },
       sessionId: `replay-${replayId}`,
       toolExecution: 'sequential',
       streamFn: async (streamModel, context, options) => {
@@ -461,10 +456,10 @@ export class ReplayRunner {
       completionReason = error.code;
     }
     return redacted({
-      version: 1,
+      version: 2,
       replay_id: replayId,
       source_invocation_id: id.toString(),
-      source_model_call_id: call.id.toString(),
+      scene: sceneMetadata(scene),
       conversation_id: source.conversationId.toString(),
       chat_id: source.chatId.toString(),
       thread_id: source.threadId.toString(),
@@ -485,17 +480,12 @@ export class ReplayRunner {
       trace,
       error,
       fidelity: {
-        input: 'first_model_request_text_only',
-        historical_model: { provider: call.provider, id: call.model },
-        model_selection: 'current_chat_config',
-        omitted_images: check.input.omitted_images,
-        hot_injections: 'not_replayed',
-        system_resources: 'current_read_only',
-        side_effects: 'synthetic',
-        external_tools: 'blocked',
+        ...PREFLIGHT_FIDELITY,
+        hot_injections: scene.slice === undefined ? 'not_replayed' : 'flattened_before_send',
+        omitted_images: scene.omittedImages,
         memory_and_alarms: 'empty_in_memory_overlay',
-        ref_authorization: 'not_revalidated',
-        synthetic_validation: 'schema_only_no_world_state_checks',
+        ref_authorization: 'scene_local_media_and_reply',
+        synthetic_validation: 'current_schema_and_send_limits_no_world_state_checks',
         dispatch_mode: 'execution_path_not_success',
         send_nudge: 'disabled',
         production_budgets: 'not_charged',
@@ -510,14 +500,112 @@ export class ReplayRunner {
     });
   }
 
-  /**
-   * The shared source guard: a finished invocation, its first agent model
-   * request, and that request's retained snapshot. It never searches later model
-   * calls or the current Context for a replacement; `run`, `inspect` and
-   * `prompts` all start here.
-   */
+  #prepare(
+    id: bigint,
+    beforeSendId?: string,
+  ): {
+    source: ReplaySource;
+    runtime: ReplayRuntime;
+    stable: StablePrompt;
+    scene: SceneContext;
+    registry: ReplayToolRegistry;
+  } {
+    if (
+      beforeSendId !== undefined &&
+      (!/^[1-9]\d{0,18}$/.test(beforeSendId) || BigInt(beforeSendId) > 9_223_372_036_854_775_807n)
+    ) {
+      throw new ReplayError('invalid_before_send_id', 'before_send_id must be a positive 64-bit decimal ID', 400);
+    }
+    const check = this.#checkSource(id);
+    if (!check.ok) {
+      throw new ReplayError(check.code, check.message);
+    }
+    const checkedRuntime = this.#checkRuntime(check.source);
+    if (!checkedRuntime.ok) {
+      throw new ReplayError(checkedRuntime.code, checkedRuntime.message);
+    }
+    const runtime = checkedRuntime.runtime;
+    const config = runtime.snapshot.config;
+    const builder = new ContextBuilder(
+      this.#options.store,
+      new ContextRefStore(this.#options.store, { ttlHours: config.agent.context.ref_ttl_hours }),
+      this.#options.systemResources.skills,
+    );
+    const stable = builder.buildSystemPrompt(
+      config,
+      builder.identity(config, id),
+      runtime.model.input.includes('image'),
+      { provider: runtime.model.provider, model: runtime.model.id },
+      {
+        imageInput: 'on_demand',
+        ...(this.#options.skillVisibility === undefined ? {} : { skillFilter: this.#options.skillVisibility }),
+      },
+    );
+    const context: InvocationContext = {
+      invocationId: id,
+      ...check.source,
+      systemPrompt: stable.systemPrompt,
+      userPrompt: '',
+      directImages: [],
+      visibleSenders: new Map(),
+      callerUserId: null,
+      completion: null,
+      omittedNewMessages: 0,
+    };
+    const registry = this.#options.toolDefinitions?.(context, config) ?? this.#defaultRegistry(context, config);
+    let scene: SceneContext;
+    try {
+      scene = buildSceneContext(this.#options.store, config, id, {
+        contextWindow: runtime.model.contextWindow,
+        maxOutputTokens: runtime.model.maxTokens,
+        toolDefinitionCharacters:
+          stable.systemPrompt.length + JSON.stringify(registry.tools.map(toolDefinition)).length,
+        supportsImages: runtime.model.input.includes('image') && this.#options.imageLoader !== undefined,
+        ...(beforeSendId === undefined ? {} : { beforeSendId: BigInt(beforeSendId) }),
+      });
+    } catch (error) {
+      if (error instanceof SceneSliceError) {
+        throw new ReplayError(error.code, error.message);
+      }
+      if (error instanceof Error && error.message.includes('unavailable')) {
+        throw new ReplayError('replay_scene_unavailable', 'The invocation has no retained public opening messages');
+      }
+      throw new ReplayError('replay_scene_invalid', 'The retained public chat scene is invalid or unsupported');
+    }
+    return { source: check.source, runtime, stable, scene, registry };
+  }
+
+  #defaultRegistry(context: InvocationContext, config: RawConfig): ReplayToolRegistry {
+    const blocked = async (): Promise<never> => {
+      throw new Error('No production executor is wired');
+    };
+    const send = createSendTool({
+      store: this.#options.store,
+      context,
+      api: { sendMessage: blocked, sendSticker: blocked },
+      capabilities: unavailableCapabilities(),
+      sendRateLimit: { sendsPerWindow: 1, windowSeconds: 1 },
+      maxTextLength: config.agent.send_max_text_length,
+      disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+      deadline: Number.MAX_SAFE_INTEGER,
+      bot: { id: 0n, displayName: '', username: null },
+    });
+    return {
+      tools: [
+        createReadTool({ store: this.#options.store, context, resources: this.#options.systemResources }),
+        send,
+        createExecuteTool({
+          capabilities: [],
+          audit: { start: () => ({ succeed: () => {}, fail: () => {} }), reject: () => {} },
+        }),
+      ].map(toolDefinition),
+      capabilities: [],
+    };
+  }
+
+  /** Finished source identity, independent of developer recording. */
   #checkSource(id: bigint): ReplayCheck {
-    const { orm } = this.#options;
+    const { orm } = this.#options.store;
     const source = orm
       .select({
         state: invocations.state,
@@ -539,51 +627,6 @@ export class ReplayRunner {
         ok: false,
         code: 'replay_source_unfinished',
         message: 'Replay requires a finished invocation',
-        call: null,
-      };
-    }
-    const call = orm
-      .select({
-        id: modelCalls.id,
-        input: modelCalls.replayInputJson,
-        provider: modelCalls.provider,
-        model: modelCalls.model,
-      })
-      .from(modelCalls)
-      .where(and(eq(modelCalls.invocationId, id), eq(modelCalls.role, 'agent')))
-      .orderBy(asc(modelCalls.id))
-      .limit(1)
-      .get();
-    if (call === undefined) {
-      return {
-        ok: false,
-        code: 'replay_no_agent_request',
-        message: 'The invocation has no agent model request to replay from',
-        call: null,
-      };
-    }
-    if (call.input === null) {
-      return {
-        ok: false,
-        code: 'replay_input_unavailable',
-        message:
-          'The first model request has no retained replay input; recording may have been disabled or payloads cleared',
-        call,
-      };
-    }
-    let parsed: ReturnType<typeof parseReplayInput>;
-    try {
-      parsed = parseReplayInput(call.input);
-      const last = parsed.messages.at(-1);
-      if (!isRenderable(parsed.messages) || (last?.role !== 'user' && last?.role !== 'toolResult')) {
-        throw new Error('Invalid starting history');
-      }
-    } catch {
-      return {
-        ok: false,
-        code: 'replay_input_invalid',
-        message: 'The retained replay input is invalid or unsupported',
-        call,
       };
     }
     return {
@@ -593,9 +636,6 @@ export class ReplayRunner {
         chatId: source.chatId,
         threadId: source.threadId,
       },
-      call,
-      input: parsed.input,
-      messages: parsed.messages,
     };
   }
 
@@ -603,9 +643,12 @@ export class ReplayRunner {
   #checkRuntime(source: ReplaySource): ReplayRuntimeCheck {
     const snapshot = this.#options.configStore.beginInvocation();
     const config: RawConfig = snapshot.config;
-    const chat = resolveChatConfig(config, this.#options.orm, source.chatId);
+    const chat = resolveChatConfig(config, this.#options.store.orm, source.chatId);
     if (chat === undefined) {
       return { ok: false, code: 'replay_chat_unconfigured', message: 'The source chat is no longer configured' };
+    }
+    if (chat.topic_ids !== undefined && !chat.topic_ids.some((topic) => BigInt(topic) === source.threadId)) {
+      return { ok: false, code: 'replay_topic_unconfigured', message: 'The source topic is no longer configured' };
     }
     const settings = resolveAgentSettings(config, chat);
     const model = snapshot.models.getModel(settings.provider, settings.model);

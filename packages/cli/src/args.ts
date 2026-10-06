@@ -15,6 +15,12 @@ const SIGNED_DECIMAL_PATTERN = /^-?\d{1,19}$/;
 const STATE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const TIMEOUT_PATTERN = /^\d{1,8}$/;
 
+/** `YYYY-MM-DD[ |T]HH:mm[:ss[.1-3f]][Z|±HH:mm]`; the offset is optional. */
+const TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?$/;
+const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
+
+export const MAX_SEARCH_LENGTH = 100;
+
 const OPTIONS = {
   endpoint: { type: 'string' },
   'api-key': { type: 'string' },
@@ -25,17 +31,23 @@ const OPTIONS = {
   cursor: { type: 'string' },
   state: { type: 'string' },
   chat: { type: 'string' },
+  search: { type: 'string' },
+  at: { type: 'string' },
+  from: { type: 'string' },
+  to: { type: 'string' },
   source: { type: 'string' },
   variant: { type: 'string' },
   'global-prompt': { type: 'string' },
   'group-prompt': { type: 'string' },
+  'before-send': { type: 'string' },
+  'confirm-paid': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const;
 
 // Telegram chat ids are negative; parseArgs would read a separate `-123` token
 // as a dangling option, so a negative numeric value is folded into `--opt=-123`.
 const NEGATIVE_NUMBER_PATTERN = /^-\d+$/;
-const NEGATIVE_VALUE_OPTIONS = new Set(['--chat', '--cursor', '--limit', '--timeout-ms']);
+const NEGATIVE_VALUE_OPTIONS = new Set(['--chat', '--cursor', '--limit', '--timeout-ms', '--before-send']);
 
 export type ConfigSource = 'active' | 'file';
 export type PromptScope = 'global' | 'group';
@@ -47,6 +59,10 @@ export interface ListCommand {
   readonly cursor: string | undefined;
   readonly state: string | undefined;
   readonly chat: string | undefined;
+  readonly search: string | undefined;
+  readonly at: string | undefined;
+  readonly from: string | undefined;
+  readonly to: string | undefined;
 }
 
 export interface GetCommand {
@@ -62,6 +78,7 @@ export interface PromptsCommand {
 export interface PreflightCommand {
   readonly kind: 'preflight';
   readonly id: string;
+  readonly beforeSendId: string | undefined;
 }
 
 export interface MediaCommand {
@@ -75,6 +92,7 @@ export interface ReplayCommand {
   readonly id: string;
   readonly globalPromptSource: string | undefined;
   readonly groupPromptSource: string | undefined;
+  readonly beforeSendId: string | undefined;
 }
 
 export interface ConfigShowCommand {
@@ -137,6 +155,12 @@ interface StringFlags {
   readonly cursor: string | undefined;
   readonly state: string | undefined;
   readonly chat: string | undefined;
+  readonly search: string | undefined;
+  readonly at: string | undefined;
+  readonly from: string | undefined;
+  readonly to: string | undefined;
+  readonly 'before-send': string | undefined;
+  readonly 'confirm-paid': boolean | undefined;
 }
 
 type FlagName = keyof StringFlags;
@@ -150,8 +174,24 @@ const INSPECTION_FLAGS: readonly FlagName[] = [
   'variant',
   'global-prompt',
   'group-prompt',
+  'search',
+  'at',
+  'from',
+  'to',
+  'before-send',
 ];
 const PROMPT_PART_FLAGS: readonly FlagName[] = ['global-prompt', 'group-prompt'];
+/** `invocation list` time filters; every other subcommand rejects them. */
+const TIME_FILTER_FLAGS: readonly FlagName[] = ['search', 'at', 'from', 'to'];
+/** Only `invocation preflight` and `invocation replay` accept `--before-send`. */
+const PREFLIGHT_REJECTED_FLAGS: readonly FlagName[] = INSPECTION_FLAGS.filter((flag) => flag !== 'before-send');
+/**
+ * Only `invocation replay` accepts `--confirm-paid`: a sliced replay
+ * (`--before-send`) is a real, billed model call, so the acknowledgement is
+ * meaningful nowhere else — every read-only subcommand rejects it, and the
+ * replay itself refuses a slice without it before any prompt read or request.
+ */
+const CONFIRM_PAID_FLAGS: readonly FlagName[] = ['confirm-paid'];
 
 export function parseCli(argv: readonly string[]): ParsedCli {
   const parsed = parseArgsStrict(argv);
@@ -171,6 +211,12 @@ export function parseCli(argv: readonly string[]): ParsedCli {
       cursor: parsed.values.cursor,
       state: parsed.values.state,
       chat: parsed.values.chat,
+      search: parsed.values.search,
+      at: parsed.values.at,
+      from: parsed.values.from,
+      to: parsed.values.to,
+      'before-send': parsed.values['before-send'],
+      'confirm-paid': parsed.values['confirm-paid'],
     } satisfies StringFlags,
   };
   return {
@@ -263,7 +309,7 @@ function parseCommand(positionals: readonly string[], flags: StringFlags): Comma
     if (positionals.length !== 1) {
       throw usageError('unexpected_argument', `${group} takes no positional arguments`);
     }
-    rejectUnsupportedFlags(flags, INSPECTION_FLAGS);
+    rejectUnsupportedFlags(flags, [...INSPECTION_FLAGS, ...CONFIRM_PAID_FLAGS]);
     if (group === 'doctor') {
       rejectUnsupportedFlags(flags, ['api-key-stdin']);
       return { kind: 'doctor' };
@@ -297,7 +343,17 @@ function parseConfigShow(
   if (rest.length > 0) {
     throw usageError('unexpected_argument', 'config show takes no positional arguments');
   }
-  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat', 'variant', ...PROMPT_PART_FLAGS]);
+  rejectUnsupportedFlags(flags, [
+    'limit',
+    'cursor',
+    'state',
+    'chat',
+    'variant',
+    ...PROMPT_PART_FLAGS,
+    ...TIME_FILTER_FLAGS,
+    'before-send',
+    ...CONFIRM_PAID_FLAGS,
+  ]);
   return { kind: 'config-show', source: parseSource(flags.source) };
 }
 
@@ -315,7 +371,16 @@ function parsePromptGet(subcommand: string | undefined, rest: readonly string[],
   if (extra.length > 0) {
     throw usageError('unexpected_argument', 'prompt get takes exactly one scope');
   }
-  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'variant', ...PROMPT_PART_FLAGS]);
+  rejectUnsupportedFlags(flags, [
+    'limit',
+    'cursor',
+    'state',
+    'variant',
+    ...PROMPT_PART_FLAGS,
+    ...TIME_FILTER_FLAGS,
+    'before-send',
+    ...CONFIRM_PAID_FLAGS,
+  ]);
   const source = parseSource(flags.source);
   if (scope === 'global') {
     if (flags.chat !== undefined) {
@@ -364,13 +429,24 @@ function parseList(rest: readonly string[], flags: StringFlags): ListCommand {
   if (rest.length > 0) {
     throw usageError('unexpected_argument', 'invocation list takes no positional arguments');
   }
-  rejectUnsupportedFlags(flags, ['source', 'variant', ...PROMPT_PART_FLAGS]);
+  rejectUnsupportedFlags(flags, ['source', 'variant', ...PROMPT_PART_FLAGS, 'before-send', ...CONFIRM_PAID_FLAGS]);
+  const at = parseTimeFilter(flags.at, 'at');
+  const from = parseTimeFilter(flags.from, 'from');
+  const to = parseTimeFilter(flags.to, 'to');
+  if (at !== undefined && (from !== undefined || to !== undefined)) {
+    throw usageError('invalid_time_range', '--at cannot be combined with --from or --to');
+  }
+  validateTimeRange(from, to);
   return {
     kind: 'list',
     limit: flags.limit === undefined ? undefined : parseLimit(flags.limit),
     cursor: flags.cursor === undefined ? undefined : parseDecimalId(flags.cursor, 'cursor', false),
     state: flags.state === undefined ? undefined : parseState(flags.state),
     chat: flags.chat === undefined ? undefined : parseDecimalId(flags.chat, 'chat', true),
+    search: parseSearch(flags.search),
+    at,
+    from,
+    to,
   };
 }
 
@@ -382,7 +458,7 @@ function parseGet(rest: readonly string[], flags: StringFlags): GetCommand {
   if (extra.length > 0) {
     throw usageError('unexpected_argument', 'invocation get takes exactly one id');
   }
-  rejectUnsupportedFlags(flags, INSPECTION_FLAGS);
+  rejectUnsupportedFlags(flags, [...INSPECTION_FLAGS, ...CONFIRM_PAID_FLAGS]);
   return { kind: 'get', id: parseDecimalId(id, 'id', false) };
 }
 
@@ -398,7 +474,11 @@ function parseIdOnly(
   if (extra.length > 0) {
     throw usageError('unexpected_argument', `invocation ${kind} takes exactly one id`);
   }
-  rejectUnsupportedFlags(flags, INSPECTION_FLAGS);
+  if (kind === 'preflight') {
+    rejectUnsupportedFlags(flags, [...PREFLIGHT_REJECTED_FLAGS, ...CONFIRM_PAID_FLAGS]);
+    return { kind, id: parseDecimalId(id, 'id', false), beforeSendId: parseBeforeSend(flags['before-send']) };
+  }
+  rejectUnsupportedFlags(flags, [...INSPECTION_FLAGS, ...CONFIRM_PAID_FLAGS]);
   return { kind, id: parseDecimalId(id, 'id', false) };
 }
 
@@ -410,7 +490,17 @@ function parseMedia(rest: readonly string[], flags: StringFlags): MediaCommand {
   if (extra.length > 0) {
     throw usageError('unexpected_argument', 'invocation media takes exactly one id');
   }
-  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat', 'source', ...PROMPT_PART_FLAGS]);
+  rejectUnsupportedFlags(flags, [
+    'limit',
+    'cursor',
+    'state',
+    'chat',
+    'source',
+    ...PROMPT_PART_FLAGS,
+    ...TIME_FILTER_FLAGS,
+    'before-send',
+    ...CONFIRM_PAID_FLAGS,
+  ]);
   return {
     kind: 'media',
     id: parseDecimalId(id, 'id', false),
@@ -426,15 +516,27 @@ function parseReplay(rest: readonly string[], flags: StringFlags): ReplayCommand
   if (extra.length > 0) {
     throw usageError('unexpected_argument', 'invocation replay takes exactly one id');
   }
-  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat', 'source', 'variant']);
+  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat', 'source', 'variant', ...TIME_FILTER_FLAGS]);
   if (flags['global-prompt'] === '-' && flags['group-prompt'] === '-') {
     throw usageError('conflicting_prompt_input', 'only one of --global-prompt and --group-prompt can read from stdin');
+  }
+  const beforeSendId = parseBeforeSend(flags['before-send']);
+  // A slice rebuilds a real window and replays it against the current model,
+  // so it is billed; refuse it here — before any prompt read or HTTP request —
+  // unless the operator explicitly acknowledged the cost. An unsliced replay
+  // keeps its pre-existing behavior and never requires the flag.
+  if (beforeSendId !== undefined && flags['confirm-paid'] !== true) {
+    throw usageError(
+      'confirm_paid_required',
+      'invocation replay --before-send requires --confirm-paid to confirm the billed model call',
+    );
   }
   return {
     kind: 'replay',
     id: parseDecimalId(id, 'id', false),
     globalPromptSource: flags['global-prompt'],
     groupPromptSource: flags['group-prompt'],
+    beforeSendId,
   };
 }
 
@@ -475,6 +577,155 @@ function parseLimit(text: string): number {
     throw usageError('invalid_limit', `limit must be between 1 and ${MAX_PAGE_LIMIT}`);
   }
   return limit;
+}
+
+function parseSearch(text: string | undefined): string | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  if (text.length === 0 || text.length > MAX_SEARCH_LENGTH) {
+    throw usageError('invalid_search', `search must be 1 to ${MAX_SEARCH_LENGTH} characters`);
+  }
+  return text;
+}
+
+function parseTimeFilter(text: string | undefined, label: TimeLabel): string | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  if (parseTimeValue(text) === undefined) {
+    throw usageError(
+      `invalid_${label}`,
+      `${label} must be a valid date-time: YYYY-MM-DD[ |T]HH:mm[:ss[.1-3 digits]][Z|±HH:mm]`,
+    );
+  }
+  return text;
+}
+
+type TimeLabel = 'at' | 'from' | 'to';
+
+interface ParsedTime {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+  readonly hour: number;
+  readonly minute: number;
+  readonly second: number;
+  readonly millisecond: number;
+  /** Minutes east of UTC; undefined when the value carries no explicit offset. */
+  readonly offsetMinutes: number | undefined;
+}
+
+function parseTimeValue(text: string): ParsedTime | undefined {
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fractionText, offsetText] =
+    TIME_PATTERN.exec(text) ?? [];
+  if (
+    yearText === undefined ||
+    monthText === undefined ||
+    dayText === undefined ||
+    hourText === undefined ||
+    minuteText === undefined
+  ) {
+    return undefined;
+  }
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  if (year < 1000 || month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
+    return undefined;
+  }
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = secondText === undefined ? 0 : Number(secondText);
+  if (hour > 23 || minute > 59 || second > 59) {
+    return undefined;
+  }
+  const offsetMinutes = offsetText === undefined ? undefined : parseOffsetMinutes(offsetText);
+  if (offsetText !== undefined && offsetMinutes === undefined) {
+    return undefined;
+  }
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond: fractionText === undefined ? 0 : Number(fractionText.padEnd(3, '0')),
+    offsetMinutes,
+  };
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2 && isLeapYear(year)) {
+    return 29;
+  }
+  return MONTH_DAYS[month - 1] ?? 0;
+}
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function parseOffsetMinutes(text: string): number | undefined {
+  if (text === 'Z') {
+    return 0;
+  }
+  const hours = Number(text.slice(1, 3));
+  const minutes = Number(text.slice(4, 6));
+  // The Admin API accepts real zone offsets only: -14:00 through +14:00.
+  if (hours > 14 || minutes > 59 || hours * 60 + minutes > 14 * 60) {
+    return undefined;
+  }
+  return (text.startsWith('-') ? -1 : 1) * (hours * 60 + minutes);
+}
+
+/**
+ * Two values are only comparable here when both carry an explicit offset. A
+ * value without one is interpreted by the server against the active chat
+ * timezone (or the global default), so the CLI must not guess an order for it.
+ * The server requires `from < to`; an empty or inverted range is rejected by
+ * both layers with the same code.
+ */
+function validateTimeRange(fromText: string | undefined, toText: string | undefined): void {
+  if (fromText === undefined || toText === undefined) {
+    return;
+  }
+  const from = parseTimeValue(fromText);
+  const to = parseTimeValue(toText);
+  if (from === undefined || to === undefined) {
+    return;
+  }
+  if (from.offsetMinutes === undefined || to.offsetMinutes === undefined) {
+    return;
+  }
+  if (timeToEpochMs(to) <= timeToEpochMs(from)) {
+    throw usageError('invalid_time_range', '--from must be earlier than --to when both carry an explicit offset');
+  }
+}
+
+function timeToEpochMs(value: ParsedTime): number {
+  const date = new Date(0);
+  // setUTCFullYear keeps four-digit years (including years below 100) exact,
+  // unlike the Date constructor's 1900-based two-digit year handling.
+  date.setUTCFullYear(value.year, value.month - 1, value.day);
+  date.setUTCHours(value.hour, value.minute, value.second, value.millisecond);
+  return date.getTime() - (value.offsetMinutes ?? 0) * 60_000;
+}
+
+function parseBeforeSend(text: string | undefined): string | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  if (!DECIMAL_PATTERN.test(text)) {
+    throw usageError('invalid_before_send', 'before-send must be a positive signed 64-bit decimal integer');
+  }
+  const value = BigInt(text);
+  if (value < 1n || value > MAX_SIGNED_64) {
+    throw usageError('invalid_before_send', 'before-send must be a positive signed 64-bit decimal integer');
+  }
+  // The Admin API compares the canonical decimal form, so `0042` addresses `42`.
+  return value.toString();
 }
 
 function parseDecimalId(text: string, label: 'id' | 'cursor' | 'chat', allowNegative: boolean): string {
