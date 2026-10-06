@@ -22,7 +22,8 @@ pnpm test test/image-agent.test.ts test/image-delivery.test.ts test/image-delive
 pnpm test test/agent-runtime.test.ts test/model-request-audit.test.ts
 pnpm test test/typing.test.ts test/context-hot-inject.test.ts
 pnpm test test/admin-developer.test.ts
-pnpm test test/admin-api-keys.test.ts test/invocation-cli.test.ts
+pnpm test test/admin-api-keys.test.ts test/admin-inspection.test.ts test/admin-invocation-media.test.ts
+pnpm test test/invocation-cli.test.ts test/cli-inspection.test.ts test/cli-media.test.ts
 pnpm test test/cli-credentials.test.ts test/cli-login.test.ts test/cli-login-http.test.ts
 pnpm test test/npm-release.test.ts
 pnpm test test/docs-examples.test.ts test/docs-search.test.ts test/docs-markdown.test.ts
@@ -65,27 +66,31 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `context-send.test.ts` | Context 可见性、Reply capability、滑动窗口内的 `send` 速率限制与 `send_rate_limited` 审计、未知网络结果不重试、abort/过期不发送、429 等待后命中屏障不重试、已接受的发送在落库失败时仍为成功 |
 | `image-delivery.test.ts` / `image-delivery-runtime.test.ts` | 图片按 Conversation/generation/asset 去重、跨 Invocation/重启有效、已送成功 no-op 的审计/限流/屏障与 canonical send 计数、后续新增输出、显式重发与完成轮限制、并发 pending/未知结果保护、回执 `image_delivery` 三类互斥且未知优先、无法证明集合的旧发送整代保守拒绝、权限与过期引用；工具链先发送后注入回执的真实 Faux 回归及普通回执不受影响 |
 | `cut-topic.test.ts` | `/cut_topic` 切点排除命令消息及更早历史、切点只前移、按 Chat 与 Forum Topic 隔离、非管理员拒绝、重建服务后仍生效、同时清空该 Conversation 的 Conversation Context、中断仍持有切点前 transcript 的运行 |
-| `agent-runtime.test.ts` | 按 Conversation 播种的 Agent、Tool 循环、每批注入的 turn 预算、transcript 隔离与工具可见性审计 |
+| `agent-runtime.test.ts` | 按 Conversation 播种的 Agent、Tool 循环、每批注入的 turn 预算、transcript 隔离与工具可见性审计、replay 快照写入失败仍保持 Invocation 可审计且日志只含标识与错误码 |
 | `chat-model-runtime.test.ts` | 按 Chat 解析模型覆盖（覆盖生效、缺省逐项继承全局、仅 `thinking_level` 覆盖时重绑缓存 Agent）、Topic 共用 Chat 设置、群迁移解析迁移前 Chat 配置且直接配置的新 ID 优先、跨 Provider 切换保留未变的 Context 与模型审计、queued→running 用当前快照而下一次 Invocation 才用新值、Chat 选用的 Agent 模型具备 image 能力时启用对应图片提示 |
 | `skills.test.ts` | Skill 索引注入 system prompt、原语不经 execute、`execute` search/help/call、`{text, refs}` 封套驱动 `search_stickers → send` 贴纸链路、记忆经 execute 写入、原语/未知能力拒绝的审计、已 abort 的运行不 dispatch 能力 |
 | `system-resources.test.ts` | Skill manifest 校验与启动失败、插件 Skill 目录挂载与重名拒绝、`system:///` 绝对/相对 URI 解析、越界与非 Markdown 拒绝、32 KiB 截断、progressive disclosure fixture |
 | `plugins.test.ts` | 插件 id 校验与重名拒绝、内置插件清单装配 |
 | `model-request-audit.test.ts` | `request_json` 中 inline base64 图片被结构化摘要替换、其余请求数据保留、重复清洗幂等 |
 | `admin-developer.test.ts` | 旧配置缺省关闭、显式开关与 JSONC 持久化/热应用、权限/Origin/revision/类型校验、应用失败后文件与运行态分离、分批清除只置空报文（含 replay 快照）且保留审计/关联/统计、重复清除与并发写入 |
-| `admin-api-keys.test.ts` | 一次性 `pwk_` 明文与 SHA-256 存储、Session-only 管理边界（TypeBox、Bearer 不能管理密钥）、撤销立即生效且保留元数据、Bearer 只覆盖 invocation list/get/replay（其它审计、写端点与未知路由 403）、Authorization 存在时不回退 Cookie、replay 端点只接受 `system_prompt`（空串合法、64Ki 字符与 256 KiB body 上限）、engine 错误映射与失败脱敏、malformed Origin 返回 400 而非 500 且 Origin 只守写 |
-| `invocation-cli.test.ts` | `plasticwan-utils` 的 list/get/replay 请求形状与输出契约、`--api-key` 覆盖环境变量、replay 失败仍保留 stdout 文档、退出码、重定向/超时/超大响应拒绝、stdin 无 EOF（空流或部分输入）超时后非零退出且无 HTTP 请求、参数与端点校验、任何输出（含服务端回显与 JSON 转义形式）都不泄露 key |
+| `admin-api-keys.test.ts` | 一次性 `pwk_` 明文与 SHA-256 存储、Session-only 管理边界（TypeBox、Bearer 不能管理密钥）、撤销立即生效且保留元数据、Bearer 只覆盖 inspection 读取（config view、global/group prompts、invocation prompts/replay-preflight/media）与 invocation list/get/replay（其它审计、写端点与未知路由 403）、Authorization 存在时不回退 Cookie、replay 端点只接受 `global_prompt`/`group_prompt`（每层 65536 字符上限、`global_prompt` 不能为空、`system_prompt` 拒绝、body 上限 1 MiB）、engine 错误映射与失败脱敏、malformed Origin 返回 400 而非 500 且 Origin 只守写 |
+| `admin-inspection.test.ts` | 配置与 prompt 检查视图是显式脱敏投影（key 与 Session 共用、不改配置、不调用模型）：config view 只回 Provider header 名称与 Chat 的 `group_prompt_configured`，Secret、路径与 prompt 正文不出现在响应；`prompts/global\|group` 回 `scope`、`prompt` 与 `core_read_only`，`source=active\|file` 互不代替；Chat 迁移后 `chat_id` 与 `configured_chat_id` 可分辨；非法 source、重复参数、path 参数与越界或重复 chat/id 返回 400，未配置 chat 404，未鉴权 401，未知路由与写请求 403；invocation prompts 与 replay-preflight 经密钥脱敏且不发模型请求；媒体内容在鉴权后按 `variant` 读取，未知媒体 404、越界 id 400，original 字节保真并以 attachment + nosniff 提供 |
+| `admin-invocation-media.test.ts` | 快照授权媒体列表与字节读取：只列快照显式授权、属于同一 Conversation 且指向快照 revision 的媒体，不泄露 file ID、Telegram JSON 或 Telegram message ID，size 不能精确往返时为 null；快照不可解析或缺 ID 为 409 `snapshot_invalid`、未知为 404；original 透传白名单 MIME、preview 仅 photo/sticker 且走共享规范化管线；授权与超限检查先于下载；同一进程单飞（429 `media_busy`，元数据列表不占槽位）；20 MiB 上限映射 413，60 秒读取预算在下载或读回检查点映射 504，请求中止 499，上游失败 502；getFile 挂起时中止立即释放槽位（后续读取再次进入而非 429），超时后槽位与临时目录释放且可再次成功读取；退出时以 `rm` 有界重试清理目录，确定性 mock 验证瞬时失败吸收、持续失败返回 500 `media_cleanup_failed`（优先于成功/失败读取、不泄漏原始错误或路径）且单飞槽位释放；真实 Windows 文件锁重试尚需实测 |
+| `invocation-cli.test.ts` | `plasticwan-utils` 的 list/get/replay 请求形状与输出契约、`--api-key` 覆盖环境变量、replay 先走 preflight（不可用或带覆盖而记录不支持时不发 POST）、`--global-prompt`/`--group-prompt` 从文件或 stdin 读取并在发请求前拒绝空 global 与超长、replay 失败仍保留 stdout 文档、退出码、重定向/超时/超大响应拒绝、stdin 无 EOF（空流或部分输入）超时后非零退出且无 HTTP 请求、参数与端点校验、任何输出（含服务端回显与 JSON 转义形式）都不泄露 key |
+| `cli-inspection.test.ts` | `config show`（默认 `source=active`、`--source file`、`--json`）、`prompt get global\|group`（含 `--chat`）与 `invocation prompts\|preflight` 的请求路径、查询与输出校验（config/prompt 响应形状不符或 scope 不匹配返回 `invalid_response`）；`invocation replay` 先探 preflight：不可用按 reason 非零退出且不发 POST，带覆盖而记录不支持同样不 POST，无覆盖仍发空 body；新端点回显 key 时 stdout 脱敏且 JSON 不破坏；未知或错位子命令/参数在发请求前以退出码 2 拒绝，`--help` 列出新命令且不出现 `--system-prompt` |
+| `cli-media.test.ts` | `invocation media` 顺序下载到一次性目录并写与 stdout 一致的 manifest（sha256、bytes、绝对路径；文件名由 id 与 MIME 推导并忽略远端名，未知字段不复制）；前导零 id 规范化；原始字节含测试 key 时不做文本脱敏且 sha256 对应落盘内容，manifest 仍脱敏；variant 不支持时该条目记为 `variant_not_available` 后整体失败；33 条与声明总量超限在下载前拒绝、单文件与流式超限不留下半文件且清理目录、累计 100 MiB 预算耗尽时中止当前条目并保留部分 manifest；重定向、停滞与未确认 variant 记为条目失败；成功文件与脱敏 manifest 在部分失败时保留 |
 | `cli-credentials.test.ts` | 凭据文件固定路径（忽略 XDG，Windows 同样在 `~/.config/plasticwan-utils/`）与仅含 `{endpoint,apiKey}` 的结构、端点规范化与不安全 endpoint 拒绝、POSIX `0700`/`0600`（更窄亦可）与符号链接/不安全权限拒绝、序列化超出 16384 字节时不创建目录或改写旧凭据、写入失败不覆盖旧凭据且读写错误不泄露文件内容、解析顺序（明确参数 > 环境变量 > 保存文件）、显式 endpoint 不与文件 key 混用（不同 endpoint 且未显式给 key 报 `missing_api_key`）、明确成对来源齐全时不读文件、参数与环境变量不写回文件 |
 | `cli-login.test.ts` | 交互式逐项提示 endpoint 与隐藏输入的 key（无明确参数/环境变量时要求 TTY）、非交互 `--endpoint`+`--api-key` 或环境变量、`--api-key-stdin` 读取至 EOF、最多 4098 字节且仅去掉一次尾部 LF/CRLF（不是 `--api-key -`）、输入超时/中断/EOF 取消并恢复终端、空环境值不回退、任意短 key 的脱敏不破坏 JSON 结构、`login --json` 输出 `{status:"saved",endpoint,credentials_file}` 且不含 key、不访问服务器、失败不覆盖旧凭据 |
 | `cli-login-http.test.ts` | 凭据文件驱动的 doctor 真实 HTTP 链路：`GET /api/invocations?limit=1` 验证连通与鉴权、成功输出 `{status:"ok",endpoint,credential_sources}` 与退出码 0、凭据值缺失或不合法退出码 2、文件校验或请求失败退出码 1、不输出 Invocation 正文、不调用模型/不发送 Telegram/不重试、鉴权仍更新 key 的 `last_used_at` |
 | `npm-release.test.ts` | main canary 版本含 run/attempt/SHA、仅精确稳定 tag 进入 latest、拒绝非 push/其它仓库与非法 ref、GitHub 输出不改源码 manifest、仅独立 CLI 包公开、Skill 分发清单与入口/子文档/元数据结构 |
 | `docs-examples.test.ts` / `docs-search.test.ts` / `docs-markdown.test.ts` | 公开配置示例的离线语义校验、生成字段与部署 URL、已安装搜索组件的键盘回归；Markdown 检查正确区分缩进代码块与真实 H1，LF/CRLF 下不漏提取代码块 |
-| `replay-input.test.ts` | 快照编解码往返（含 tool call 与 tool result）、内联图片丢弃与计数、版本与重复定义拒绝、快照随 Invocation 级联与无 Invocation model call 的保留窗口一起删除 |
+| `replay-input.test.ts` | 快照编解码往返（含 tool call、tool result 与两层 prompt）、内联图片丢弃与计数、版本与重复定义拒绝、层无法重现 system prompt 的 v2 快照拒绝、快照随 Invocation 级联与无 Invocation model call 的保留窗口一起删除 |
 | `replay-tools.test.ts` | 合成 send（text/image/sticker）与参数保留、内存记忆/闹钟（空起步）、`image_generate` 假回执、`zzz` 不写全局状态、`read` 只读当前 `system:///` 并拒绝越界、未知顶层工具与 MCP 全部 blocked、`execute` 拒绝原语与无生产执行器、search/help 限快照注册表、abort 后不再 dispatch、工具层不引入生产接线 |
-| `replay.test.ts` | 首个请求的历史输入 + 当前模型、无生产写入、空 system prompt 覆盖与无 send 成功、来源守卫（未完成/缺快照/非法历史/不回退后续调用）、从 toolResult 尾部续跑、共享模型闸门与并发 429、关停与取消释放、context/turn/tool/trace/wall-clock 预算、脱敏覆盖任意参数键名与 dispatch 元数据 |
-| `replay-http.test.ts` | CLI 子进程 → 回环 AdminServer → ReplayRunner → Faux Provider 的真实 HTTP 链路，覆盖 Prompt 覆盖、当前模型、合成 send/记忆/Alarm、MCP 阻断、生产表不变（密钥使用时间除外）、缺失快照的 409/非零退出与撤销密钥的 401 |
-| `media.test.ts` | 图片标准化、缓存和 Vision reasoning、换 vision 模型后按新 `analysis_version` 重新分析 |
+| `replay.test.ts` | 首个请求的历史输入 + 当前模型、无生产写入、v2 按记录层逐字节重构成 system prompt（固定段原样、global/group 两层覆盖互不影响）、v1 记录只能原样重放（覆盖与分层读取 409 `replay_prompt_parts_unavailable`）、空/仅注释 global 与 NUL/BOM/未知模板/超长覆盖被拒、prompt 变量值钉在快照上、无 send 成功、来源守卫（未完成/缺快照/非法历史/不回退后续调用）、从 toolResult 尾部续跑、共享模型闸门与并发 429、关停与取消释放、context/turn/tool/trace/wall-clock 预算、脱敏覆盖任意参数键名与 dispatch 元数据 |
+| `replay-http.test.ts` | CLI 子进程 → 回环 AdminServer → ReplayRunner → Faux Provider 的真实 HTTP 链路，覆盖 Prompt 覆盖、当前模型、合成 send/记忆/Alarm、MCP 阻断、preflight 与 recorded prompts 只读读取不调用模型、生产表不变（密钥使用时间除外）、缺失快照的 409/非零退出与撤销密钥的 401 |
+| `media.test.ts` | 图片标准化、缓存和 Vision reasoning、换 vision 模型后按新 `analysis_version` 重新分析；下载客户端把 content-length 与流式超限统一类型化为 `MediaTooLargeError`，并在 `getFile` 挂起时立即中止而迟到响应不写文件 |
 | `stickers.test.ts` | Set 同步、结构化视觉 Tool Call、索引、搜索、发送 |
-| `media-image.test.ts` | 视频 Sticker 只按 WebM 解码（其他容器冒充时拒绝）、真实 WebM 仍能取帧、解压超过 8 MiB 的 TGS 在转换前拒绝；本机没有 ffmpeg/ffprobe 时整组跳过 |
+| `media-image.test.ts` | 视频 Sticker 只按 WebM 解码（其他容器冒充时拒绝）、真实 WebM 仍能取帧、解压超过 8 MiB 的 TGS 在转换前拒绝；预取消或下载后立即取消均不启动 ffprobe/ffmpeg/Lottie；本机没有 ffmpeg/ffprobe 时仅视频取帧组跳过，TGS 与取消回归仍运行 |
 | `mcp.test.ts` | stdio/HTTP transport、策略、Header、重定向和审计、发现 Tool 失败时关闭 stdio 子进程、连接中 `stop()` 后保持 stopped 且关闭子进程 |
 | `web-fetch.test.ts` | 有界不可信文本结果与审计、公网 IPv4 放行与 IPv4 映射字面量拒绝、私网/合成地址拒绝（含跳转目标）、fake-ip 网段默认拒绝且需 `allow_proxy_synthetic_addresses` 开启、6to4/Teredo 过渡地址拒绝、`dangerously_allow_all_ip_addresses` 从配置到插件生效并放行私网/环回/跳转目标但仍拒绝非默认端口、默认 `Accept` 优先 `text/markdown` 且站点 Markdown 原样返回、`raw` 与 `accept_markdown: false` 不声明 Markdown、HTML 默认转 Markdown（正文在 32 KiB 之后仍保留、去导航/脚本/图片）、`raw` 返回原始 HTML、Markdown 按 UTF-8 边界截断、转换不发任何网络请求 |
 | `operations.test.ts` | Retention、备份轮换、Scheduler 关闭 |
@@ -104,12 +109,12 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `task-context.test.ts` | receipt opening 与后续普通注入的 canonical history/context refs/model audit、不可信数据边界、caller 清空、mention/bypass 不泄漏到普通批次、mention 仅首次成功文本发送、冻结预算豁免及 turn/send/context/wall-clock 限制 |
 | `task-hot-injection.test.ts` | 同一运行的多 receipt 等工具链结束后逐条独立注入、receipt 不触发 send barrier、独立 checkpoint/mention、idle grace 唤醒并正常完成、模型失败时未消费回执重排、`/pause`/Admin cancel 防止回执复活、跨回执与普通批次的 caller/budget/zzz 恢复 |
 | `alarm.test.ts` / `alarm-context.test.ts` | Alarm 输入与 ownership、列表/取消四态、canonical context_messages 保存与跨 Invocation/重启复用、checkpoint GC/话题清空遗忘、send 不泄漏、Admin 投影、pending/claimed 保留与终态 retention |
-| `prompt-template.test.ts` | Prompt 模板白名单变量渲染、未知与格式错误表达式拒绝 |
+| `prompt-template.test.ts` | Prompt 模板白名单变量渲染、未知与格式错误表达式拒绝、四层按序拼装并丢弃空段、replay 覆盖的注释剥离与 NUL/BOM/未知变量/超长/空 global 拒绝 |
 | `prompt-markdown.test.ts` | HTML 注释剔除、纯注释行移除、跨行注释与未闭合注释保留 |
 | `tui-configure.test.ts` | `configure` 向导输出可被 `loadConfig` 接受、非法配置不落盘、会话期间被改过的文件不被覆盖、models.dev 能力/费用映射、Provider `/models` 拉取与去重、CLI 参数与 `--output-agent-prompt` 解析 |
 | `apps/admin-next/src/lib/*.test.ts` | Admin 前端纯函数：错误文本、记忆 TTL 边界、Invocation 时间线排序与 send 参数解析 |
 
-跨模块改动完成后运行全部测试与 TypeScript 检查。
+跨模块改动完成后运行全部测试与 TypeScript 检查。最终验收前先冻结源码与测试树，禁止并发创建、编辑或删除临时 `*.test.ts` 探针：Vitest 的发现和加载分开进行，发现后删除会令整轮以缺模块失败；临时探针应在全量发现前移除，或放在 include 之外单独执行。
 
 ## 配置验证
 
@@ -234,7 +239,7 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
      跨站 Origin 的写请求返回 403 `bad_origin`。
   9. Chats：字符串 ID 安全整数边界、新增 Chat 热应用、删除与 Topic 范围的保存/运行态分离、模型/thinking 热切与恢复继承、
      后台 refetch 不升级编辑和删除确认的原始 revision、保存后应用失败的双视图刷新与 Settings 恢复、移动端暗色布局。
-  10. API key（`14-api-keys.e2e.ts` 的 API 用例，API-only、自带登录，可单独运行）：Session 创建只返回一次明文与 `prefix`，列表不回显明文；Bearer 覆盖 invocation list 与详情，其它路由（即使同时带 Cookie）403；撤销立即 401 且列表保留 `revoked_at`；`Authorization` 存在时不回退 Cookie；未接线的 replay 返回 503 `replay_unavailable`。
+  10. API key（`14-api-keys.e2e.ts` 的 API 用例，API-only、自带登录，可单独运行）：Session 创建只返回一次明文与 `prefix`，列表不回显明文；Bearer 覆盖 invocation list/详情与 active/file 的 config view、global/group prompts，其它审计与管理路由（即使同时带 Cookie）403；撤销立即 401 且列表保留 `revoked_at`；`Authorization` 存在时不回退 Cookie；未接线的 replay 返回 503 `replay_unavailable`。
   11. API keys 页面：`01-routes.e2e.ts`（共享 Session，筛选运行时需同时包含 `00-auth`）断言 `/api-keys` 深链接渲染标题、`Create API key` 与 Name/Prefix/Created/Last used/Status/Actions 列头；`14-api-keys.e2e.ts` 的 `API key management UI`（注入上方 API 登录的 Session Cookie，可单独运行）断言：侧栏 Manage → API keys 进入页面；创建弹窗 Name `maxlength=80`，成功后一次性 **Save your API key** 弹窗显示可复制的明文，`Copy API key` 的复制值正确（拦截 clipboard，不写系统剪贴板），Web Storage 无 `pwk_` 明文；Done/Escape、刷新、历史导航与会话过期后 DOM 和表单 value 均无明文，刷新后行内只保留元数据（前缀、Active、Never used）；Revoke 确认框取消不发 DELETE、确认后同一 key 立即 401 且状态 Revoked、按钮消失；列表失败显示错误与 Retry 且不伪造行，空白名称不发请求，创建失败在弹窗内联显示并禁止进行中重复提交，撤销失败留在确认框（Working… 禁用两端按钮）；窄屏暗色无整页横向溢出。该套件关闭 trace、截图、视频与失败时的 ARIA 页面快照，所有密钥值断言只输出布尔结果，避免失败产物泄漏明文。
 
 - 首次运行 E2E 前需要 `pnpm --filter plasticwan-admin-next exec playwright install chromium`；浏览器安装失败时套件无法

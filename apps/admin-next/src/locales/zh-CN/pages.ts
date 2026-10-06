@@ -216,7 +216,7 @@ export const pages: typeof pagesEn = {
   apiKeys: {
     title: 'API 密钥',
     description:
-      '密钥允许 plasticwan-utils 客户端查询、查看和重放 Invocation，不能修改配置或管理密钥。重放会调用模型，可能产生费用。',
+      '密钥允许 plasticwan-utils 客户端查询和查看 Invocation、读取脱敏配置与全局/群 Prompt、导出快照授权媒体，并使用临时 Prompt 覆盖进行重放，不能修改生产 Prompt、配置或管理密钥。重放会调用模型，可能产生费用。',
     create: '创建 API 密钥',
     name: '名称',
     prefix: '前缀',

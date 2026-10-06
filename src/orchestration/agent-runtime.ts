@@ -39,7 +39,7 @@ import type { SecretStore } from '../platform/secrets.ts';
 import type { SystemResources, SystemSkill } from '../platform/system-resources.ts';
 import { applyToolSchemaKeywords } from '../platform/tool-schema.ts';
 import { resolveChatConfig, type SqliteStore } from '../store/database.ts';
-import { serializeReplayInput } from '../store/replay-input.ts';
+import { ReplayInputSerializationError, serializeReplayInput } from '../store/replay-input.ts';
 import { createToolAudit } from '../store/tool-audit.ts';
 import {
   agentMessages,
@@ -612,12 +612,17 @@ export class AgentRuntime {
               replayInputJson: serializeReplayInput(
                 modelContext,
                 executableCapabilities.map((entry) => entry.tool),
+                { layers: stable.promptLayers, templateValues: stable.templateValues },
               ),
             })
             .where(eq(modelCalls.id, callId))
             .run();
-        } catch {
-          // An unrepresentable snapshot must not interrupt a live invocation.
+        } catch (error) {
+          // A snapshot that cannot reproduce the recorded prompt is not worth
+          // keeping, but the failure must be visible. The payload can carry
+          // conversation text, so the event records identifiers and a failure
+          // code only — never the error message or the content.
+          this.#logReplayInputSerializationFailure(invocationId, callId, error);
         }
       }
       firstModelRequest = false;
@@ -1238,6 +1243,28 @@ export class AgentRuntime {
       );
     } catch {
       // A failing log line must never replace the error it was meant to explain.
+    }
+  }
+
+  /**
+   * The replay snapshot is recorded best-effort, and a silent failure used to be
+   * invisible. The payload can carry conversation text, so this event records
+   * only identifiers and the failure class: never the message, never the content.
+   */
+  #logReplayInputSerializationFailure(invocationId: bigint, modelCallId: bigint, error: unknown): void {
+    try {
+      console.log(
+        JSON.stringify({
+          event: 'replay_input_serialize_failed',
+          invocation_id: invocationId.toString(),
+          model_call_id: modelCallId.toString(),
+          error_name: error instanceof Error ? error.name : typeof error,
+          reason: error instanceof ReplayInputSerializationError ? error.code : 'serialization_failed',
+          at: new Date().toISOString(),
+        }),
+      );
+    } catch {
+      // A failing log line must never interrupt a live invocation.
     }
   }
 

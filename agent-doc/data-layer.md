@@ -119,7 +119,7 @@ Alarm 是 `plugin_id = 'alarm'` 的任务投影。`long_tasks.created_by_user_id
 
 仅在 `developer.record_model_payloads = true` 时保存模型调用的原始报文快照，缺省关闭。`model_calls.request_json` 不复制 `data:image/*;base64,...` 图片正文；对应字符串替换为包含 MIME、Base64 字符数、解码字节数与 SHA-256 的结构化摘要，真实 Provider 请求不受影响。现有 `response_json` 捕获的是 HTTP status 快照，并非完整流式响应体。关闭仅跳过这些调试快照，正常模型调用、工具、usage、费用、状态与错误审计照常记录；旧快照不自动删除。
 
-同一开关还保存**重放输入快照**：`model_calls.replay_input_json`（迁移 `029`）在本次运行**首个** agent model request 发出前写入，内容是 provider 无关的文本快照（system prompt、编码后的消息序列、当次请求的工具与能力定义、被丢弃的内联图片数）；不含图片正文；序列化失败时不写入且不打断运行。它不是 `request_json` 的别名：重放只读这一列，缺快照时显式失败，不会回退到 `request_json`、后续请求或当前 Context（见 [admin-panel.md](admin-panel.md#invocation-重放)）。
+同一开关还保存**重放输入快照**：`model_calls.replay_input_json`（迁移 `029`）在本次运行**首个** agent model request 发出前写入，内容是 provider 无关的文本快照（system prompt、编码后的消息序列、当次请求的工具与能力定义、被丢弃的内联图片数）；不含图片正文；序列化失败时不写入且不打断运行。新记录为版本 2，额外保存 `prompt_parts`（固定 prefix/middle 段与配置的 global/group 原始模板，以及 agent/vision/timezone 渲染变量值）；写入与解析都用 `composeAgentPrompt` 校验它逐字重建 `system_prompt`，不一致的记录不可用。版本 1 旧记录仍有原样重放能力，但没有分层信息：分层读取与 prompt 覆盖显式返回 `replay_prompt_parts_unavailable`。它不是 `request_json` 的别名：重放只读这一列，缺快照时显式失败，不会回退到 `request_json`、后续请求或当前 Context（见 [admin-panel.md](admin-panel.md#invocation-重放)）。
 
 Developer 清除端点按主键范围分批把 `model_calls.request_json` / `response_json` / `replay_input_json` 置为 `NULL`，不删除行、不改变关联或 retention，也不触碰 `telegram_sends` 的同名字段。三列本来就可空，清除本身不需要新增迁移；释放空间供 SQLite 复用，不保证文件立即缩小，不执行 `VACUUM`，不修改旧备份。
 

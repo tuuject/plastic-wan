@@ -49,7 +49,16 @@ import {
   parseCreateChat,
   updateChat,
 } from './chats-admin.ts';
+import {
+  configurationView,
+  configuredPromptView,
+  inspectionQuery,
+  inspectConfiguration,
+  redactInspection,
+} from './config-inspection.ts';
 import { clearModelPayloads, parseDeveloperSettings } from './developer-admin.ts';
+import { createInvocationMediaReader, listInvocationMedia } from './invocation-media.ts';
+import type { MediaDownloader } from '../../capabilities/media/media-download.ts';
 import { createImageAdminHandler, type ImageAdminResponse, reusableImageCredentials } from './image-admin.ts';
 import {
   createMemory,
@@ -91,15 +100,18 @@ import {
 
 const SESSION_COOKIE = 'plasticwan_admin';
 const MAX_BODY_BYTES = 8_192;
-/** Replay bodies carry an optional prompt; JSON overhead stays well under this. */
-const REPLAY_BODY_MAX_BYTES = 256 * 1_024;
-const MAX_SYSTEM_PROMPT_LENGTH = 65_536;
+/** Two prompt templates may each carry 64Ki characters, including JSON escaping overhead. */
+const REPLAY_BODY_MAX_BYTES = 1_024 * 1_024;
+const MAX_PROMPT_LENGTH = 65_536;
 const imageCredentialSourcesValidator = Compile(
   Type.Record(Type.String({ pattern: '^[a-zA-Z0-9_-]{1,80}$' }), Type.String({ minLength: 1, maxLength: 80 })),
 );
 const replayBodyValidator = Compile(
   Type.Object(
-    { system_prompt: Type.Optional(Type.String({ maxLength: MAX_SYSTEM_PROMPT_LENGTH })) },
+    {
+      global_prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH })),
+      group_prompt: Type.Optional(Type.String({ maxLength: MAX_PROMPT_LENGTH })),
+    },
     { additionalProperties: false },
   ),
 );
@@ -129,13 +141,10 @@ const CONTENT_TYPES: Record<string, string> = {
 
 export type AdminConfig = NonNullable<RawConfig['admin']>;
 
-/**
- * Body accepted by `POST /api/invocations/:id/replay`. Only the optional
- * system prompt override is accepted; omitted means the engine keeps the
- * invocation's recorded prompt.
- */
+/** Replay-only template overrides. Runtime protocol and other fixed prompt parts are never writable. */
 export interface ReplayInvocationInput {
-  readonly system_prompt?: string;
+  readonly global_prompt?: string;
+  readonly group_prompt?: string;
 }
 
 export interface AdminServerOptions {
@@ -155,6 +164,12 @@ export interface AdminServerOptions {
   readonly requestRestart?: () => void;
   /** Replays one audit invocation; absent when the agent runtime is not wired. */
   readonly replayInvocation?: (id: bigint, input: ReplayInvocationInput, signal: AbortSignal) => Promise<unknown>;
+  /** Read-only replay checks and retained editable templates; neither calls a model. */
+  readonly replayPreflight?: (id: bigint) => unknown;
+  readonly invocationPrompts?: (id: bigint) => unknown;
+  /** Telegram bytes stay on the server; the caller can only name invocation-associated media IDs. */
+  readonly mediaDownloader?: MediaDownloader;
+  readonly shutdownSignal?: AbortSignal;
 }
 
 /** Model reference problems are user errors; everything else is a conflict. */
@@ -192,6 +207,9 @@ export class AdminServer {
   readonly #replayInvocation:
     | ((id: bigint, input: ReplayInvocationInput, signal: AbortSignal) => Promise<unknown>)
     | undefined;
+  readonly #replayPreflight: ((id: bigint) => unknown) | undefined;
+  readonly #invocationPrompts: ((id: bigint) => unknown) | undefined;
+  readonly #readInvocationMedia: ReturnType<typeof createInvocationMediaReader> | undefined;
   readonly #staticDir: string;
   readonly #memoryWarningDays: number;
   #server: ServerType | undefined;
@@ -222,6 +240,16 @@ export class AdminServer {
     this.#secrets = options.secrets;
     this.#requestRestart = options.requestRestart;
     this.#replayInvocation = options.replayInvocation;
+    this.#replayPreflight = options.replayPreflight;
+    this.#invocationPrompts = options.invocationPrompts;
+    this.#readInvocationMedia =
+      options.mediaDownloader === undefined
+        ? undefined
+        : createInvocationMediaReader({
+            orm: options.store.orm,
+            downloader: options.mediaDownloader,
+            shutdownSignal: options.shutdownSignal ?? new AbortController().signal,
+          });
     this.#staticDir = resolve(
       admin.static_dir ?? join(import.meta.dirname, '..', '..', '..', 'apps', 'admin-next', 'dist'),
     );
@@ -326,9 +354,8 @@ export class AdminServer {
       }
     }
     const route = segments.join('/');
-    // An Authorization header makes the request a programmatic API-key call:
-    // it never falls back to the panel cookie, and a key only covers the
-    // invocation read/replay surface (see #apiKeyRequest).
+    // Authorization never falls back to a panel cookie. The fixed programmatic
+    // surface includes inspection reads and invocation replay, not panel writes.
     const authorization = request.headers.get('authorization');
     if (authorization !== null) {
       return await this.#apiKeyRequest(request, url, segments, authorization);
@@ -573,6 +600,10 @@ export class AdminServer {
     if (request.method !== 'GET') {
       return json({ error: 'method_not_allowed', message: 'Audit routes are read-only' }, 405);
     }
+    const inspection = await this.#inspectionRead(request, url, segments);
+    if (inspection !== undefined) {
+      return inspection;
+    }
     if (route === 'overview') {
       return json(overview(this.#store.orm));
     }
@@ -621,10 +652,9 @@ export class AdminServer {
 
   /**
    * The programmatic surface of an `Authorization: Bearer pwk_…` request. The
-   * key authenticates the caller, but the surface is fixed: list invocations,
-   * read one, or replay one. Every other route is refused — including API key
-   * management and credential/config writes — and a panel cookie is never
-   * consulted when this header is present.
+   * key authenticates the caller, but the surface is fixed: inspection reads,
+   * invocation reads and isolated replay. Every other route is refused — including
+   * API key management and credential/config writes. A cookie never upgrades it.
    */
   async #apiKeyRequest(
     request: Request,
@@ -641,8 +671,12 @@ export class AdminServer {
       return json({ error: 'unauthenticated', message: 'A valid API key is required' }, 401);
     }
     this.#secrets?.remember(token);
+    const inspection = await this.#inspectionRead(request, url, segments, token);
+    if (inspection !== undefined) {
+      return inspection;
+    }
     if (segments[0] !== 'invocations') {
-      return json({ error: 'forbidden', message: 'API keys may only access invocation routes' }, 403);
+      return json({ error: 'forbidden', message: 'API keys may only access inspection and invocation routes' }, 403);
     }
     if (segments.length === 1 && request.method === 'GET') {
       return json(listInvocations(this.#store.orm, listQuery(url)));
@@ -654,7 +688,91 @@ export class AdminServer {
     if (segments.length === 3 && segments[2] === 'replay' && request.method === 'POST') {
       return await this.#replayInvocationRoute(request, parseId(segments[1] ?? '', 'id'));
     }
-    return json({ error: 'forbidden', message: 'API keys may only access invocation routes' }, 403);
+    return json({ error: 'forbidden', message: 'API keys may only access inspection and invocation routes' }, 403);
+  }
+
+  /** Exact GET allowlist shared by sessions and keys; never dispatches panel writes. */
+  async #inspectionRead(
+    request: Request,
+    url: URL,
+    segments: readonly string[],
+    token?: string,
+  ): Promise<Response | undefined> {
+    if (request.method !== 'GET') {
+      return undefined;
+    }
+    const route = segments.join('/');
+    const inspectedJson = (value: unknown): Response => json(redactInspection(value, this.#secrets, token));
+    if (route === 'config/view' || route === 'prompts/global' || route === 'prompts/group') {
+      const query = inspectionQuery(url, route === 'prompts/group');
+      const { config, ...metadata } = await inspectConfiguration(this.#configStore, this.#configReloader, query.source);
+      return inspectedJson(
+        route === 'config/view'
+          ? { ...metadata, config: configurationView(config) }
+          : {
+              ...metadata,
+              ...configuredPromptView(
+                config,
+                this.#store.orm,
+                route === 'prompts/global' ? 'global' : 'group',
+                query.chatId,
+              ),
+            },
+      );
+    }
+    if (segments[0] !== 'invocations') {
+      return undefined;
+    }
+    const action = segments[2];
+    if (segments.length === 3 && (action === 'replay-preflight' || action === 'prompts')) {
+      if (url.searchParams.size > 0) {
+        throw new AdminQueryError('invalid_query', 'This inspection route takes no query parameters');
+      }
+      const id = parseId(segments[1] ?? '', 'id');
+      const read = action === 'replay-preflight' ? this.#replayPreflight : this.#invocationPrompts;
+      if (read === undefined) {
+        throw new AdminQueryError('replay_unavailable', 'Invocation replay inspection is not wired', 503);
+      }
+      return inspectedJson(await read(id));
+    }
+    if (action !== 'media') {
+      return undefined;
+    }
+    if (segments.length === 3) {
+      if (url.searchParams.size > 0) {
+        throw new AdminQueryError('invalid_query', 'Media listing takes no query parameters');
+      }
+      return inspectedJson(listInvocationMedia(this.#store.orm, parseId(segments[1] ?? '', 'id')));
+    }
+    if (segments.length !== 5 || segments[4] !== 'content') {
+      return undefined;
+    }
+    for (const key of url.searchParams.keys()) {
+      if (key !== 'variant' || url.searchParams.getAll(key).length !== 1) {
+        throw new AdminQueryError('invalid_query', 'Media content only accepts one variant parameter');
+      }
+    }
+    const variant = url.searchParams.get('variant') ?? 'original';
+    if (variant !== 'original' && variant !== 'preview') {
+      throw new AdminQueryError('invalid_variant', 'variant must be original or preview');
+    }
+    const invocationId = parseId(segments[1] ?? '', 'id');
+    const mediaId = parseId(segments[3] ?? '', 'media_id');
+    const read = this.#readInvocationMedia;
+    if (read === undefined) {
+      throw new AdminQueryError('media_unavailable', 'Invocation media downloading is not wired', 503);
+    }
+    const content = await read(invocationId, mediaId, variant, request.signal);
+    return new Response(new Uint8Array(content.bytes), {
+      headers: {
+        ...SECURITY_HEADERS,
+        'content-type': content.mime,
+        'content-length': String(content.bytes.byteLength),
+        'cache-control': 'private, no-store',
+        'content-disposition': 'attachment',
+        'x-plasticwan-media-variant': content.variant,
+      },
+    });
   }
 
   /**
@@ -1327,11 +1445,10 @@ function parseReplayInput(value: unknown): ReplayInvocationInput {
   if (!replayBodyValidator.Check(value)) {
     throw new AdminQueryError(
       'invalid_body',
-      `Request body must be an object with only an optional system_prompt of at most ${MAX_SYSTEM_PROMPT_LENGTH} characters`,
+      `Only global_prompt and group_prompt templates of at most ${MAX_PROMPT_LENGTH} characters are accepted; system prompt overrides are forbidden`,
     );
   }
-  const record = value as { system_prompt?: string };
-  return record.system_prompt === undefined ? {} : { system_prompt: record.system_prompt };
+  return value;
 }
 
 /**

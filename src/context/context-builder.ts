@@ -3,13 +3,10 @@ import { sql } from 'drizzle-orm';
 import Type, { type Static } from 'typebox';
 import Compile from 'typebox/compile';
 import { CORE_AGENT_PROTOCOL } from '../platform/agent-protocol.ts';
+import { type AgentPromptLayers, composeAgentPrompt } from '../platform/agent-prompt.ts';
 import type { RawConfig } from '../platform/config.ts';
 import type { CompletionContext, DirectImage, VisibleSender } from '../platform/invocation-context.ts';
-import {
-  type PromptTemplateModel,
-  type PromptTemplateValues,
-  renderPromptTemplate,
-} from '../platform/prompt-template.ts';
+import type { PromptTemplateModel, PromptTemplateValues } from '../platform/prompt-template.ts';
 import { renderSkillIndexPrompt, type SystemSkill } from '../platform/system-resources.ts';
 import { resolveChatConfig, type SqliteStore } from '../store/database.ts';
 import { imageDeliveryState } from '../store/image-delivery.ts';
@@ -122,6 +119,14 @@ export interface ContextIdentity {
 export interface StablePrompt {
   readonly systemPrompt: string;
   readonly systemPromptHash: string;
+  /**
+   * The four layers `systemPrompt` was composed from, plus the values its
+   * templates rendered with. Replay retains them so a later invocation can
+   * rebuild the prompt exactly, or swap only the replaceable global/group
+   * templates without touching the runtime-owned prefix and middle.
+   */
+  readonly promptLayers: AgentPromptLayers;
+  readonly templateValues: PromptTemplateValues;
 }
 
 export interface InjectionInput {
@@ -250,24 +255,23 @@ export class ContextBuilder {
         : 'An untrusted sticker catalog is included as sticker_id:emoji entries. Emoji is only a coarse hint. To inspect one or more candidates and authorize sending, call the search_stickers capability via execute with ids; use only the returned sticker_ref with send. search_stickers also supports semantic queries.';
     // Everything in this array is hashed below, so a change to the skill index or
     // to the sticker catalog's presence restarts each Conversation Context on its
-    // next invocation.
-    const systemPrompt = [
-      CORE_AGENT_PROTOCOL,
-      renderSkillIndexPrompt(
-        options?.skillFilter === undefined ? this.#skills : this.#skills.filter(options.skillFilter),
-      ),
-      imageHandling,
-      stickerCatalogHandling,
-      renderPromptTemplate(config.agent.system_prompt, templateValues),
-      conversationMode,
-      MEMORY_GUIDANCE,
-      renderPromptTemplate(chatConfig.instructions, templateValues),
-    ]
-      .filter((part) => part.length > 0)
-      .join('\n\n');
+    // next invocation. The same layers are returned so a replay snapshot can
+    // rebuild the exact bytes, with only the global/group templates replaceable.
+    const skillIndex = options?.skillFilter === undefined ? this.#skills : this.#skills.filter(options.skillFilter);
+    const promptLayers: AgentPromptLayers = {
+      prefix: [CORE_AGENT_PROTOCOL, renderSkillIndexPrompt(skillIndex), imageHandling, stickerCatalogHandling]
+        .filter((part) => part.length > 0)
+        .join('\n\n'),
+      global: config.agent.system_prompt,
+      middle: [conversationMode, MEMORY_GUIDANCE].filter((part) => part.length > 0).join('\n\n'),
+      group: chatConfig.instructions,
+    };
+    const systemPrompt = composeAgentPrompt(promptLayers, templateValues);
     return {
       systemPrompt,
       systemPromptHash: createHash('sha256').update(systemPrompt).digest('hex'),
+      promptLayers,
+      templateValues,
     };
   }
 

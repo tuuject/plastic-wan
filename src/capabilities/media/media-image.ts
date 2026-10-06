@@ -78,7 +78,7 @@ export async function prepareMediaImage(
 ): Promise<NormalizedImage> {
   if (media.kind !== 'sticker') {
     await downloader.download(media.fileId, inputPath, signal);
-    return normalizeImage(inputPath, directory);
+    return normalizeImage(inputPath, directory, signal);
   }
   let telegram: unknown;
   try {
@@ -92,11 +92,11 @@ export async function prepareMediaImage(
   if (telegram.thumbnail !== undefined) {
     const thumbnailPath = join(directory, 'thumbnail');
     await downloader.download(telegram.thumbnail.file_id, thumbnailPath, signal);
-    return normalizeImage(thumbnailPath, directory);
+    return normalizeImage(thumbnailPath, directory, signal);
   }
   await downloader.download(media.fileId, inputPath, signal);
   if (!telegram.is_video && !telegram.is_animated) {
-    return normalizeImage(inputPath, directory);
+    return normalizeImage(inputPath, directory, signal);
   }
   if (telegram.is_video) {
     const outputPath = join(directory, 'representative.png');
@@ -136,10 +136,11 @@ export async function prepareMediaImage(
       false,
       signal,
     );
-    return normalizeImage(outputPath, directory);
+    return normalizeImage(outputPath, directory, signal);
   }
   const outputPath = join(directory, 'representative.svg');
-  const compressed = new Uint8Array(await readFile(inputPath));
+  const compressed = new Uint8Array(await readFile(inputPath, { signal }));
+  signal.throwIfAborted();
   let metadata: unknown;
   try {
     metadata = JSON.parse(new TextDecoder().decode(gunzipSync(compressed, { maxOutputLength: MAX_TGS_JSON_BYTES })));
@@ -151,7 +152,7 @@ export async function prepareMediaImage(
   }
   const frame = Math.floor((metadata.ip + metadata.op) / 2);
   await runExternal(createLottieCommand([inputPath, outputPath, '--frame', String(frame)]), false, signal);
-  return normalizeImage(outputPath, directory);
+  return normalizeImage(outputPath, directory, signal);
 }
 
 export function createLottieCommand(argumentsList: readonly string[]): string[] {
@@ -164,6 +165,10 @@ export function createLottieCommand(argumentsList: readonly string[]): string[] 
 }
 
 async function runExternal(argv: readonly string[], captureOutput: boolean, signal: AbortSignal): Promise<string> {
+  // A cancellation that already landed must refuse to start the command at all:
+  // spawning first and only then registering the abort listener would let the
+  // command run to completion while the caller already gave up.
+  signal.throwIfAborted();
   const processHandle = spawnProcess(argv, {
     env: pickEnv(
       process.platform === 'win32'
@@ -197,13 +202,22 @@ async function runExternal(argv: readonly string[], captureOutput: boolean, sign
   }
 }
 
-async function normalizeImage(inputPath: string, directory: string): Promise<NormalizedImage> {
-  const input = await readFile(inputPath);
+/**
+ * One still image from `inputPath` with sharp. The signal is observed around
+ * every await this function controls: sharp's native decode/encode cannot be
+ * interrupted, but a cancellation that lands while it runs must surface as a
+ * failure before any bytes are handed back to the caller.
+ */
+async function normalizeImage(inputPath: string, directory: string, signal: AbortSignal): Promise<NormalizedImage> {
+  signal.throwIfAborted();
+  const input = await readFile(inputPath, { signal });
+  signal.throwIfAborted();
   if (input.byteLength > MAX_DOWNLOAD_BYTES) {
     throw new Error('Image input exceeds 20 MB');
   }
   const source = sharp(input, { failOn: 'error', limitInputPixels: MAX_DECODED_PIXELS });
   const metadata = await source.metadata();
+  signal.throwIfAborted();
   if (metadata.format === undefined || !(metadata.format in ALLOWED_IMAGE_FORMATS)) {
     throw new Error('Unsupported image format');
   }
@@ -224,13 +238,16 @@ async function normalizeImage(inputPath: string, directory: string): Promise<Nor
   const output = transparent
     ? await pipeline.png().toBuffer({ resolveWithObject: true })
     : await pipeline.jpeg({ quality: 85, mozjpeg: true }).toBuffer({ resolveWithObject: true });
+  signal.throwIfAborted();
   if (output.data.byteLength > MAX_NORMALIZED_BYTES) {
     throw new Error('Normalized image exceeds output limit');
   }
   await writeFile(outputPath, output.data);
+  signal.throwIfAborted();
   if (process.platform !== 'win32') {
     await chmod(outputPath, 0o600);
   }
+  signal.throwIfAborted();
   return {
     path: outputPath,
     mimeType: transparent ? 'image/png' : 'image/jpeg',

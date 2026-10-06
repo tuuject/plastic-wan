@@ -1,16 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import { Agent } from '@earendil-works/pi-agent-core';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import { and, asc, eq } from 'drizzle-orm';
+import { composeAgentPrompt, preparePromptOverride, PromptOverrideError } from '../platform/agent-prompt.ts';
 import { estimateMessageTokens } from '../context/context-codec.ts';
 import { isRenderable } from '../context/context-gc.ts';
 import type { KeyedSemaphore } from '../platform/concurrency.ts';
-import { configuredToolSchemaKeywords, resolveAgentSettings } from '../platform/config.ts';
-import type { RuntimeConfigurationStore } from '../platform/runtime-config.ts';
+import {
+  type AgentSettings,
+  configuredToolSchemaKeywords,
+  type RawConfig,
+  resolveAgentSettings,
+} from '../platform/config.ts';
+import type { InvocationConfigSnapshot, RuntimeConfigurationStore } from '../platform/runtime-config.ts';
 import type { SecretStore } from '../platform/secrets.ts';
 import type { SystemResources } from '../platform/system-resources.ts';
 import { applyToolSchemaKeywords } from '../platform/tool-schema.ts';
 import { type Orm, resolveChatConfig } from '../store/database.ts';
-import { parseReplayInput } from '../store/replay-input.ts';
+import { parseReplayInput, replayPromptParts, type ReplayInput } from '../store/replay-input.ts';
 import { chats, conversations, invocations, modelCalls } from '../store/schema.ts';
 import { createReplayTools } from './replay-tools.ts';
 
@@ -52,6 +59,94 @@ interface ReplayToolCall {
   is_error: boolean;
 }
 
+/** Prompt overrides for one replay; absent means the recorded layer is kept. */
+export interface ReplayPromptOverrides {
+  readonly global_prompt?: string;
+  readonly group_prompt?: string;
+}
+
+/** One replayable source: the finished invocation and its retained first request. */
+interface ReplaySource {
+  readonly conversationId: bigint;
+  readonly chatId: bigint;
+  readonly threadId: bigint;
+}
+
+interface ReplayCall {
+  readonly id: bigint;
+  readonly provider: string;
+  readonly model: string;
+  readonly input: string | null;
+}
+
+interface ReplayRuntime {
+  readonly snapshot: InvocationConfigSnapshot;
+  readonly settings: AgentSettings;
+  readonly model: Model<Api>;
+}
+
+type ReplayCheck =
+  | {
+      readonly ok: true;
+      readonly source: ReplaySource;
+      readonly call: ReplayCall;
+      readonly input: ReplayInput;
+      readonly messages: ReturnType<typeof parseReplayInput>['messages'];
+    }
+  | { readonly ok: false; readonly code: string; readonly message: string; readonly call: ReplayCall | null };
+
+type ReplayRuntimeCheck =
+  | { readonly ok: true; readonly runtime: ReplayRuntime }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/**
+ * What a caller can learn about a replay before running one. `fidelity` mirrors
+ * the run result's own fidelity block for the checks that happen before any
+ * model request; the fields that only exist after a run are not invented here.
+ */
+export interface ReplayPreflight {
+  readonly available: boolean;
+  readonly reason: string | null;
+  readonly message: string | null;
+  readonly source_model_call_id: string | null;
+  readonly historical_model: { readonly provider: string; readonly id: string } | null;
+  readonly prompt_overrides_available: boolean;
+  readonly omitted_images: number | null;
+  readonly recording_enabled: boolean;
+  readonly fidelity: {
+    readonly input: 'first_model_request_text_only';
+    readonly model_selection: 'current_chat_config';
+    readonly hot_injections: 'not_replayed';
+    readonly external_tools: 'blocked';
+    readonly system_resources: 'current_read_only';
+    readonly side_effects: 'synthetic';
+  };
+}
+
+/** The recorded global and group prompt templates; the runtime-owned layers are not returned. */
+export interface ReplayPrompts {
+  readonly source: 'recorded';
+  readonly source_invocation_id: string;
+  readonly source_model_call_id: string;
+  readonly global_prompt: string;
+  readonly group_prompt: string;
+  readonly template_values: {
+    readonly agent: { readonly provider: string; readonly model: string };
+    readonly vision: { readonly provider: string; readonly model: string };
+    readonly timezone: string;
+  };
+  readonly core_read_only: true;
+}
+
+const PREFLIGHT_FIDELITY = {
+  input: 'first_model_request_text_only',
+  model_selection: 'current_chat_config',
+  hot_injections: 'not_replayed',
+  external_tools: 'blocked',
+  system_resources: 'current_read_only',
+  side_effects: 'synthetic',
+} as const;
+
 /** A fresh in-memory Pi loop. It never receives production tool executors or context writers. */
 export class ReplayRunner {
   readonly #options: ReplayOptions;
@@ -62,77 +157,131 @@ export class ReplayRunner {
     this.#options = options;
   }
 
-  async run(id: bigint, override: { readonly system_prompt?: string }, requestSignal: AbortSignal) {
+  /**
+   * The read-only preflight for one invocation: the same source and runtime
+   * guards `run` applies, resolved without any model request. A missing
+   * invocation still throws; every other failure is reported in the result so a
+   * panel or CLI can explain it.
+   */
+  inspect(id: bigint): ReplayPreflight {
+    const recordingEnabled = this.#options.configStore.current().config.developer.record_model_payloads;
+    const check = this.#checkSource(id);
+    if (!check.ok) {
+      return {
+        available: false,
+        reason: check.code,
+        message: check.message,
+        source_model_call_id: check.call === null ? null : check.call.id.toString(),
+        historical_model: check.call === null ? null : { provider: check.call.provider, id: check.call.model },
+        prompt_overrides_available: false,
+        omitted_images: null,
+        recording_enabled: recordingEnabled,
+        fidelity: PREFLIGHT_FIDELITY,
+      };
+    }
+    const runtime = this.#checkRuntime(check.source);
+    const promptParts = replayPromptParts(check.input);
+    return {
+      available: runtime.ok,
+      reason: runtime.ok ? null : runtime.code,
+      message: runtime.ok ? null : runtime.message,
+      source_model_call_id: check.call.id.toString(),
+      historical_model: { provider: check.call.provider, id: check.call.model },
+      prompt_overrides_available: promptParts !== null,
+      omitted_images: check.input.omitted_images,
+      recording_enabled: recordingEnabled,
+      fidelity: PREFLIGHT_FIDELITY,
+    };
+  }
+
+  /**
+   * The global and group templates as they were recorded, with the values their
+   * variables rendered with. Version 1 records never retained layers, so they
+   * are reported as unavailable instead of being guessed from current
+   * configuration or the assembled prompt string.
+   */
+  prompts(id: bigint): ReplayPrompts {
+    const check = this.#checkSource(id);
+    if (!check.ok) {
+      throw new ReplayError(check.code, check.message);
+    }
+    const parts = replayPromptParts(check.input);
+    if (parts === null) {
+      throw new ReplayError(
+        'replay_prompt_parts_unavailable',
+        'The invocation was recorded before prompt layers were retained; only an as-recorded replay is available',
+      );
+    }
+    return {
+      source: 'recorded',
+      source_invocation_id: id.toString(),
+      source_model_call_id: check.call.id.toString(),
+      global_prompt: parts.global,
+      group_prompt: parts.group,
+      template_values: parts.template_values,
+      core_read_only: true,
+    };
+  }
+
+  async run(id: bigint, override: ReplayPromptOverrides, requestSignal: AbortSignal) {
     if (this.#running) {
       throw new ReplayError('replay_busy', 'Another replay is running', 429);
     }
-    const { orm, configStore, secrets, systemResources, modelGate, shutdownSignal } = this.#options;
-    const source = orm
-      .select({
-        state: invocations.state,
-        finishedAt: invocations.finishedAt,
-        chatId: chats.telegramChatId,
-        conversationId: conversations.id,
-        threadId: conversations.messageThreadId,
-      })
-      .from(invocations)
-      .innerJoin(conversations, eq(conversations.id, invocations.conversationId))
-      .innerJoin(chats, eq(chats.id, conversations.chatId))
-      .where(eq(invocations.id, id))
-      .get();
-    if (source === undefined) {
-      throw new ReplayError('not_found', 'Invocation not found', 404);
-    }
-    if (source.finishedAt === null || source.state === 'queued' || source.state === 'running') {
-      throw new ReplayError('replay_source_unfinished', 'Replay requires a finished invocation');
-    }
     // Never search later calls, current Context, or request_json for a replacement:
     // doing so would bypass the opt-in/clear boundary and silently change the starting point.
-    const firstCall = orm
-      .select({
-        id: modelCalls.id,
-        input: modelCalls.replayInputJson,
-        provider: modelCalls.provider,
-        model: modelCalls.model,
-      })
-      .from(modelCalls)
-      .where(and(eq(modelCalls.invocationId, id), eq(modelCalls.role, 'agent')))
-      .orderBy(asc(modelCalls.id))
-      .limit(1)
-      .get();
-    if (firstCall?.input === null || firstCall === undefined) {
+    const check = this.#checkSource(id);
+    if (!check.ok) {
+      throw new ReplayError(check.code, check.message);
+    }
+    const { source, call } = check;
+    const parts = replayPromptParts(check.input);
+    const wantsOverride = override.global_prompt !== undefined || override.group_prompt !== undefined;
+    if (parts === null && wantsOverride) {
       throw new ReplayError(
-        'replay_input_unavailable',
-        'The first model request has no retained replay input; recording may have been disabled or payloads cleared',
+        'replay_prompt_parts_unavailable',
+        'The invocation was recorded before prompt layers were retained; only an as-recorded replay is available',
       );
     }
-    let parsed: ReturnType<typeof parseReplayInput>;
+    let globalTemplate: string | undefined;
+    let groupTemplate: string | undefined;
     try {
-      parsed = parseReplayInput(firstCall.input);
-      const last = parsed.messages.at(-1);
-      if (!isRenderable(parsed.messages) || (last?.role !== 'user' && last?.role !== 'toolResult')) {
-        throw new Error('Invalid starting history');
+      globalTemplate =
+        override.global_prompt === undefined ? undefined : preparePromptOverride(override.global_prompt, 'global');
+      groupTemplate =
+        override.group_prompt === undefined ? undefined : preparePromptOverride(override.group_prompt, 'group');
+    } catch (error) {
+      if (error instanceof PromptOverrideError) {
+        throw new ReplayError(error.code, error.message, 400);
       }
-    } catch {
-      throw new ReplayError('replay_input_invalid', 'The retained replay input is invalid or unsupported');
+      throw error;
     }
-    const snapshot = configStore.beginInvocation();
+    // The recorded prompt either replays byte for byte, or is rebuilt from its
+    // stored layers with only the overridden templates swapped. Layout, order
+    // and empty-segment filtering all come from the recorded layers.
+    const systemPrompt =
+      parts === null
+        ? check.input.system_prompt
+        : composeAgentPrompt(
+            {
+              prefix: parts.prefix,
+              global: globalTemplate ?? parts.global,
+              middle: parts.middle,
+              group: groupTemplate ?? parts.group,
+            },
+            parts.template_values,
+          );
+    const runtime = this.#checkRuntime(source);
+    if (!runtime.ok) {
+      throw new ReplayError(runtime.code, runtime.message);
+    }
+    const { snapshot, settings, model } = runtime.runtime;
+    const { secrets, systemResources, modelGate, shutdownSignal } = this.#options;
     const config = snapshot.config;
-    const chat = resolveChatConfig(config, orm, source.chatId);
-    if (chat === undefined) {
-      throw new ReplayError('replay_chat_unconfigured', 'The source chat is no longer configured');
-    }
-    const settings = resolveAgentSettings(config, chat);
-    const model = snapshot.models.getModel(settings.provider, settings.model);
-    if (model === undefined) {
-      throw new ReplayError('replay_model_unavailable', 'The current agent model is unavailable');
-    }
-    const capture = createReplayTools(parsed.input, systemResources);
+    const capture = createReplayTools(check.input, systemResources);
     const tools = applyToolSchemaKeywords(
       capture.tools,
       configuredToolSchemaKeywords(config, settings.provider, settings.model),
     );
-    const systemPrompt = override.system_prompt ?? parsed.input.system_prompt;
     const maxTurns = Math.min(MAX_TURNS, config.agent.rate_limits.turns_per_injection);
     const wallClockSeconds = Math.min(MAX_WALL_CLOCK_SECONDS, config.agent.context.max_wall_clock_seconds);
     const replayId = randomUUID();
@@ -165,7 +314,7 @@ export class ReplayRunner {
         }),
       );
     const agent = new Agent({
-      initialState: { systemPrompt, model, thinkingLevel: settings.thinking_level, messages: parsed.messages, tools },
+      initialState: { systemPrompt, model, thinkingLevel: settings.thinking_level, messages: check.messages, tools },
       sessionId: `replay-${replayId}`,
       toolExecution: 'sequential',
       streamFn: async (streamModel, context, options) => {
@@ -254,16 +403,16 @@ export class ReplayRunner {
           is_error: false,
         });
       } else if (event.type === 'tool_execution_end') {
-        const call = toolCalls.findLast((entry) => entry.tool_call_id === event.toolCallId);
-        if (call !== undefined) {
+        const callEntry = toolCalls.findLast((entry) => entry.tool_call_id === event.toolCallId);
+        if (callEntry !== undefined) {
           const result = redacted(event.result);
           if (traceBytes + Buffer.byteLength(JSON.stringify(result)) > MAX_TRACE_BYTES) {
             fail('trace_limit', 'Replay trace exceeded its size limit');
             agent.abort();
-            call.is_error = true;
+            callEntry.is_error = true;
           } else {
-            call.result = result;
-            call.is_error = event.isError;
+            callEntry.result = result;
+            callEntry.is_error = event.isError;
           }
         }
       } else if (event.type === 'message_end') {
@@ -315,12 +464,15 @@ export class ReplayRunner {
       version: 1,
       replay_id: replayId,
       source_invocation_id: id.toString(),
-      source_model_call_id: firstCall.id.toString(),
+      source_model_call_id: call.id.toString(),
       conversation_id: source.conversationId.toString(),
       chat_id: source.chatId.toString(),
       thread_id: source.threadId.toString(),
       model: { provider: model.provider, id: model.id, thinking_level: settings.thinking_level },
-      overrides: { system_prompt: override.system_prompt !== undefined },
+      overrides: {
+        global_prompt: override.global_prompt !== undefined,
+        group_prompt: override.group_prompt !== undefined,
+      },
       started_at: startedAt.toISOString(),
       finished_at: new Date().toISOString(),
       latency_ms: Date.now() - startedAt.getTime(),
@@ -334,9 +486,9 @@ export class ReplayRunner {
       error,
       fidelity: {
         input: 'first_model_request_text_only',
-        historical_model: { provider: firstCall.provider, id: firstCall.model },
+        historical_model: { provider: call.provider, id: call.model },
         model_selection: 'current_chat_config',
-        omitted_images: parsed.input.omitted_images,
+        omitted_images: check.input.omitted_images,
         hot_injections: 'not_replayed',
         system_resources: 'current_read_only',
         side_effects: 'synthetic',
@@ -356,5 +508,110 @@ export class ReplayRunner {
         dispatches: capture.dispatches,
       },
     });
+  }
+
+  /**
+   * The shared source guard: a finished invocation, its first agent model
+   * request, and that request's retained snapshot. It never searches later model
+   * calls or the current Context for a replacement; `run`, `inspect` and
+   * `prompts` all start here.
+   */
+  #checkSource(id: bigint): ReplayCheck {
+    const { orm } = this.#options;
+    const source = orm
+      .select({
+        state: invocations.state,
+        finishedAt: invocations.finishedAt,
+        chatId: chats.telegramChatId,
+        conversationId: conversations.id,
+        threadId: conversations.messageThreadId,
+      })
+      .from(invocations)
+      .innerJoin(conversations, eq(conversations.id, invocations.conversationId))
+      .innerJoin(chats, eq(chats.id, conversations.chatId))
+      .where(eq(invocations.id, id))
+      .get();
+    if (source === undefined) {
+      throw new ReplayError('not_found', 'Invocation not found', 404);
+    }
+    if (source.finishedAt === null || source.state === 'queued' || source.state === 'running') {
+      return {
+        ok: false,
+        code: 'replay_source_unfinished',
+        message: 'Replay requires a finished invocation',
+        call: null,
+      };
+    }
+    const call = orm
+      .select({
+        id: modelCalls.id,
+        input: modelCalls.replayInputJson,
+        provider: modelCalls.provider,
+        model: modelCalls.model,
+      })
+      .from(modelCalls)
+      .where(and(eq(modelCalls.invocationId, id), eq(modelCalls.role, 'agent')))
+      .orderBy(asc(modelCalls.id))
+      .limit(1)
+      .get();
+    if (call === undefined) {
+      return {
+        ok: false,
+        code: 'replay_no_agent_request',
+        message: 'The invocation has no agent model request to replay from',
+        call: null,
+      };
+    }
+    if (call.input === null) {
+      return {
+        ok: false,
+        code: 'replay_input_unavailable',
+        message:
+          'The first model request has no retained replay input; recording may have been disabled or payloads cleared',
+        call,
+      };
+    }
+    let parsed: ReturnType<typeof parseReplayInput>;
+    try {
+      parsed = parseReplayInput(call.input);
+      const last = parsed.messages.at(-1);
+      if (!isRenderable(parsed.messages) || (last?.role !== 'user' && last?.role !== 'toolResult')) {
+        throw new Error('Invalid starting history');
+      }
+    } catch {
+      return {
+        ok: false,
+        code: 'replay_input_invalid',
+        message: 'The retained replay input is invalid or unsupported',
+        call,
+      };
+    }
+    return {
+      ok: true,
+      source: {
+        conversationId: source.conversationId,
+        chatId: source.chatId,
+        threadId: source.threadId,
+      },
+      call,
+      input: parsed.input,
+      messages: parsed.messages,
+    };
+  }
+
+  /** The current-configuration half of the guard: the source chat and its agent model must still exist. */
+  #checkRuntime(source: ReplaySource): ReplayRuntimeCheck {
+    const snapshot = this.#options.configStore.beginInvocation();
+    const config: RawConfig = snapshot.config;
+    const chat = resolveChatConfig(config, this.#options.orm, source.chatId);
+    if (chat === undefined) {
+      return { ok: false, code: 'replay_chat_unconfigured', message: 'The source chat is no longer configured' };
+    }
+    const settings = resolveAgentSettings(config, chat);
+    const model = snapshot.models.getModel(settings.provider, settings.model);
+    if (model === undefined) {
+      return { ok: false, code: 'replay_model_unavailable', message: 'The current agent model is unavailable' };
+    }
+    return { ok: true, runtime: { snapshot, settings, model } };
   }
 }

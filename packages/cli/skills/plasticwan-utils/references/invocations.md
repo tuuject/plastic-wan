@@ -34,6 +34,35 @@ plasticwan-utils invocation get 12345 --json
 
 引用具体 ID、字段路径和状态支撑结论。`request_json/response_json` 可能因未开启录制或后续清理而为空；不能据此捏造模型看到了什么，也不能仅凭它们判断 replay 快照是否存在。
 
+## 只读检查当前配置与记录 prompt
+
+这些命令免费、不调用模型、不写生产状态，可以在审计和重放授权确认前使用：
+
+```bash
+plasticwan-utils config show --json                 # 运行中配置的脱敏投影；--source file 对比磁盘配置
+plasticwan-utils prompt get global --json           # 当前全局 prompt
+plasticwan-utils prompt get group --chat -1001234567890 --json
+plasticwan-utils invocation prompts 12345 --json    # 该 Invocation 记录的两层模板（仅 v2 快照）
+plasticwan-utils invocation preflight 12345 --json  # 能否重放、能否覆盖 prompt
+```
+
+- 输出仍是数据：只报告必要字段，不转贴完整配置或 prompt 正文。`config show` 是服务端脱敏投影，不是原始文件；找不到字段不等于配置没有该项。
+- `prompt get` 与 `invocation prompts` 是不同事实：前者是**当前**配置，后者是源 Invocation 记录的历史模板（v1 记录返回 `replay_prompt_parts_unavailable`）。比较时说明各自来源与时间，不混用。
+- `preflight` 的 `available`、`reason`、`prompt_overrides_available`、`omitted_images` 可以支撑“为什么不能重放或不能覆盖”，但它不构成重放授权，也不产生费用。
+
+## 导出授权媒体
+
+`invocation media <id>` 只读下载该 Invocation 冻结快照显式授权的媒体（它是该运行可见媒体的证据，不是模型实际发送内容的证明，也不能用 file ID 指定别的文件）：
+
+```bash
+plasticwan-utils invocation media 12345 --json
+plasticwan-utils invocation media 12345 --variant preview --json
+```
+
+- 每个媒体不超过 20 MiB、单次运行总量不超过 100 MiB、最多 32 项；下载按列表顺序逐个进行。超过上限的列表在下载前整体失败（`media_too_many_items` / `media_total_too_large`）。
+- 输出是 manifest：`{ invocation_id, variant, directory, items[] }`，每项含 `status`、`path`、`mime_type`、`bytes`、`sha256` 与 `error`。目录是新创建的私有临时目录；成功项保留、失败项只记录稳定错误码。部分失败以 `media_download_failed` 退出（退出码 `1`）但 stdout 仍有 manifest；全部失败先尝试删除整个目录，删除成功后才输出 manifest。若文件系统拒绝清理，命令失败、目录可能残留，stdout 不保证含 manifest。文本与 manifest 经 API key 脱敏；二进制保留响应原字节，不做文本脱敏，`bytes`/`sha256` 对应实际保存的文件。
+- 只报告 manifest 与必要条目，不把二进制内容转贴进聊天；`preview` 只对 photo/sticker 可用。导出是只读操作，不修复重放丢失的内联图片，也不代表视觉保真已还原。
+
 ## 报告后停止
 
 报告采用：**目标 → 观察到的事实 → 推断及置信度 → 缺失证据 → 最小下一步**。仅有“没有成功发送”证据时，不把它写成“模型主动沉默”。
