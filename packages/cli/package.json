@@ -1,6 +1,6 @@
 {
   "name": "@tuuject/plasticwan-utils",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Plastic Wan Admin API 工具客户端",
   "type": "module",
   "license": "Apache-2.0",
