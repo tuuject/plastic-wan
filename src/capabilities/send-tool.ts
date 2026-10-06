@@ -114,6 +114,8 @@ interface TelegramSendResponse {
 }
 
 export interface TelegramSendApi {
+  /** Cosmetic status only; hosts without chat actions can omit it. */
+  sendTyping?(chatId: string, threadId: bigint, signal: AbortSignal): Promise<void>;
   sendMessage(
     chatId: string,
     text: string,

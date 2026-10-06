@@ -20,6 +20,7 @@ pnpm test test/context-store.test.ts test/context-gc.test.ts test/context-hot-in
 pnpm test test/context-send.test.ts test/cut-topic.test.ts
 pnpm test test/image-agent.test.ts test/image-delivery.test.ts test/image-delivery-runtime.test.ts
 pnpm test test/agent-runtime.test.ts test/model-request-audit.test.ts
+pnpm test test/typing.test.ts test/context-hot-inject.test.ts
 pnpm test test/admin-developer.test.ts
 pnpm test test/admin-api-keys.test.ts test/invocation-cli.test.ts
 pnpm test test/cli-credentials.test.ts test/cli-login.test.ts test/cli-login-http.test.ts
@@ -44,6 +45,7 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 
 | 测试 | 主要契约 |
 | --- | --- |
+| `typing.test.ts` | 模型显式开始、4 秒节流、Chat/Topic 隔离、请求不重叠、重复调用不延长上限、轮次重启、取消在途和排队刷新、平台失败不阻塞 |
 | `foundation.test.ts` | 严格配置（含 `agent.context` 与 `agent.rate_limits`）、Secret 脱敏（含前缀与重叠值）、迁移与备份 |
 | `packages/image-service/test/*.test.ts` | 图片域核心（包内测试自带连接）：意图档位/能力校验、引用展开与去重、幂等重放/冲突、retry 全轮、透明像素校验由 adapter 决定、部分成功与未知上游结果不自动重试、崩溃恢复、关停缺项、并发上限、单 Worker 串行化 |
 | `test/image-models.test.ts` / `test/image-admin-server.test.ts` | 图片模型目录鉴权、禁用时发现、真实路由标签、能力映射、非法/超大/错误响应、自动配置到 adapter 的参数契约、配置回显与凭据保留、复用 OpenRouter SecretRef 修复旧空凭据、重复模型/未知凭据/错误来源在写入前拒绝、修订冲突拒绝及 Origin 边界 |
