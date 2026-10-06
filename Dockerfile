@@ -75,6 +75,12 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # Data and config volume mount points
 RUN mkdir -p /data /config && chown plasticwan:plasticwan /data /config
 
+# npx-based stdio MCP servers run with an SDK-sanitized environment (HOME,
+# PATH and a few other safe vars only), so the npm cache location must come
+# from npm's global config instead of the environment. /data is a writable
+# volume the entrypoint chowns to the runtime user on every boot.
+RUN npm config set --global cache /data/.npm-cache
+
 # PLASTICWAN_SUPERVISED is deliberately NOT set here: the image cannot know
 # whether it will be run with a restart policy, and declaring supervision
 # without one would offer a "restart now" button that stops the bot for good.
