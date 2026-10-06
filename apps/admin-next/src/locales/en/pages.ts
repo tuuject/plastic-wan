@@ -223,7 +223,7 @@ export const pages = {
   apiKeys: {
     title: 'API keys',
     description:
-      'Keys allow the debug CLI to list, inspect and replay Invocations. They cannot change configuration or manage keys. Replay calls the model and may incur charges.',
+      'Keys allow the plasticwan-utils CLI to list, inspect and replay Invocations. They cannot change configuration or manage keys. Replay calls the model and may incur charges.',
     create: 'Create API key',
     name: 'Name',
     prefix: 'Prefix',

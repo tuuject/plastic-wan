@@ -4,12 +4,12 @@ import { AdminClient } from './client.ts';
 import { type CliIo, executeCommand } from './commands.ts';
 import { CliError } from './errors.ts';
 
-export const USAGE = `plasticwan-debug - Plastic Wan Admin API 调试客户端
+export const USAGE = `plasticwan-utils - Plastic Wan Admin API 工具客户端
 
 用法:
-  plasticwan-debug invocation list [--limit N] [--cursor ID] [--state STATE] [--chat ID] [--json]
-  plasticwan-debug invocation get <id> [--json]
-  plasticwan-debug invocation replay <id> [--system-prompt <file|->] [--json]
+  plasticwan-utils invocation list [--limit N] [--cursor ID] [--state STATE] [--chat ID] [--json]
+  plasticwan-utils invocation get <id> [--json]
+  plasticwan-utils invocation replay <id> [--system-prompt <file|->] [--json]
 
 全局选项:
   --endpoint <url>    Admin Panel 基地址（或 PLASTICWAN_ENDPOINT）；明文 http 仅允许 loopback

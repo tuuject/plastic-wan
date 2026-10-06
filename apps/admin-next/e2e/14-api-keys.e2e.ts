@@ -209,7 +209,9 @@ test.describe('API key management UI', () => {
 
     const main = page.getByRole('main');
     await expect(main.getByText('API keys', { exact: true }).first()).toBeVisible();
-    // The permission note is deliberately narrow: invocation list/get/replay.
+    // The permission note names the client and stays deliberately
+    // narrow: invocation list/get/replay for plasticwan-utils, nothing more.
+    await expect(main.getByText(/plasticwan-utils CLI/).first()).toBeVisible();
     await expect(main.getByText(/invocation/i).first()).toBeVisible();
     await expect(main.getByText(/replay/i).first()).toBeVisible();
     await expect(main.getByRole('button', { name: 'Create API key' })).toBeVisible();

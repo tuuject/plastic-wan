@@ -9,6 +9,8 @@ pnpm run check
 pnpm test
 ```
 
+npm 发布 workflow 可另用 `actionlint .github/workflows/npm.yml` 静态检查。actionlint 1.7.12 尚不识别 GitHub 已支持的 [`concurrency.queue: max`](https://docs.github.com/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs)；该版本须人工核对 queue，并用 `-ignore 'unexpected key "queue" for "concurrency" section'` 仅忽略这一条旧 Schema 误报。dry-run 不能替代真实 OIDC、npm 权限与版本冲突验证。
+
 按改动范围可先运行目标测试：
 
 ```bash
@@ -20,6 +22,7 @@ pnpm test test/image-agent.test.ts test/image-delivery.test.ts test/image-delive
 pnpm test test/agent-runtime.test.ts test/model-request-audit.test.ts
 pnpm test test/admin-developer.test.ts
 pnpm test test/admin-api-keys.test.ts test/invocation-cli.test.ts
+pnpm test test/npm-release.test.ts
 pnpm test test/replay.test.ts test/replay-input.test.ts test/replay-tools.test.ts test/replay-http.test.ts
 pnpm test test/skills.test.ts test/system-resources.test.ts test/plugins.test.ts
 pnpm test test/media.test.ts test/stickers.test.ts
@@ -66,7 +69,8 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `model-request-audit.test.ts` | `request_json` 中 inline base64 图片被结构化摘要替换、其余请求数据保留、重复清洗幂等 |
 | `admin-developer.test.ts` | 旧配置缺省关闭、显式开关与 JSONC 持久化/热应用、权限/Origin/revision/类型校验、应用失败后文件与运行态分离、分批清除只置空报文（含 replay 快照）且保留审计/关联/统计、重复清除与并发写入 |
 | `admin-api-keys.test.ts` | 一次性 `pwk_` 明文与 SHA-256 存储、Session-only 管理边界（TypeBox、Bearer 不能管理密钥）、撤销立即生效且保留元数据、Bearer 只覆盖 invocation list/get/replay（其它审计、写端点与未知路由 403）、Authorization 存在时不回退 Cookie、replay 端点只接受 `system_prompt`（空串合法、64Ki 字符与 256 KiB body 上限）、engine 错误映射与失败脱敏、malformed Origin 返回 400 而非 500 且 Origin 只守写 |
-| `invocation-cli.test.ts` | `plasticwan-debug` 的 list/get/replay 请求形状与输出契约、`--api-key` 覆盖环境变量、replay 失败仍保留 stdout 文档、退出码、重定向/超时/超大响应拒绝、stdin 无 EOF（空流或部分输入）超时后非零退出且无 HTTP 请求、参数与端点校验、任何输出（含服务端回显与 JSON 转义形式）都不泄露 key |
+| `invocation-cli.test.ts` | `plasticwan-utils` 的 list/get/replay 请求形状与输出契约、`--api-key` 覆盖环境变量、replay 失败仍保留 stdout 文档、退出码、重定向/超时/超大响应拒绝、stdin 无 EOF（空流或部分输入）超时后非零退出且无 HTTP 请求、参数与端点校验、任何输出（含服务端回显与 JSON 转义形式）都不泄露 key |
+| `npm-release.test.ts` | main canary 版本含 run/attempt/SHA、仅精确稳定 tag 进入 latest、拒绝非 push/其它仓库与非法 ref、GitHub 输出不改源码 manifest、仅独立 CLI 包公开、Skill 分发清单与入口/子文档/元数据结构 |
 | `replay-input.test.ts` | 快照编解码往返（含 tool call 与 tool result）、内联图片丢弃与计数、版本与重复定义拒绝、快照随 Invocation 级联与无 Invocation model call 的保留窗口一起删除 |
 | `replay-tools.test.ts` | 合成 send（text/image/sticker）与参数保留、内存记忆/闹钟（空起步）、`image_generate` 假回执、`zzz` 不写全局状态、`read` 只读当前 `system:///` 并拒绝越界、未知顶层工具与 MCP 全部 blocked、`execute` 拒绝原语与无生产执行器、search/help 限快照注册表、abort 后不再 dispatch、工具层不引入生产接线 |
 | `replay.test.ts` | 首个请求的历史输入 + 当前模型、无生产写入、空 system prompt 覆盖与无 send 成功、来源守卫（未完成/缺快照/非法历史/不回退后续调用）、从 toolResult 尾部续跑、共享模型闸门与并发 429、关停与取消释放、context/turn/tool/trace/wall-clock 预算、脱敏覆盖任意参数键名与 dispatch 元数据 |
@@ -233,8 +237,8 @@ pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.t
 密钥在面板的 **Manage → API keys** 页创建与撤销；重放仍只有携带密钥的 CLI/API 入口。以下检查不需要 Telegram：
 
 1. 在 Manage → API keys 点 **Create API key**（名称 1–80 字符）→ **Create key**：**Save your API key** 弹窗是明文唯一一次出现，**Copy API key** 可复制，Done/关闭/刷新后不可再取回，`localStorage`/`sessionStorage` 里不出现 `pwk_` 明文；列表只显示 Name/Prefix/Created/Last used/Status 与操作，未使用时显示 Never used；**Revoke** 需在确认框确认，撤销后同一 key 的下一次请求立即 401，行保留并显示 Revoked。接口契约见 [admin-panel.md](admin-panel.md#程序化-api-密钥)。
-2. 用该 key 与 `plasticwan-debug invocation list/get` 能读到 Invocation；访问 `/api/overview`、`/api/memories`、`/api/api-keys` 等返回 403，同时带有效 Session Cookie 也不改变结果与权限面。
-3. 对一条已开启 `developer.record_model_payloads` 且仍保留快照的已完成 Invocation 执行 `plasticwan-debug invocation replay <id> --json`（真实调用模型、按 Provider 计费）：返回 `version: 1`、来源 ID、当前 Chat 模型与 `fidelity.limits`/`dispatches`；`send` 只出现在 `outputs`，不产生 `telegram_sends`；不新增 tool call、发送或预算行，后续 `daily_usage` 不含这次调用。
+2. 用该 key 与 `plasticwan-utils invocation list/get` 能读到 Invocation；访问 `/api/overview`、`/api/memories`、`/api/api-keys` 等返回 403，同时带有效 Session Cookie 也不改变结果与权限面。
+3. 对一条已开启 `developer.record_model_payloads` 且仍保留快照的已完成 Invocation 执行 `plasticwan-utils invocation replay <id> --json`（真实调用模型、按 Provider 计费）：返回 `version: 1`、来源 ID、当前 Chat 模型与 `fidelity.limits`/`dispatches`；`send` 只出现在 `outputs`，不产生 `telegram_sends`；不新增 tool call、发送或预算行，后续 `daily_usage` 不含这次调用。
 4. 对未开启记录、快照已清除或未完成的 Invocation 重放：分别得到 409（`replay_input_unavailable`、`replay_source_unfinished`）或 CLI 退出码 1；确认没有回退读取 `request_json`、后续 model call 或当前 Context。
 5. 重放运行期间再次发起重放得到 429 `replay_busy`；模型请求失败或超限时响应仍带完整结构，`error` 非空。
 

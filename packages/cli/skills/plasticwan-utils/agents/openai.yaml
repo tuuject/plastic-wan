@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plastic Wan Utils"
+  short_description: "按任务加载 CLI 指南，审计 Invocation 与授权重放"
+  default_prompt: "使用 $plasticwan-utils 处理我的 Plastic Wan Admin API 任务；先加载对应指南，只查询已授权的数据，计费或变更操作先确认。"

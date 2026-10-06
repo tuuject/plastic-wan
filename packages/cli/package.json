@@ -1,17 +1,27 @@
 {
-  "name": "@plasticwan/cli",
+  "name": "@tuuject/plasticwan-utils",
   "version": "0.1.0",
-  "description": "Plastic Wan Admin API 调试客户端（invocation list/get/replay）",
+  "description": "Plastic Wan Admin API 工具客户端",
   "type": "module",
-  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tuuject/plastic-wan.git",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=24.0.0"
   },
   "bin": {
-    "plasticwan-debug": "./dist/bin.js"
+    "plasticwan-utils": "./dist/bin.js"
   },
   "files": [
     "dist",
+    "skills",
     "README.md"
   ],
   "scripts": {

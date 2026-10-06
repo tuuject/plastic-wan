@@ -120,32 +120,42 @@ node src/cli.ts doctor --config dev-data/config.jsonc --output-agent-prompt
 
 该选项仍会执行完整 Doctor 检查；成功 JSON 中增加 `agent_prompt` 字段。输出包含 Prompt 正文，但不会包含 Secret、Chat 记忆或 Chat-specific instructions。不要在共享日志中使用该选项。
 
-## Invocation 调试客户端
+## Admin API 工具客户端（Invocation 查询与重放）
 
-`packages/cli`（工作区包 `@plasticwan/cli`，私有、**尚未发布**）提供只做 invocation 查询与重放的 `plasticwan-debug`。它不包含 SDK、密钥管理或完整 Eval 能力，只有 list/get/replay 三个子命令；Node.js ≥ 24，无运行时依赖。
+`packages/cli` 提供访问 Admin API 的工具客户端 `plasticwan-utils`（npm 包 `@tuuject/plasticwan-utils`；仓库根与其它工作区仍为 private）。当前只实现 invocation 的 list/get/replay 三个子命令，群聊管理等其它能力尚未实现；也不包含 SDK、密钥管理或 Eval 能力。Node.js ≥ 24，无运行时依赖。它与服务端入口 `plasticwan`（`node src/cli.ts`）不是同一个程序：本客户端只通过 Admin API 查询与重放 Invocation，不含 serve/check-config/doctor/backup/configure 等服务命令。
 
 ```bash
-pnpm cli:build                         # 等价 pnpm --filter @plasticwan/cli build，输出 packages/cli/dist
+npm install -g @tuuject/plasticwan-utils           # 稳定版（严格 vMAJOR.MINOR.PATCH tag，dist-tag latest）
+npm install -g @tuuject/plasticwan-utils@canary    # main 每次 push 的 canary
+```
+
+发布尚未可用（`npm install` 报 404）时改用本地 tarball；也可以直接在源码检出中构建运行：
+
+```bash
+pnpm cli:build                         # 等价 pnpm --filter @tuuject/plasticwan-utils build，输出 packages/cli/dist
 pnpm cli:check                         # 对 packages/cli 做 TypeScript 检查（不产出 JS）
-pnpm --filter @plasticwan/cli pack     # prepack 先构建，生成可安装的 tarball（含 dist 与 README）
+pnpm --filter @tuuject/plasticwan-utils pack --pack-destination "$PWD/dist/npm"   # prepack 先构建，tarball 含 dist、skills 与 README
+npm install -g ./dist/npm/tuuject-plasticwan-utils-0.1.0.tgz                      # 文件名以实际输出为准
 ```
 
 ```bash
 export PLASTICWAN_ENDPOINT=https://admin.example.com   # 必填，不猜 admin.port
-export PLASTICWAN_API_KEY=...                          # 推荐环境变量，避免进入 shell 历史
+# PLASTICWAN_API_KEY 由安全渠道注入；不要输入含明文 key 的 export 或把 key 放入参数
 
 node packages/cli/dist/bin.js invocation list --limit 20 --state completed --chat -1001234567890 --json
-plasticwan-debug invocation get 12345 --json                       # 全局安装 tarball 后
-plasticwan-debug invocation replay 12345 --json
-plasticwan-debug invocation replay 12345 --system-prompt prompt.txt --json
-printf '%s' '临时替换的 system prompt' | plasticwan-debug invocation replay 12345 --system-prompt - --json
+plasticwan-utils invocation get 12345 --json                       # 全局安装后
+plasticwan-utils invocation replay 12345 --json
+plasticwan-utils invocation replay 12345 --system-prompt prompt.txt --json
+printf '%s' '临时替换的 system prompt' | plasticwan-utils invocation replay 12345 --system-prompt - --json
 ```
 
-- API key 只能在面板 Session 下创建：在面板 **Manage → API keys** 页（`/api-keys`）创建并取得唯一一次明文，也在同一页撤销（Bearer 密钥不能管理密钥，见 [admin-panel.md](admin-panel.md#程序化-api-密钥)）。tarball 可用 `npm install -g` 安装，随后直接用 `plasticwan-debug` 调用。
+- 发布由 `.github/workflows/npm.yml` 承担，独立于 Docker workflow：只有 `tuuject/plastic-wan` 的 push 会发布，`main` 产出 canary（`0.0.0-canary.<run>.<attempt>.g<sha12>`，dist-tag `canary`），严格 `vMAJOR.MINOR.PATCH` tag 产出稳定版（dist-tag `latest`）；版本只在 CI checkout 内改写、不回写源码，发布用 OIDC 且没有 `NPM_TOKEN`。首次发布 bootstrap 与 trusted publisher 配置见 [packages/cli/README.md](../packages/cli/README.md#首次发布-bootstrap)：包必须先在 npm 上存在，之后手工打稳定 tag 才走 CI。Docker workflow 用 `GITHUB_TOKEN` 推送的 `v0.0.0-next-*` tag 不会触发它，手推 prerelease tag 会被版本 guard 拒绝。
+- API key 只能在面板 Session 下创建：在面板 **Manage → API keys** 页（`/api-keys`）创建并取得唯一一次明文，也在同一页撤销（Bearer 密钥不能管理密钥，见 [admin-panel.md](admin-panel.md#程序化-api-密钥)）。本地 tarball 或 registry 全局安装后，直接用 `plasticwan-utils` 调用。
 - endpoint 必须显式给出；明文 `http` 仅允许 loopback（`127.0.0.0/8`、`::1`、`localhost`），远端必须 `https`，URL 不得带凭据、query 或 fragment。
 - 请求不跟随重定向、不自动重试；默认超时 list/get 30 秒、replay 300 秒；stdin 读取单独使用同一 `--timeout-ms` 上限，超时返回 `timeout`（退出码 1）且不发送 HTTP 请求；响应体超过 4 MiB 被拒绝。
 - `--json` 时 stdout 恰好一个 JSON 文档；失败时 stderr 为 `{"error","message"}`（经 key 脱敏）。退出码 `0` 成功、`1` 请求/服务端/replay 失败、`2` 参数或输入不合法。replay 即使返回的 `error` 非空也会把完整结构写在 stdout。
 - replay 的行为边界（合成工具、不写生产数据、按 Provider 计费）见 [admin-panel.md](admin-panel.md#invocation-重放)；选项全集与响应形状以 [packages/cli/README.md](../packages/cli/README.md) 与源码为准。
+- 包内 [`plasticwan-utils` Skill](../packages/cli/skills/plasticwan-utils/SKILL.md) 面向通过 CLI 访问 Admin API 的外部 Agent，采用先审计、授权后重放的流程；`SKILL.md` 是轻量入口，审计与重放细节分列 `references/invocations.md`、`references/replay.md`，按当前任务加载子文档而不是一次全读。它不是 Bot 的 System Skill。全局安装 CLI 不会自动注册 Skill，须按 [CLI README](../packages/cli/README.md#安装配套-agent-skill) 将整个目录（含 `references/` 与 `agents/openai.yaml`）复制/导入宿主并在升级时同步更新。不把服务端源码或 SQLite 访问作为前提。
 
 ## 日志
 

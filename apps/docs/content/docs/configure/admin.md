@@ -85,10 +85,10 @@ SQLite 释放的页可供后续写入复用，但数据库文件不一定立即�
 前提：源 Invocation 发生时已开启 Developer 页的「记录原始请求报文」（`record_model_payloads`），首个模型请求的快照成功保存且没有被清除。快照记录失败不会中断原运行，但该次 Invocation 无法重放；尚未结束的 Invocation、源 Chat 已不在配置中或当前 Chat 的模型不可用时，也会被明确拒绝。
 
 ```bash
-plasticwan-debug invocation replay 12345 --json
+plasticwan-utils invocation replay 12345 --json
 # 临时替换 system prompt（最多 64Ki 字符；不写回配置）
-plasticwan-debug invocation replay 12345 --system-prompt prompt.txt --json
-printf '%s' '临时 system prompt' | plasticwan-debug invocation replay 12345 --system-prompt - --json
+plasticwan-utils invocation replay 12345 --system-prompt prompt.txt --json
+printf '%s' '临时 system prompt' | plasticwan-utils invocation replay 12345 --system-prompt - --json
 ```
 
 限制与取舍：

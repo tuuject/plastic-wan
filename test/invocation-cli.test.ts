@@ -165,7 +165,7 @@ afterAll(async () => {
   await rm(workDir, { recursive: true, force: true });
 });
 
-describe('plasticwan-debug invocation CLI', () => {
+describe('plasticwan-utils invocation CLI', () => {
   it('list sends filters and auth, and prints one stable JSON document', async () => {
     const server = await startServer((_request, response) => {
       jsonResponse(response, 200, { items: [ITEM], next_cursor: '7' });
@@ -697,7 +697,9 @@ describe('plasticwan-debug invocation CLI', () => {
   it('prints usage for --help without requiring an endpoint', async () => {
     const result = await runCli(['--help']);
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain('invocation replay');
+    expect(result.stdout).toContain('plasticwan-utils - Plastic Wan Admin API 工具客户端');
+    expect(result.stdout).toContain('plasticwan-utils invocation replay');
+    expect(result.stdout).not.toContain('plasticwan-debug');
     expect(result.stderr).toBe('');
   }, 20_000);
 

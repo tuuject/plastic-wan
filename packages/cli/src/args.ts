@@ -109,7 +109,7 @@ export function parseCli(argv: readonly string[]): ParsedCli {
 export function resolveCli(parsed: ParsedCli, env: Record<string, string | undefined>): ResolvedCli {
   const command = parsed.command;
   if (command === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-debug invocation list|get|replay');
+    throw usageError('missing_command', 'usage: plasticwan-utils invocation list|get|replay');
   }
   const endpointRaw = parsed.endpointRaw ?? env.PLASTICWAN_ENDPOINT;
   if (endpointRaw === undefined || endpointRaw.trim().length === 0) {
@@ -164,7 +164,7 @@ function sanitizeArgumentMessage(error: unknown): string {
 function parseCommand(positionals: readonly string[], flags: StringFlags): Command {
   const [group, subcommand, ...rest] = positionals;
   if (group === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-debug invocation list|get|replay');
+    throw usageError('missing_command', 'usage: plasticwan-utils invocation list|get|replay');
   }
   if (group !== 'invocation') {
     throw usageError('unknown_command', 'the only command group is "invocation"');
@@ -177,7 +177,7 @@ function parseCommand(positionals: readonly string[], flags: StringFlags): Comma
     case 'replay':
       return parseReplay(rest, flags);
     case undefined:
-      throw usageError('missing_subcommand', 'usage: plasticwan-debug invocation list|get|replay');
+      throw usageError('missing_subcommand', 'usage: plasticwan-utils invocation list|get|replay');
     default:
       throw usageError('unknown_subcommand', 'invocation subcommand must be list, get, or replay');
   }
