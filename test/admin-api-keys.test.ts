@@ -346,7 +346,7 @@ test('an Authorization header never falls back to the cookie and cannot be upgra
   }
 });
 
-test('replay validates only system_prompt, caps the body, and forwards the abort signal', async () => {
+test('replay accepts only editable templates, caps the body, and forwards the abort signal', async () => {
   const calls: ReplayCall[] = [];
   const { store, server } = await fixture(async (id, input, signal) => {
     calls.push({ id, input, signal });
@@ -362,34 +362,42 @@ test('replay validates only system_prompt, caps the body, and forwards the abort
     expect(await readJson(sessionOnly)).toMatchObject({ error: 'method_not_allowed' });
     expect(calls).toHaveLength(0);
 
-    const replayRequest = post('/api/invocations/42/replay', { system_prompt: 'Use the rubric.' }, auth);
+    const replayRequest = post(
+      '/api/invocations/42/replay',
+      { global_prompt: 'Use the rubric.', group_prompt: 'Group tone.' },
+      auth,
+    );
     const response = await server.handle(replayRequest);
     expect(response.status).toBe(200);
     expect(await readJson(response)).toEqual({ status: 'replayed' });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.id).toBe(42n);
-    expect(calls[0]?.input).toEqual({ system_prompt: 'Use the rubric.' });
+    expect(calls[0]?.input).toEqual({ global_prompt: 'Use the rubric.', group_prompt: 'Group tone.' });
     expect(calls[0]?.signal).toBe(replayRequest.signal);
 
-    const empty = await server.handle(post('/api/invocations/7/replay', { system_prompt: '' }, auth));
+    const empty = await server.handle(post('/api/invocations/7/replay', { group_prompt: '' }, auth));
     expect(empty.status).toBe(200);
-    expect(calls[1]?.input).toEqual({ system_prompt: '' });
+    expect(calls[1]?.input).toEqual({ group_prompt: '' });
 
     const omitted = await server.handle(post('/api/invocations/7/replay', {}, auth));
     expect(omitted.status).toBe(200);
     expect(calls[2]?.input).toEqual({});
 
     const maxLength = await server.handle(
-      post('/api/invocations/7/replay', { system_prompt: 'a'.repeat(65_536) }, auth),
+      post('/api/invocations/7/replay', { global_prompt: 'a'.repeat(65_536), group_prompt: 'b'.repeat(65_536) }, auth),
     );
     expect(maxLength.status).toBe(200);
-    expect(calls[3]?.input.system_prompt).toHaveLength(65_536);
+    expect(calls[3]?.input.global_prompt).toHaveLength(65_536);
+    expect(calls[3]?.input.group_prompt).toHaveLength(65_536);
 
     const invalid: readonly [unknown, number][] = [
-      [{ system_prompt: 'a'.repeat(65_537) }, 400],
-      [{ system_prompt: 42 }, 400],
+      [{ system_prompt: 'not writable' }, 400],
+      [{ global_prompt: 'a'.repeat(65_537) }, 400],
+      [{ group_prompt: 'a'.repeat(65_537) }, 400],
+      [{ global_prompt: '' }, 400],
+      [{ global_prompt: 42 }, 400],
       [{ prompt: 'wrong field' }, 400],
-      [{ system_prompt: 'ok', extra: true }, 400],
+      [{ global_prompt: 'ok', extra: true }, 400],
       [[], 400],
       ['just a string', 400],
       ['{', 400],
@@ -403,7 +411,7 @@ test('replay validates only system_prompt, caps the body, and forwards the abort
 
     // Body cap: declared Content-Length is refused before reading...
     const declared = await server.handle(
-      post('/api/invocations/7/replay', { system_prompt: 'a'.repeat(262_144) }, auth),
+      post('/api/invocations/7/replay', { global_prompt: 'a'.repeat(1_048_576) }, auth),
     );
     expect(declared.status).toBe(413);
     expect(await readJson(declared)).toMatchObject({ error: 'body_too_large' });
@@ -413,8 +421,8 @@ test('replay validates only system_prompt, caps the body, and forwards the abort
       headers: { 'content-type': 'application/json', ...auth },
       body: new ReadableStream({
         start(controller) {
-          controller.enqueue(new TextEncoder().encode('{"system_prompt":"'));
-          controller.enqueue(new TextEncoder().encode('a'.repeat(262_144)));
+          controller.enqueue(new TextEncoder().encode('{"global_prompt":"'));
+          controller.enqueue(new TextEncoder().encode('a'.repeat(1_048_576)));
           controller.enqueue(new TextEncoder().encode('"}'));
           controller.close();
         },

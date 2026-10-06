@@ -35,7 +35,7 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
 - **Settings**：对手改配置使用 **Apply config file**，并查看 Saved 与 Running 状态及 `restart_required`。
 - **Developer**：按需记录模型调用的调试报文，或在确认后清除已有报文。
 - **API keys**（Manage 组）：创建、查看与撤销供 CLI 与评估工具使用的密钥，明文只在创建弹窗中出现一次，见下文。
-- **Invocation 重放**：仍只有携带 API 密钥的 CLI/API 入口，没有页面入口，见下文。
+- **Invocation 重放**：仍只有携带 API 密钥的 CLI/API 入口，没有页面入口；只读的配置/prompt 检查、记录 prompt、重放预检与媒体导出同样在 CLI/API 层提供，见下文。
 
 ## 查看和复制 Telegram ID
 
@@ -76,29 +76,37 @@ SQLite 释放的页可供后续写入复用，但数据库文件不一定立即�
 - 页面不把明文写入浏览器 `localStorage`/`sessionStorage` 或查询缓存，列表接口也不返回它。复制失败时弹窗保留文字并提示手动复制。
 - 点行内 **Revoke** 后需在确认框点 **Revoke key**；撤销立即生效且不可恢复，密钥行与元数据保留，**Status** 变为 **Revoked**，不再提供撤销操作。
 
-密钥的能力范围只有 Invocation 查询与重放（读取 Invocation 列表/详情、发起重放）；它不能读取其它审计、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
+密钥的能力范围是只读检查与 Invocation 读/重放：允许查看当前配置与 global/group prompt 的脱敏视图、比较磁盘配置、读取 Invocation 记录的两层 prompt、运行免费的重放预检、下载该 Invocation 快照授权的媒体，以及读取 Invocation 列表/详情并发起重放；它不能读取其它审计（Overview、Messages、Contexts、记忆等）、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
 
 ## Invocation 重放
 
-重放用当前配置重新执行一次已经结束的 Invocation，用来观察模型在新 Prompt 或新模型下会怎样选择工具与回复。入口是携带 API 密钥的 CLI/API，面板登录会话不能直接调用。它不会发送 Telegram 消息、不修改生产会话与业务数据（鉴权仍会更新密钥使用时间），但会**真实调用模型并计费**（不计入生产用量预算）。
+重放用当前配置重新执行一次已经结束的 Invocation，用来观察模型在新 Prompt 或新模型下会怎样选择工具与回复。入口是携带 API 密钥的 CLI/API，面板登录会话不能直接调用重放；只读的预检、记录 prompt、配置/prompt 查看与媒体导出也没有页面入口。它不会发送 Telegram 消息、不修改生产会话与业务数据（鉴权仍会更新密钥使用时间），但会**真实调用模型并计费**（不计入生产用量预算）。
 
 前提：源 Invocation 发生时已开启 Developer 页的「记录原始请求报文」（`record_model_payloads`），首个模型请求的快照成功保存且没有被清除。快照记录失败不会中断原运行，但该次 Invocation 无法重放；尚未结束的 Invocation、源 Chat 已不在配置中或当前 Chat 的模型不可用时，也会被明确拒绝。
 
 ```bash
+# 免费预检：能否重放、能否覆盖 prompt；不调用模型
+plasticwan-utils invocation preflight 12345 --json
+# 查看该 Invocation 记录的两层 prompt（仅版本 2 快照）
+plasticwan-utils invocation prompts 12345 --json
+
 plasticwan-utils invocation replay 12345 --json
-# 临时替换 system prompt（最多 64Ki 字符；不写回配置）
-plasticwan-utils invocation replay 12345 --system-prompt prompt.txt --json
-printf '%s' '临时 system prompt' | plasticwan-utils invocation replay 12345 --system-prompt - --json
+# 临时替换 global / group 层（每层最多 64Ki 字符；不写回配置）
+plasticwan-utils invocation replay 12345 --global-prompt prompt.txt --json
+plasticwan-utils invocation replay 12345 --group-prompt group.txt --json
+printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay 12345 --global-prompt - --json
 ```
 
 限制与取舍：
 
 - 只重放**首个模型请求的文本输入**：图片内容被丢弃（输出里只报告丢弃数量），对话中途注入的新消息与之后几轮的输入都不重放。
-- system prompt 默认用记录时的版本（可临时覆盖）；模型与思考强度取**当前**该 Chat 的配置，而不是历史模型。源 Chat 已不在配置中会报错。
+- system prompt 默认按记录重建：版本 2 快照保存固定段、当时的 global/group 模板与渲染变量值，覆盖只替换某一层的模板，变量保持历史值；固定段与整体 system prompt **不能**覆盖。版本 1 旧快照没有分层信息，只能原样重放，请求覆盖或分层读取会返回 `replay_prompt_parts_unavailable`。global 层不能清空，group 层可以清空；覆盖内容会用与配置相同的模板校验。
+- 模型与思考强度取**当前**该 Chat 的配置，而不是历史模型。源 Chat 已不在配置中会报错。
 - 工具调用是合成结果：`send` 只记录在输出的 `outputs` 里，不会发 Telegram；记忆、Alarm、生图、`zzz` 都只在内存或假回执中生效；`read` 读的是**当前**系统文档。
 - 网页抓取、Sticker 搜索、读图与 MCP 等外部工具会被拒绝；图片与回复引用不会重新校验，历史时间只作为文本原样重放。
-- 返回的 `fidelity` 字段列出这些边界；`dispatches` 里的 `mode`（`synthetic`/`live_read`/`blocked`）只是调用走的分派路线，不代表调用成功，成功与否看 `tool_calls`。`error` 非空表示重放没有正常完成，完整结构仍会返回。
+- 返回的 `fidelity` 与 `overrides` 字段列出这些边界；`dispatches` 里的 `mode`（`synthetic`/`live_read`/`blocked`）只是调用走的分派路线，不代表调用成功，成功与否看 `tool_calls`。`error` 非空表示重放没有正常完成，完整结构仍会返回。
 - 同时只允许一个重放；轮次、时长、工具尝试次数与 `trace` 记录有上限，超限会明确报错结束。`trace` 的 1 MiB 预算不等于整个响应体的大小上限；CLI 另行拒绝超过 4 MiB 的响应。重放中的模型请求不自动重试。模型选择不发言（输出里没有 `send`）也是正常结果。
+- CLI 在重放前先跑预检，不可重放或不允许覆盖时不会发送 POST。媒体导出（`invocation media`）只读下载 Invocation 快照授权的媒体，不是视觉保真修复，也不改变重放输入。
 
 ## 验证与风险
 

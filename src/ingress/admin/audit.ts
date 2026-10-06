@@ -951,7 +951,11 @@ export function parseId(value: string, label: string): bigint {
   if (!/^-?\d{1,19}$/.test(value)) {
     throw new AdminQueryError(`invalid_${label}`, `${label} must be an integer`);
   }
-  return BigInt(value);
+  const id = BigInt(value);
+  if (id < -9_223_372_036_854_775_808n || id > 9_223_372_036_854_775_807n) {
+    throw new AdminQueryError(`invalid_${label}`, `${label} must fit in a signed 64-bit integer`);
+  }
+  return id;
 }
 
 export function parseLimit(value: string | null | undefined): number {

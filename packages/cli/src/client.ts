@@ -2,9 +2,9 @@ import { Buffer } from 'node:buffer';
 import { CliError, usageError } from './errors.ts';
 
 /**
- * Upper bound for any response body. The API pages and invocation details are
- * far smaller; an oversized body (a proxy page, a runaway payload) is refused
- * instead of being buffered without limit.
+ * Upper bound for any JSON response body. The API pages and invocation details
+ * are far smaller; an oversized body (a proxy page, a runaway payload) is
+ * refused instead of being buffered without limit.
  */
 export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
@@ -50,6 +50,13 @@ export interface AdminClientOptions {
   readonly defaultTimeoutMs: number;
 }
 
+/** A successfully downloaded media body plus the headers the CLI validates. */
+export interface MediaContent {
+  readonly bytes: Buffer;
+  readonly contentType: string | null;
+  readonly variant: string | null;
+}
+
 /**
  * Minimal JSON client for the Admin API. Requests never follow redirects and
  * are never retried; the timeout aborts the in-flight request and the response
@@ -74,18 +81,58 @@ export class AdminClient {
     return await this.#request('POST', path, undefined, body);
   }
 
-  async #request(
-    method: 'GET' | 'POST',
-    path: string,
-    query: URLSearchParams | undefined,
-    body: unknown,
-  ): Promise<unknown> {
+  /**
+   * Downloads a media body. The same redirect/timeout rules as JSON requests
+   * apply; the body is bounded by `maxBytes` so an oversized or stalled stream
+   * fails fast instead of filling memory or disk.
+   */
+  async getMedia(path: string, query: URLSearchParams, maxBytes: number): Promise<MediaContent> {
+    const url = this.#resolve(path, query);
+    const init: RequestInit = {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${this.#apiKey}`,
+        accept: 'application/octet-stream',
+      },
+      redirect: 'error',
+      signal: AbortSignal.timeout(this.#defaultTimeoutMs),
+    };
+    try {
+      const response = await fetch(url, init);
+      if (!response.ok) {
+        throw await responseError(response);
+      }
+      const body = await readBodyBytes(response, maxBytes);
+      if (body.truncated) {
+        throw mediaTooLarge(maxBytes);
+      }
+      return {
+        bytes: body.bytes,
+        contentType: normalizeContentType(response.headers.get('content-type')),
+        variant: response.headers.get('x-plasticwan-media-variant'),
+      };
+    } catch (error) {
+      throw translateFetchError(error, this.#defaultTimeoutMs);
+    }
+  }
+
+  #resolve(path: string, query?: URLSearchParams): URL {
     const url = new URL(path.replace(/^\/+/, ''), this.#baseUrl);
     if (query !== undefined) {
       for (const [key, value] of query) {
         url.searchParams.set(key, value);
       }
     }
+    return url;
+  }
+
+  async #request(
+    method: 'GET' | 'POST',
+    path: string,
+    query: URLSearchParams | undefined,
+    body: unknown,
+  ): Promise<unknown> {
+    const url = this.#resolve(path, query);
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.#apiKey}`,
       accept: 'application/json',
@@ -113,6 +160,10 @@ export class AdminClient {
   }
 }
 
+function mediaTooLarge(maxBytes: number): CliError {
+  return new CliError('media_file_too_large', `media content exceeded ${maxBytes} bytes`);
+}
+
 function translateFetchError(error: unknown, timeoutMs: number): CliError {
   if (error instanceof CliError) {
     // A failed body read (invalid JSON, oversized body, ...) already carries a
@@ -133,15 +184,7 @@ function translateFetchError(error: unknown, timeoutMs: number): CliError {
 async function readJsonResponse(response: Response): Promise<unknown> {
   const bodyText = await readBodyText(response, MAX_RESPONSE_BYTES);
   if (!response.ok) {
-    if (bodyText.truncated) {
-      throw new CliError('http_error', `server responded with HTTP ${response.status} and an oversized body`);
-    }
-    const parsed = tryParseJson(bodyText.text);
-    if (isRecord(parsed) && typeof parsed.error === 'string' && parsed.error.length > 0) {
-      const message = typeof parsed.message === 'string' && parsed.message.length > 0 ? parsed.message : parsed.error;
-      throw new CliError(parsed.error, message);
-    }
-    throw new CliError('http_error', `server responded with HTTP ${response.status}`);
+    throw responseErrorFromBody(response, bodyText);
   }
   if (bodyText.truncated) {
     throw new CliError('response_too_large', `response exceeded ${MAX_RESPONSE_BYTES} bytes`);
@@ -156,20 +199,55 @@ async function readJsonResponse(response: Response): Promise<unknown> {
   return parsed;
 }
 
+async function responseError(response: Response): Promise<CliError> {
+  return responseErrorFromBody(response, await readBodyText(response, MAX_RESPONSE_BYTES));
+}
+
+/** A JSON error body survives as the error code/message; anything else is http_error. */
+function responseErrorFromBody(response: Response, bodyText: BodyText): CliError {
+  if (bodyText.truncated) {
+    return new CliError('http_error', `server responded with HTTP ${response.status} and an oversized body`);
+  }
+  const parsed = tryParseJson(bodyText.text);
+  if (isRecord(parsed) && typeof parsed.error === 'string' && parsed.error.length > 0) {
+    const message = typeof parsed.message === 'string' && parsed.message.length > 0 ? parsed.message : parsed.error;
+    return new CliError(parsed.error, message);
+  }
+  return new CliError('http_error', `server responded with HTTP ${response.status}`);
+}
+
+function normalizeContentType(raw: string | null): string | null {
+  if (raw === null) {
+    return null;
+  }
+  const type = (raw.split(';')[0] ?? '').trim().toLowerCase();
+  return type.length === 0 ? null : type;
+}
+
 interface BodyText {
   readonly text: string;
   readonly truncated: boolean;
 }
 
+interface BodyBytes {
+  readonly bytes: Buffer;
+  readonly truncated: boolean;
+}
+
 async function readBodyText(response: Response, maxBytes: number): Promise<BodyText> {
+  const body = await readBodyBytes(response, maxBytes);
+  return { text: body.truncated ? '' : body.bytes.toString('utf8'), truncated: body.truncated };
+}
+
+async function readBodyBytes(response: Response, maxBytes: number): Promise<BodyBytes> {
   const declared = response.headers.get('content-length');
   if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
     await response.body?.cancel().catch(() => undefined);
-    return { text: '', truncated: true };
+    return { bytes: Buffer.alloc(0), truncated: true };
   }
   const stream = response.body;
   if (stream === null) {
-    return { text: '', truncated: false };
+    return { bytes: Buffer.alloc(0), truncated: false };
   }
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -186,14 +264,14 @@ async function readBodyText(response: Response, maxBytes: number): Promise<BodyT
       total += value.byteLength;
       if (total > maxBytes) {
         await reader.cancel().catch(() => undefined);
-        return { text: '', truncated: true };
+        return { bytes: Buffer.alloc(0), truncated: true };
       }
       chunks.push(value);
     }
   } finally {
     reader.releaseLock();
   }
-  return { text: Buffer.concat(chunks).toString('utf8'), truncated: false };
+  return { bytes: Buffer.concat(chunks), truncated: false };
 }
 
 function tryParseJson(text: string): unknown {

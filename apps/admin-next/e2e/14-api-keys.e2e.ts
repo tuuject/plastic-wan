@@ -3,7 +3,7 @@ import { adminBase, adminUrl } from './helpers.ts';
 
 /**
  * Programmatic API keys against the real AdminServer: session-only management,
- * one-time plaintext, a Bearer surface limited to the invocation routes,
+ * one-time plaintext, a Bearer surface limited to inspection and invocation routes,
  * immediate revocation, and the unwired replay engine answering 503. The
  * fixture seeds invocation 4001 (see test/fixtures/admin-seed.ts).
  *
@@ -75,12 +75,27 @@ test('API keys are managed by the session and only shown once', async ({ request
   ).toBe(true);
   expect(JSON.stringify(listing).includes(createdBody.key)).toBe(false);
 
-  // The Bearer surface covers the invocation list and one invocation.
+  // The Bearer surface covers invocation reads and the explicit inspection allowlist.
   const key = createdBody.key;
   const invocations = await request.get(await adminUrl('/api/invocations?limit=1'), { headers: bearer(key) });
   expect(invocations.status()).toBe(200);
   const detail = await request.get(await adminUrl('/api/invocations/4001'), { headers: bearer(key) });
   expect(detail.status()).toBe(200);
+  for (const source of ['active', 'file']) {
+    const configuration = await request.get(await adminUrl(`/api/config/view?source=${source}`), {
+      headers: bearer(key),
+    });
+    expect(configuration.status()).toBe(200);
+    const view = (await configuration.json()) as { source: string; config: Record<string, unknown> };
+    expect(view.source).toBe(source);
+    expect(JSON.stringify(view.config).includes('"api_key"')).toBe(false);
+    for (const scope of ['global', 'group']) {
+      const query = scope === 'group' ? `source=${source}&chat=123456789` : `source=${source}`;
+      const response = await request.get(await adminUrl(`/api/prompts/${scope}?${query}`), { headers: bearer(key) });
+      expect(response.status()).toBe(200);
+      expect(await response.json()).toMatchObject({ source, scope, core_read_only: true });
+    }
+  }
 
   // It does not cover other audits, key management, or the wider session
   // surface — not even when the request also carries the session cookie.
@@ -92,7 +107,7 @@ test('API keys are managed by the session and only shown once', async ({ request
   // Replay is not wired into the E2E fixture.
   const replay = await request.post(await adminUrl('/api/invocations/4001/replay'), {
     headers: bearer(key),
-    data: { system_prompt: 'What if?' },
+    data: { global_prompt: 'What if?' },
   });
   expect(replay.status()).toBe(503);
   expect(((await replay.json()) as { error: string }).error).toBe('replay_unavailable');
@@ -118,7 +133,7 @@ test('a present Authorization header never falls back to the session cookie', as
   });
   expect(garbage.status()).toBe(401);
 
-  // A valid key plus the cookie is still restricted to the invocation surface.
+  // A valid key plus the cookie is still restricted to inspection and invocation routes.
   const key = await createKey(request, 'e2e-boundary');
   const upgraded = await request.get(await adminUrl('/api/memories'), { headers: { cookie, ...bearer(key) } });
   expect(upgraded.status()).toBe(403);
@@ -209,11 +224,14 @@ test.describe('API key management UI', () => {
 
     const main = page.getByRole('main');
     await expect(main.getByText('API keys', { exact: true }).first()).toBeVisible();
-    // The permission note names the client and stays deliberately
-    // narrow: invocation list/get/replay for plasticwan-utils, nothing more.
-    await expect(main.getByText(/plasticwan-utils CLI/).first()).toBeVisible();
-    await expect(main.getByText(/invocation/i).first()).toBeVisible();
-    await expect(main.getByText(/replay/i).first()).toBeVisible();
+    // The permission note names the inspection/export surface without granting production writes.
+    const permissionNote = main.getByText(/plasticwan-utils CLI/);
+    await expect(permissionNote).toBeVisible();
+    await expect(permissionNote).toContainText('read redacted configuration and global/group prompts');
+    await expect(permissionNote).toContainText('export snapshot-authorized media');
+    await expect(permissionNote).toContainText('temporary prompt overrides');
+    await expect(permissionNote).toContainText('cannot change production prompts or configuration, or manage keys');
+    await expect(permissionNote).toContainText('may incur charges');
     await expect(main.getByRole('button', { name: 'Create API key' })).toBeVisible();
 
     const name = uniqueKeyName('once');

@@ -13,6 +13,7 @@ import { AddMemoryInputSchema } from '../src/context/memory.ts';
 import { AdminQueryError } from '../src/ingress/admin/audit.ts';
 import { AdminServer } from '../src/ingress/admin/server.ts';
 import { ReplayError, ReplayRunner } from '../src/orchestration/replay.ts';
+import { composeAgentPrompt, type AgentPromptLayers } from '../src/platform/agent-prompt.ts';
 import { KeyedSemaphore } from '../src/platform/concurrency.ts';
 import { loadConfig } from '../src/platform/config.ts';
 import { SecretStore } from '../src/platform/secrets.ts';
@@ -51,10 +52,21 @@ const definition = (name: string, parameters = Type.Object({})) => ({
 });
 const defaultMessages: Message[] = [{ role: 'user', content: 'recorded user input', timestamp: 1 }];
 const OVERRIDE_PROMPT = 'You are the overridden replay prompt.';
+const RECORDED_LAYERS: AgentPromptLayers = {
+  prefix: 'recorded fixed prefix',
+  global: 'recorded global prompt',
+  middle: 'recorded fixed middle',
+  group: 'recorded group prompt',
+};
+const RECORDED_VALUES = {
+  agent: { provider: 'snapshot-agent', model: 'snapshot-model' },
+  vision: { provider: 'snapshot-vision', model: 'snapshot-vision-model' },
+  timezone: 'Snapshot/Zone',
+};
 function replayInput(messages: Message[] = defaultMessages): string {
   return serializeReplayInput(
     {
-      systemPrompt: 'recorded system prompt',
+      systemPrompt: composeAgentPrompt(RECORDED_LAYERS, RECORDED_VALUES),
       messages,
       tools: [
         definition('send', SendInputSchema),
@@ -86,6 +98,7 @@ function replayInput(messages: Message[] = defaultMessages): string {
         },
       },
     ],
+    { layers: RECORDED_LAYERS, templateValues: RECORDED_VALUES },
   );
 }
 
@@ -137,10 +150,30 @@ async function fixture() {
   });
   // Same wiring as `serve` in src/application.ts: ReplayError becomes an
   // AdminQueryError with the engine's code and status, anything else is 500.
+  const toAdminQueryError = (error: unknown): never => {
+    if (error instanceof ReplayError) {
+      throw new AdminQueryError(error.code, error.message, error.status);
+    }
+    throw error;
+  };
   const server = new AdminServer({
     store,
     configStore,
     secrets,
+    replayPreflight: (id) => {
+      try {
+        return runner.inspect(id);
+      } catch (error) {
+        return toAdminQueryError(error);
+      }
+    },
+    invocationPrompts: (id) => {
+      try {
+        return runner.prompts(id);
+      } catch (error) {
+        return toAdminQueryError(error);
+      }
+    },
     replayInvocation: async (id, input, signal) => {
       try {
         return await runner.run(id, input, signal);
@@ -305,7 +338,7 @@ interface ReplayResult {
   readonly chat_id: string;
   readonly thread_id: string;
   readonly model: { readonly provider: string; readonly id: string; readonly thinking_level: string };
-  readonly overrides: { readonly system_prompt: boolean };
+  readonly overrides: { readonly global_prompt: boolean; readonly group_prompt: boolean };
   readonly completion_reason: string;
   readonly responded: boolean;
   readonly send_count: number;
@@ -341,7 +374,11 @@ test('CLI replay over real HTTP runs ReplayRunner with synthetic side effects an
 
   f.faux.setResponses([
     (context, options) => {
-      expect(context.systemPrompt).toBe(OVERRIDE_PROMPT);
+      // The recorded layers are rebuilt with only the global template swapped;
+      // the fixed prefix, middle and the recorded group layer stay verbatim.
+      expect(context.systemPrompt).toBe(
+        composeAgentPrompt({ ...RECORDED_LAYERS, global: OVERRIDE_PROMPT }, RECORDED_VALUES),
+      );
       expect(context.messages).toEqual(defaultMessages);
       expect(options).toMatchObject({ maxRetries: 0, maxTokens: 128 });
       return fauxAssistantMessage(
@@ -379,7 +416,7 @@ test('CLI replay over real HTTP runs ReplayRunner with synthetic side effects an
   expect(get.stderr).toBe('');
   expect(JSON.parse(get.stdout)).toMatchObject({ id: '4001', state: 'completed' });
 
-  const replay = await runCli(['invocation', 'replay', '4001', '--system-prompt', promptFile, '--json'], env);
+  const replay = await runCli(['invocation', 'replay', '4001', '--global-prompt', promptFile, '--json'], env);
   expect(replay.code).toBe(0);
   expect(replay.stderr).toBe('');
   const result = JSON.parse(replay.stdout) as ReplayResult;
@@ -395,7 +432,7 @@ test('CLI replay over real HTTP runs ReplayRunner with synthetic side effects an
     send_count: 1,
     completion_reason: 'completed',
     model: { provider: 'agent', id: 'agent-model', thinking_level: 'low' },
-    overrides: { system_prompt: true },
+    overrides: { global_prompt: true, group_prompt: false },
     usage: { model_calls: 2 },
     fidelity: {
       historical_model: { provider: 'openai', id: 'gpt-4.1-mini' },
@@ -454,6 +491,7 @@ test('cleared replay input fails the CLI with replay_input_unavailable and a rev
   f.setInput(null);
   const env = { PLASTICWAN_ENDPOINT: f.baseUrl, PLASTICWAN_API_KEY: admin.key };
 
+  // The CLI preflights first and reports the engine's stable reason verbatim.
   const cleared = await runCli(['invocation', 'replay', '4001', '--json'], env);
   expect(cleared.code).toBe(1);
   expect(cleared.stdout).toBe('');
@@ -486,4 +524,65 @@ test('cleared replay input fails the CLI with replay_input_unavailable and a rev
   expect(refused.stdout).toBe('');
   expect(JSON.parse(refused.stderr)).toMatchObject({ error: 'unauthenticated' });
   expect(f.faux.state.callCount).toBe(0);
+}, 120_000);
+
+test('preflight and recorded prompts are read-only HTTP reads that never call the model', async () => {
+  const f = await fixture();
+  const admin = await setupAdminSession(f.baseUrl);
+  f.setInput(replayInput());
+  const headers = { authorization: `Bearer ${admin.key}` };
+  const before = productionTables(f.rows());
+
+  const preflight = await fetch(`${f.baseUrl}/api/invocations/4001/replay-preflight`, { headers });
+  expect(preflight.status).toBe(200);
+  expect(await asObject(preflight)).toEqual({
+    available: true,
+    reason: null,
+    message: null,
+    source_model_call_id: '7001',
+    historical_model: { provider: 'openai', id: 'gpt-4.1-mini' },
+    prompt_overrides_available: true,
+    omitted_images: 0,
+    recording_enabled: false,
+    fidelity: {
+      input: 'first_model_request_text_only',
+      model_selection: 'current_chat_config',
+      hot_injections: 'not_replayed',
+      external_tools: 'blocked',
+      system_resources: 'current_read_only',
+      side_effects: 'synthetic',
+    },
+  });
+
+  const prompts = await fetch(`${f.baseUrl}/api/invocations/4001/prompts`, { headers });
+  expect(prompts.status).toBe(200);
+  expect(await asObject(prompts)).toMatchObject({
+    source: 'recorded',
+    source_invocation_id: '4001',
+    source_model_call_id: '7001',
+    global_prompt: RECORDED_LAYERS.global,
+    group_prompt: RECORDED_LAYERS.group,
+    template_values: RECORDED_VALUES,
+    core_read_only: true,
+  });
+  expect(f.faux.state.callCount).toBe(0);
+  // Neither read wrote anything, apart from the API key's own last_used_at.
+  expect(productionTables(f.rows())).toEqual(before);
+
+  // Clearing the payload makes the same preflight unavailable, and a missing
+  // invocation is still a 404 rather than an "unavailable" document.
+  f.setInput(null);
+  const cleared = await fetch(`${f.baseUrl}/api/invocations/4001/replay-preflight`, { headers });
+  expect(cleared.status).toBe(200);
+  expect(await asObject(cleared)).toMatchObject({
+    available: false,
+    reason: 'replay_input_unavailable',
+    source_model_call_id: '7001',
+  });
+  const missing = await fetch(`${f.baseUrl}/api/invocations/999999/replay-preflight`, { headers });
+  expect(missing.status).toBe(404);
+  expect(await asObject(missing)).toMatchObject({ error: 'not_found' });
+  expect(f.faux.state.callCount).toBe(0);
+  // The reads themselves wrote nothing; only the explicit payload clear moved a row.
+  expect(productionTables(f.rows())).not.toEqual(before);
 }, 120_000);

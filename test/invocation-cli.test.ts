@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MAX_RESPONSE_BYTES, parseEndpoint } from '../packages/cli/src/client.ts';
-import { MAX_SYSTEM_PROMPT_CHARS } from '../packages/cli/src/commands.ts';
+import { MAX_PROMPT_CHARS } from '../packages/cli/src/commands.ts';
 import { CliError } from '../packages/cli/src/errors.ts';
 
 const API_KEY = 'test-api-key-a1b2c3';
@@ -21,6 +21,28 @@ const ITEM = {
   total_tokens: 120,
   total_cost: 0.0012,
 };
+const PREFLIGHT = {
+  available: true,
+  reason: null,
+  message: null,
+  source_model_call_id: '11',
+  historical_model: 'test-model',
+  prompt_overrides_available: true,
+  omitted_images: 0,
+  recording_enabled: true,
+  fidelity: 'exact',
+};
+
+/** Replay now asks replay-preflight first; route it separately from the POST. */
+function preflightOr(handler: (request: CapturedRequest, response: ServerResponse) => void) {
+  return (request: CapturedRequest, response: ServerResponse): void => {
+    if ((request.url ?? '').endsWith('/replay-preflight')) {
+      jsonResponse(response, 200, PREFLIGHT);
+      return;
+    }
+    handler(request, response);
+  };
+}
 
 interface CapturedRequest {
   readonly method: string;
@@ -255,54 +277,82 @@ describe('plasticwan-utils invocation CLI', () => {
     }
   }, 20_000);
 
-  it('replay sends an empty JSON object without --system-prompt', async () => {
-    const server = await startServer((_request, response) => {
-      jsonResponse(response, 200, { status: 'started', invocation_id: '43', error: null });
-    });
+  it('replay asks the preflight first and sends an empty JSON object without prompt overrides', async () => {
+    const server = await startServer(
+      preflightOr((_request, response) => {
+        jsonResponse(response, 200, { status: 'started', invocation_id: '43', error: null });
+      }),
+    );
     try {
       const result = await runCli(['invocation', 'replay', '42', '--json'], {
         env: { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY },
       });
       expect(result.code).toBe(0);
       expect(result.stderr).toBe('');
-      const request = onlyRequest(server);
-      expect(request.method).toBe('POST');
-      expect(request.url).toBe('/api/invocations/42/replay');
-      expect(request.headers['content-type']).toContain('application/json');
-      expect(JSON.parse(request.body)).toEqual({});
+      expect(server.requests).toHaveLength(2);
+      const preflight = server.requests[0];
+      expect(preflight?.method).toBe('GET');
+      expect(preflight?.url).toBe('/api/invocations/42/replay-preflight');
+      const request = server.requests[1];
+      expect(request?.method).toBe('POST');
+      expect(request?.url).toBe('/api/invocations/42/replay');
+      expect(request?.headers['content-type']).toContain('application/json');
+      expect(JSON.parse(request?.body ?? '')).toEqual({});
     } finally {
       await server.close();
     }
   }, 20_000);
 
-  it('replay reads --system-prompt from a file and from stdin', async () => {
-    const server = await startServer((_request, response) => {
-      jsonResponse(response, 200, { status: 'started', error: null });
-    });
+  it('replay reads --global-prompt and --group-prompt from files and stdin', async () => {
+    const server = await startServer(
+      preflightOr((_request, response) => {
+        jsonResponse(response, 200, { status: 'started', error: null });
+      }),
+    );
     try {
       const env = { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY };
-      const fromFile = await runCli(['invocation', 'replay', '42', '--system-prompt', promptFile, '--json'], { env });
+      const fromFile = await runCli(['invocation', 'replay', '42', '--global-prompt', promptFile, '--json'], { env });
       expect(fromFile.code).toBe(0);
-      expect(JSON.parse(onlyRequest(server).body)).toEqual({ system_prompt: 'from the prompt file' });
+      expect(JSON.parse(server.requests[1]?.body ?? '')).toEqual({ global_prompt: 'from the prompt file' });
 
-      const fromStdin = await runCli(['invocation', 'replay', '42', '--system-prompt', '-', '--json'], {
+      const fromStdin = await runCli(['invocation', 'replay', '42', '--group-prompt', '-', '--json'], {
         env,
         stdin: 'from stdin',
       });
       expect(fromStdin.code).toBe(0);
-      expect(JSON.parse(server.requests[1]?.body ?? '')).toEqual({ system_prompt: 'from stdin' });
+      expect(JSON.parse(server.requests[3]?.body ?? '')).toEqual({ group_prompt: 'from stdin' });
+
+      // An empty group prompt is legal; an empty global prompt is rejected.
+      const emptyGroup = await runCli(['invocation', 'replay', '42', '--group-prompt', '-', '--json'], {
+        env,
+        stdin: '',
+      });
+      expect(emptyGroup.code).toBe(0);
+      expect(JSON.parse(server.requests[5]?.body ?? '')).toEqual({ group_prompt: '' });
+
+      const both = await runCli(
+        ['invocation', 'replay', '42', '--global-prompt', promptFile, '--group-prompt', '-', '--json'],
+        { env, stdin: 'group' },
+      );
+      expect(both.code).toBe(0);
+      expect(JSON.parse(server.requests[7]?.body ?? '')).toEqual({
+        global_prompt: 'from the prompt file',
+        group_prompt: 'group',
+      });
     } finally {
       await server.close();
     }
-  }, 20_000);
+  }, 30_000);
 
   it.each(['provider_unavailable', { code: 'model_error', message: 'upstream down' }])(
     'replay keeps a structured failure on stdout and emits JSON stderr: %j',
     async (error) => {
       const failure = { version: 1, source_invocation_id: '42', error };
-      const server = await startServer((_request, response) => {
-        jsonResponse(response, 200, failure);
-      });
+      const server = await startServer(
+        preflightOr((_request, response) => {
+          jsonResponse(response, 200, failure);
+        }),
+      );
       try {
         const result = await runCli(['invocation', 'replay', '42', '--json'], {
           env: { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY },
@@ -379,7 +429,7 @@ describe('plasticwan-utils invocation CLI', () => {
       });
       try {
         const result = await runCli(
-          ['invocation', 'replay', '42', '--system-prompt', '-', '--timeout-ms', '250', '--json'],
+          ['invocation', 'replay', '42', '--global-prompt', '-', '--timeout-ms', '250', '--json'],
           {
             env: { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY },
             stdin,
@@ -472,21 +522,23 @@ describe('plasticwan-utils invocation CLI', () => {
 
   it('redacts the API key echoed by successful bodies and keeps JSON valid', async () => {
     const echo = `key ${API_KEY}`;
-    const server = await startServer((request, response) => {
-      const path = request.url ?? '';
-      if (path.endsWith('/replay')) {
-        jsonResponse(response, 200, { status: 'started', invocation_id: '43', error: null, echo });
-        return;
-      }
-      if (path.startsWith('/api/invocations/')) {
-        jsonResponse(response, 200, { id: '42', state: 'failed', echo });
-        return;
-      }
-      jsonResponse(response, 200, {
-        items: [{ ...ITEM, chat: { ...ITEM.chat, title: `group ${API_KEY}` } }],
-        next_cursor: echo,
-      });
-    });
+    const server = await startServer(
+      preflightOr((request, response) => {
+        const path = request.url ?? '';
+        if (path.endsWith('/replay')) {
+          jsonResponse(response, 200, { status: 'started', invocation_id: '43', error: null, echo });
+          return;
+        }
+        if (path.startsWith('/api/invocations/')) {
+          jsonResponse(response, 200, { id: '42', state: 'failed', echo });
+          return;
+        }
+        jsonResponse(response, 200, {
+          items: [{ ...ITEM, chat: { ...ITEM.chat, title: `group ${API_KEY}` } }],
+          next_cursor: echo,
+        });
+      }),
+    );
     try {
       const env = { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY };
       const runs: readonly (readonly [readonly string[], string])[] = [
@@ -518,9 +570,11 @@ describe('plasticwan-utils invocation CLI', () => {
       error: `provider_unavailable ${API_KEY}`,
       message: `upstream ${API_KEY} is down`,
     };
-    const server = await startServer((_request, response) => {
-      jsonResponse(response, 200, failure);
-    });
+    const server = await startServer(
+      preflightOr((_request, response) => {
+        jsonResponse(response, 200, failure);
+      }),
+    );
     try {
       const result = await runCli(['invocation', 'replay', '42', '--json'], {
         env: { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY },
@@ -601,6 +655,39 @@ describe('plasticwan-utils invocation CLI', () => {
       expect(wrongOption.code).toBe(2);
       expect(errorDocument(wrongOption).error).toBe('unexpected_option');
 
+      const removedSystemPrompt = await runCli(['invocation', 'replay', '4', '--system-prompt', 'x', '--json'], {
+        env,
+      });
+      expect(removedSystemPrompt.code).toBe(2);
+      expect(errorDocument(removedSystemPrompt).error).toBe('invalid_arguments');
+
+      const wrongMediaFlag = await runCli(['invocation', 'media', '4', '--source', 'active', '--json'], { env });
+      expect(wrongMediaFlag.code).toBe(2);
+      expect(errorDocument(wrongMediaFlag).error).toBe('unexpected_option');
+
+      const badSource = await runCli(['config', 'show', '--source', 'runtime', '--json'], { env });
+      expect(badSource.code).toBe(2);
+      expect(errorDocument(badSource).error).toBe('invalid_source');
+
+      const badVariant = await runCli(['invocation', 'media', '4', '--variant', 'thumbnail', '--json'], { env });
+      expect(badVariant.code).toBe(2);
+      expect(errorDocument(badVariant).error).toBe('invalid_variant');
+
+      const groupWithoutChat = await runCli(['prompt', 'get', 'group', '--json'], { env });
+      expect(groupWithoutChat.code).toBe(2);
+      expect(errorDocument(groupWithoutChat).error).toBe('missing_argument');
+
+      const chatOnGlobal = await runCli(['prompt', 'get', 'global', '--chat', '-1', '--json'], { env });
+      expect(chatOnGlobal.code).toBe(2);
+      expect(errorDocument(chatOnGlobal).error).toBe('unexpected_option');
+
+      const bothStdin = await runCli(
+        ['invocation', 'replay', '4', '--global-prompt', '-', '--group-prompt', '-', '--json'],
+        { env },
+      );
+      expect(bothStdin.code).toBe(2);
+      expect(errorDocument(bothStdin).error).toBe('conflicting_prompt_input');
+
       expect(server.requests).toHaveLength(0);
     } finally {
       await server.close();
@@ -628,6 +715,53 @@ describe('plasticwan-utils invocation CLI', () => {
         expect(errorDocument(result).error, args.join(' ')).toBe(code);
       }
       expect(server.requests).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  it('canonicalizes leading-zero decimal ids for every id input', async () => {
+    const server = await startServer(
+      preflightOr((request, response) => {
+        const path = request.url ?? '';
+        if (path.startsWith('/api/invocations?')) {
+          jsonResponse(response, 200, { items: [], next_cursor: null });
+          return;
+        }
+        if (path.startsWith('/api/prompts/')) {
+          jsonResponse(response, 200, {
+            source: 'active',
+            scope: 'group',
+            chat_id: '-42',
+            prompt: 'group prompt',
+            core_read_only: true,
+            generation: 1,
+            hash: 'group-hash',
+          });
+          return;
+        }
+        if (path.endsWith('/replay')) {
+          jsonResponse(response, 200, { status: 'started', invocation_id: '8', error: null });
+          return;
+        }
+        jsonResponse(response, 200, { id: '42', state: 'completed' });
+      }),
+    );
+    try {
+      const env = { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY };
+      expect((await runCli(['invocation', 'get', '0042', '--json'], { env })).code).toBe(0);
+      expect(
+        (await runCli(['invocation', 'list', '--cursor', '007', '--chat', '-00100', '--json'], { env })).code,
+      ).toBe(0);
+      expect((await runCli(['invocation', 'replay', '0007', '--json'], { env })).code).toBe(0);
+      expect((await runCli(['prompt', 'get', 'group', '--chat', '-0042', '--json'], { env })).code).toBe(0);
+      expect(server.requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+        'GET /api/invocations/42',
+        'GET /api/invocations?cursor=7&chat=-100',
+        'GET /api/invocations/7/replay-preflight',
+        'POST /api/invocations/7/replay',
+        'GET /api/prompts/group?source=active&chat=-42',
+      ]);
     } finally {
       await server.close();
     }
@@ -664,33 +798,68 @@ describe('plasticwan-utils invocation CLI', () => {
     expect(errorDocument(nonHttp).error).toBe('invalid_endpoint');
   }, 30_000);
 
-  it('caps --system-prompt input and rejects empty prompts', async () => {
-    const server = await startServer((_request, response) => {
-      jsonResponse(response, 200, { status: 'started', error: null });
-    });
+  it('caps prompt parts and rejects empty global prompts', async () => {
+    const server = await startServer(
+      preflightOr((_request, response) => {
+        jsonResponse(response, 200, { status: 'started', error: null });
+      }),
+    );
     try {
       const env = { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY };
-      const tooLarge = await runCli(['invocation', 'replay', '5', '--system-prompt', '-', '--json'], {
+      const tooLarge = await runCli(['invocation', 'replay', '5', '--global-prompt', '-', '--json'], {
         env,
-        stdin: 'a'.repeat(MAX_SYSTEM_PROMPT_CHARS + 1),
+        stdin: 'a'.repeat(MAX_PROMPT_CHARS + 1),
       });
       expect(tooLarge.code).toBe(2);
-      expect(errorDocument(tooLarge).error).toBe('system_prompt_too_large');
+      expect(errorDocument(tooLarge).error).toBe('global_prompt_too_large');
 
-      const empty = await runCli(['invocation', 'replay', '5', '--system-prompt', '-', '--json'], {
+      const empty = await runCli(['invocation', 'replay', '5', '--global-prompt', '-', '--json'], {
         env,
         stdin: '   ',
       });
       expect(empty.code).toBe(2);
-      expect(errorDocument(empty).error).toBe('system_prompt_empty');
+      expect(errorDocument(empty).error).toBe('global_prompt_empty');
 
       const missingFile = await runCli(
-        ['invocation', 'replay', '5', '--system-prompt', join(workDir, 'absent.txt'), '--json'],
+        ['invocation', 'replay', '5', '--global-prompt', join(workDir, 'absent.txt'), '--json'],
         { env },
       );
       expect(missingFile.code).toBe(2);
-      expect(errorDocument(missingFile).error).toBe('system_prompt_read_failed');
+      expect(errorDocument(missingFile).error).toBe('global_prompt_read_failed');
 
+      const groupTooLarge = await runCli(['invocation', 'replay', '5', '--group-prompt', '-', '--json'], {
+        env,
+        stdin: 'a'.repeat(MAX_PROMPT_CHARS + 1),
+      });
+      expect(groupTooLarge.code).toBe(2);
+      expect(errorDocument(groupTooLarge).error).toBe('group_prompt_too_large');
+
+      expect(server.requests).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
+  it('refuses a prompt path that is not a regular file before reading it', async () => {
+    const server = await startServer(
+      preflightOr((_request, response) => {
+        jsonResponse(response, 200, { status: 'started', error: null });
+      }),
+    );
+    try {
+      const env = { PLASTICWAN_ENDPOINT: server.baseUrl, PLASTICWAN_API_KEY: API_KEY };
+      // /dev/null is a character device; on Windows the temp directory stands
+      // in for the same "stat() succeeds but this is not a regular file" case.
+      const notARegularFile = process.platform === 'win32' ? workDir : '/dev/null';
+      const result = await runCli(['invocation', 'replay', '5', '--global-prompt', notARegularFile, '--json'], {
+        env,
+      });
+      expect(result.code).toBe(2);
+      expect(result.stdout).toBe('');
+      expect(errorDocument(result)).toEqual({
+        error: 'global_prompt_read_failed',
+        message: `global prompt file must be a regular file: ${notARegularFile}`,
+      });
       expect(server.requests).toHaveLength(0);
     } finally {
       await server.close();

@@ -27,12 +27,15 @@ async function home(): Promise<string> {
   return dir;
 }
 
-async function server(handler: (response: ServerResponse) => void) {
+async function server(
+  handler: (response: ServerResponse, request: { method: string | undefined; url: string | undefined }) => void,
+) {
   const requests: Array<{ method: string | undefined; url: string | undefined; authorization: string | undefined }> =
     [];
   const http = createServer((request, response) => {
-    requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization });
-    handler(response);
+    const captured = { method: request.method, url: request.url, authorization: request.headers.authorization };
+    requests.push(captured);
+    handler(response, captured);
   });
   await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve));
   cleanup.push(async () => {
@@ -250,9 +253,23 @@ describe('plasticwan-utils login and doctor', () => {
     'keeps JSON valid while redacting saved keys, including structural characters (%j)',
     async (apiKey) => {
       const homeDir = await home();
-      const http = await server((response) =>
-        json(response, 200, { id: '7', error: null, items: [{ id: 42, echo: `key ${apiKey}` }], next_cursor: null }),
-      );
+      const http = await server((response, request) => {
+        if ((request.url ?? '').endsWith('/replay-preflight')) {
+          json(response, 200, {
+            available: true,
+            reason: null,
+            message: null,
+            source_model_call_id: '1',
+            historical_model: null,
+            prompt_overrides_available: true,
+            omitted_images: 0,
+            recording_enabled: true,
+            fidelity: {},
+          });
+          return;
+        }
+        json(response, 200, { id: '7', error: null, items: [{ id: 42, echo: `key ${apiKey}` }], next_cursor: null });
+      });
       await writeCredentials(credentialsPath(homeDir), { endpoint: http.endpoint, apiKey });
       for (const args of [
         ['invocation', 'list', '--json'],
@@ -274,7 +291,8 @@ describe('plasticwan-utils login and doctor', () => {
       const doctor = await cli(['doctor', '--json'], homeDir);
       expect(doctor.code).toBe(0);
       expect(JSON.parse(doctor.stdout).status).toBe('ok');
-      expect(http.requests).toHaveLength(6);
+      // Two replays now run a preflight GET before the POST.
+      expect(http.requests).toHaveLength(8);
     },
   );
 

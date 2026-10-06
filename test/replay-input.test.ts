@@ -5,9 +5,10 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Context } from '@earendil-works/pi-ai';
 import Type from 'typebox';
 import { afterEach, describe, expect, test } from 'vitest';
+import { composeAgentPrompt } from '../src/platform/agent-prompt.ts';
 import { loadConfig } from '../src/platform/config.ts';
 import { purgeExpiredData, SqliteStore } from '../src/store/database.ts';
-import { parseReplayInput, serializeReplayInput } from '../src/store/replay-input.ts';
+import { parseReplayInput, ReplayInputSerializationError, serializeReplayInput } from '../src/store/replay-input.ts';
 import { writeTestConfig } from './helpers.ts';
 
 const directories: string[] = [];
@@ -27,10 +28,35 @@ function agentTool(name: string, label: string, description: string): AgentTool 
   };
 }
 
-function validSnapshot(overrides: Record<string, unknown> = {}): string {
+const LAYERS = {
+  prefix: 'fixed prefix',
+  global: 'global {{agent.model}}',
+  middle: 'fixed middle',
+  group: 'group {{timezone}}',
+};
+const TEMPLATE_VALUES = {
+  agent: { provider: 'gateway', model: 'chat-model' },
+  vision: { provider: 'vision-gateway', model: 'vision-model' },
+  timezone: 'Asia/Shanghai',
+};
+const SYSTEM_PROMPT = composeAgentPrompt(LAYERS, TEMPLATE_VALUES);
+const PROMPT = { layers: LAYERS, templateValues: TEMPLATE_VALUES };
+
+function validSnapshot(overrides: Record<string, unknown> = {}, version: 1 | 2 = 1): string {
   return JSON.stringify({
-    version: 1,
-    system_prompt: 'snapshot',
+    version,
+    system_prompt: version === 2 ? SYSTEM_PROMPT : 'snapshot',
+    ...(version === 2
+      ? {
+          prompt_parts: {
+            prefix: LAYERS.prefix,
+            global: LAYERS.global,
+            middle: LAYERS.middle,
+            group: LAYERS.group,
+            template_values: TEMPLATE_VALUES,
+          },
+        }
+      : {}),
     messages: [JSON.stringify({ role: 'user', content: 'hello', timestamp: 1 })],
     tools: [],
     capabilities: [],
@@ -40,9 +66,9 @@ function validSnapshot(overrides: Record<string, unknown> = {}): string {
 }
 
 describe('replay input codec', () => {
-  test('round-trips text, an assistant tool call and its tool result', () => {
+  test('round-trips text, an assistant tool call and its tool result with the prompt layers', () => {
     const context: Context = {
-      systemPrompt: 'Replay fixture',
+      systemPrompt: SYSTEM_PROMPT,
       messages: [
         { role: 'user', content: 'hello', timestamp: 1 },
         {
@@ -77,13 +103,28 @@ describe('replay input codec', () => {
       tools: [{ name: 'send', description: 'Send a message', parameters: Type.Object({ text: Type.String() }) }],
     };
 
-    const json = serializeReplayInput(context, [
-      agentTool('web_fetch', 'Web Fetch', 'Fetch a URL'),
-      agentTool('search_stickers', 'Search Stickers', 'Search the sticker index'),
-    ]);
+    const json = serializeReplayInput(
+      context,
+      [
+        agentTool('web_fetch', 'Web Fetch', 'Fetch a URL'),
+        agentTool('search_stickers', 'Search Stickers', 'Search the sticker index'),
+      ],
+      PROMPT,
+    );
     const { input, messages } = parseReplayInput(json);
 
-    expect(input).toMatchObject({ version: 1, system_prompt: 'Replay fixture', omitted_images: 0 });
+    expect(input).toMatchObject({
+      version: 2,
+      system_prompt: SYSTEM_PROMPT,
+      omitted_images: 0,
+      prompt_parts: {
+        prefix: 'fixed prefix',
+        global: 'global {{agent.model}}',
+        middle: 'fixed middle',
+        group: 'group {{timezone}}',
+        template_values: TEMPLATE_VALUES,
+      },
+    });
     expect(input.tools.map((tool) => tool.name)).toEqual(['send']);
     expect(input.capabilities.map((tool) => tool.name)).toEqual(['web_fetch', 'search_stickers']);
     expect(input.capabilities[0]).toMatchObject({
@@ -97,9 +138,53 @@ describe('replay input codec', () => {
     expect(messages).toHaveLength(3);
   });
 
+  test('refuses to record a snapshot whose layers do not reproduce the system prompt', () => {
+    const context: Context = { systemPrompt: 'a different prompt', messages: [], tools: [] };
+    const failure = (): unknown => {
+      try {
+        serializeReplayInput(context, [], PROMPT);
+      } catch (error) {
+        return error;
+      }
+      throw new Error('expected serialization to fail');
+    };
+    expect(failure()).toBeInstanceOf(ReplayInputSerializationError);
+    expect(failure()).toMatchObject({ code: 'prompt_parts_mismatch' });
+    // An unrepresentable message fails with its own code instead of a partial record.
+    const unrepresentable: Context = {
+      systemPrompt: SYSTEM_PROMPT,
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'failed' }],
+          api: 'openai-responses',
+          provider: 'agent',
+          model: 'agent-model',
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: 'error',
+          timestamp: 2,
+        },
+      ],
+      tools: [],
+    };
+    try {
+      serializeReplayInput(unrepresentable, [], PROMPT);
+      throw new Error('expected serialization to fail');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'unsupported_message' });
+    }
+  });
+
   test('drops inline images, keeps the text and reports the omitted count', () => {
     const context: Context = {
-      systemPrompt: 'vision',
+      systemPrompt: SYSTEM_PROMPT,
       messages: [
         {
           role: 'user',
@@ -123,12 +208,13 @@ describe('replay input codec', () => {
       ],
     };
 
-    const json = serializeReplayInput(context, []);
+    const json = serializeReplayInput(context, [], PROMPT);
     expect(json).not.toContain('BASE64_USER');
     expect(json).not.toContain('BASE64_TOOL');
     expect(json).not.toContain('image/png');
 
     const { input, messages } = parseReplayInput(json);
+    expect(input.version).toBe(2);
     expect(input.omitted_images).toBe(2);
     expect(messages[0]).toEqual({ role: 'user', content: [{ type: 'text', text: 'what is this' }], timestamp: 10 });
     expect(messages[1]).toEqual({
@@ -141,7 +227,7 @@ describe('replay input codec', () => {
     });
   });
 
-  test('rejects malformed JSON and snapshots violating the version 1 schema', () => {
+  test('rejects malformed JSON and snapshots violating the version schema', () => {
     expect(() => parseReplayInput('{ not json')).toThrow();
     expect(() => parseReplayInput(validSnapshot({ extra: true }))).toThrow('Invalid replay input snapshot');
     expect(() => parseReplayInput(validSnapshot({ messages: [] }))).toThrow('Invalid replay input snapshot');
@@ -150,10 +236,43 @@ describe('replay input codec', () => {
     expect(() =>
       parseReplayInput(validSnapshot({ tools: [{ name: 'send!', label: 'Send', description: 'd', parameters: {} }] })),
     ).toThrow('Invalid replay input snapshot');
+    // Version 2 must carry prompt parts; the version marker alone is not enough.
+    expect(() => parseReplayInput(validSnapshot({}, 2))).not.toThrow();
+    expect(() => parseReplayInput(validSnapshot({ prompt_parts: undefined }, 2))).toThrow(
+      'Invalid replay input snapshot',
+    );
+    expect(() => parseReplayInput(validSnapshot({ prompt_parts: { prefix: 'x' } }, 2))).toThrow(
+      'Invalid replay input snapshot',
+    );
+  });
+
+  test('rejects a version 2 snapshot whose layers no longer reproduce its system prompt', () => {
+    expect(() => parseReplayInput(validSnapshot({ system_prompt: 'tampered' }, 2))).toThrow(
+      'Invalid replay input snapshot',
+    );
+    // A stored template that is no longer renderable is corruption, not a prompt.
+    expect(() =>
+      parseReplayInput(
+        validSnapshot(
+          {
+            system_prompt: '{{agent.api_key}}',
+            prompt_parts: {
+              prefix: '',
+              global: '{{agent.api_key}}',
+              middle: '',
+              group: '',
+              template_values: TEMPLATE_VALUES,
+            },
+          },
+          2,
+        ),
+      ),
+    ).toThrow('Invalid replay input snapshot');
   });
 
   test('rejects an unknown snapshot version', () => {
-    expect(() => parseReplayInput(validSnapshot({ version: 2 }))).toThrow('Invalid replay input snapshot');
+    expect(() => parseReplayInput(validSnapshot({ version: 3 }))).toThrow('Invalid replay input snapshot');
+    expect(() => parseReplayInput(validSnapshot({ version: '1' }))).toThrow('Invalid replay input snapshot');
   });
 
   test('rejects duplicate tool definitions within either list', () => {

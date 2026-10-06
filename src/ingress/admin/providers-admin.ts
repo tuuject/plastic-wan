@@ -181,7 +181,13 @@ export function supervisedRestartEnabled(): boolean {
   return process.env.PLASTICWAN_SUPERVISED === '1';
 }
 
-export function listProviders(file: FileConfig, revision: string, restartRequired: readonly string[]): ProvidersView {
+export function listProviders(
+  file: Pick<FileConfig, 'providers' | 'vision'> & {
+    agent: Pick<FileConfig['agent'], 'provider' | 'model' | 'thinking_level'>;
+  },
+  revision: string,
+  restartRequired: readonly string[],
+): ProvidersView {
   return {
     revision,
     supervised: supervisedRestartEnabled(),

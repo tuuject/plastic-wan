@@ -1,15 +1,26 @@
 import { Buffer } from 'node:buffer';
+import type { Stats } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
-import type { GetCommand, InvocationCommand, ListCommand, ReplayCommand } from './args.ts';
+import type {
+  CliCommand,
+  ConfigShowCommand,
+  GetCommand,
+  ListCommand,
+  PreflightCommand,
+  PromptGetCommand,
+  PromptsCommand,
+  ReplayCommand,
+} from './args.ts';
 import { type AdminClient, isRecord } from './client.ts';
 import { CliError, usageError } from './errors.ts';
+import { runMedia } from './media.ts';
 
 /**
- * `--system-prompt` accepts at most 64Ki characters. The byte cap bounds the
- * buffer while reading; the character cap is the actual contract.
+ * `--global-prompt` and `--group-prompt` accept at most 64Ki characters. The
+ * byte cap bounds the buffer while reading; the character cap is the contract.
  */
-export const MAX_SYSTEM_PROMPT_CHARS = 65_536;
-const MAX_SYSTEM_PROMPT_BYTES = MAX_SYSTEM_PROMPT_CHARS * 4;
+export const MAX_PROMPT_CHARS = 65_536;
+const MAX_PROMPT_BYTES = MAX_PROMPT_CHARS * 4;
 
 export interface CliIo {
   readonly stdout: (text: string) => void;
@@ -20,10 +31,12 @@ export interface CommandContext {
   readonly json: boolean;
   readonly io: CliIo;
   readonly timeoutMs: number;
+  /** Redacts known secrets from any text the CLI prints or persists. */
+  readonly redact: (text: string) => string;
 }
 
 export async function executeCommand(
-  command: InvocationCommand,
+  command: CliCommand,
   context: CommandContext,
   client: AdminClient,
 ): Promise<number> {
@@ -32,8 +45,18 @@ export async function executeCommand(
       return await runList(command, context, client);
     case 'get':
       return await runGet(command, context, client);
+    case 'prompts':
+      return await runPrompts(command, context, client);
+    case 'preflight':
+      return await runPreflight(command, context, client);
+    case 'media':
+      return await runMedia(command, context, client);
     case 'replay':
       return await runReplay(command, context, client);
+    case 'config-show':
+      return await runConfigShow(command, context, client);
+    case 'prompt-get':
+      return await runPromptGet(command, context, client);
   }
 }
 
@@ -68,14 +91,61 @@ async function runGet(command: GetCommand, context: CommandContext, client: Admi
   if (!isRecord(raw) || typeof raw.id !== 'string') {
     throw new CliError('invalid_response', 'invocation response has an unexpected shape');
   }
-  context.io.stdout(context.json ? `${JSON.stringify(raw)}\n` : `${JSON.stringify(raw, null, 2)}\n`);
+  writeDocument(raw, context);
+  return 0;
+}
+
+async function runPrompts(command: PromptsCommand, context: CommandContext, client: AdminClient): Promise<number> {
+  const raw = await client.get(`api/invocations/${command.id}/prompts`);
+  if (
+    !isRecord(raw) ||
+    raw.source !== 'recorded' ||
+    typeof raw.source_invocation_id !== 'string' ||
+    !isNullableString(raw.source_model_call_id) ||
+    typeof raw.global_prompt !== 'string' ||
+    typeof raw.group_prompt !== 'string' ||
+    raw.core_read_only !== true ||
+    !isNullableRecord(raw.template_values)
+  ) {
+    throw new CliError('invalid_response', 'recorded prompt response has an unexpected shape');
+  }
+  writeDocument(raw, context);
+  return 0;
+}
+
+async function runPreflight(command: PreflightCommand, context: CommandContext, client: AdminClient): Promise<number> {
+  const raw = await client.get(`api/invocations/${command.id}/replay-preflight`);
+  if (!isPreflight(raw)) {
+    throw new CliError('invalid_response', 'replay preflight response has an unexpected shape');
+  }
+  writeDocument(raw, context);
   return 0;
 }
 
 async function runReplay(command: ReplayCommand, context: CommandContext, client: AdminClient): Promise<number> {
-  const body: Record<string, unknown> = {};
-  if (command.systemPromptSource !== undefined) {
-    body.system_prompt = await readSystemPrompt(command.systemPromptSource, context.timeoutMs);
+  // Prompt input is fully resolved (including stdin) before any request, so a
+  // stalled stdin never sends a preflight the old contract would not have sent.
+  const body: Record<string, string> = {};
+  if (command.globalPromptSource !== undefined) {
+    body.global_prompt = await readPromptPart('global', command.globalPromptSource, context, false);
+  }
+  if (command.groupPromptSource !== undefined) {
+    body.group_prompt = await readPromptPart('group', command.groupPromptSource, context, true);
+  }
+  const preflight = await client.get(`api/invocations/${command.id}/replay-preflight`);
+  if (!isPreflight(preflight)) {
+    throw new CliError('invalid_response', 'replay preflight response has an unexpected shape');
+  }
+  if (preflight.available !== true) {
+    // The preflight reason is the engine's own stable code, so the CLI reports
+    // exactly the failure a POST would have produced instead of a new one.
+    throw unavailableError(preflight);
+  }
+  if (Object.keys(body).length > 0 && preflight.prompt_overrides_available !== true) {
+    throw new CliError(
+      'replay_prompt_parts_unavailable',
+      'this invocation cannot replay with prompt overrides (prompt_overrides_available is false)',
+    );
   }
   const raw = await client.post(`api/invocations/${command.id}/replay`, body);
   if (!isRecord(raw)) {
@@ -84,11 +154,86 @@ async function runReplay(command: ReplayCommand, context: CommandContext, client
   // Preserve the structured result even on failure; runCli reports the
   // failure through the shared JSON stderr and exit-code path.
   const failed = raw.error !== undefined && raw.error !== null;
-  context.io.stdout(context.json ? `${JSON.stringify(raw)}\n` : `${JSON.stringify(raw, null, 2)}\n`);
+  writeDocument(raw, context);
   if (failed) {
     throw new CliError('replay_failed', `replay did not complete: ${describeError(raw.error)}`);
   }
   return 0;
+}
+
+async function runConfigShow(
+  command: ConfigShowCommand,
+  context: CommandContext,
+  client: AdminClient,
+): Promise<number> {
+  const query = new URLSearchParams({ source: command.source ?? 'active' });
+  const raw = await client.get('api/config/view', query);
+  if (!isRecord(raw) || typeof raw.source !== 'string' || !isRecord(raw.config)) {
+    throw new CliError('invalid_response', 'config view response has an unexpected shape');
+  }
+  writeDocument(raw, context);
+  return 0;
+}
+
+async function runPromptGet(command: PromptGetCommand, context: CommandContext, client: AdminClient): Promise<number> {
+  const query = new URLSearchParams({ source: command.source ?? 'active' });
+  if (command.chat !== undefined) {
+    query.set('chat', command.chat);
+  }
+  const raw = await client.get(`api/prompts/${command.scope}`, query);
+  if (!isRecord(raw)) {
+    throw new CliError('invalid_response', 'prompt response has an unexpected shape');
+  }
+  if (
+    raw.scope !== command.scope ||
+    typeof raw.prompt !== 'string' ||
+    raw.core_read_only !== true ||
+    !isNullableString(raw.chat_id) ||
+    typeof raw.source !== 'string'
+  ) {
+    throw new CliError('invalid_response', `prompt ${command.scope} response has an unexpected shape`);
+  }
+  writeDocument(raw, context);
+  return 0;
+}
+
+function writeDocument(raw: object, context: CommandContext): void {
+  context.io.stdout(context.json ? `${JSON.stringify(raw)}\n` : `${JSON.stringify(raw, null, 2)}\n`);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
+}
+
+function isNullableRecord(value: unknown): value is Record<string, unknown> | null {
+  return value === null || isRecord(value);
+}
+
+interface PreflightDocument {
+  readonly available: boolean;
+  readonly prompt_overrides_available: boolean;
+  readonly reason: string | null;
+  readonly message: string | null;
+  readonly source_model_call_id: string | null;
+}
+
+function isPreflight(value: unknown): value is PreflightDocument {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.available === 'boolean' &&
+    typeof value.prompt_overrides_available === 'boolean' &&
+    isNullableString(value.reason) &&
+    isNullableString(value.message) &&
+    isNullableString(value.source_model_call_id)
+  );
+}
+
+function unavailableError(preflight: PreflightDocument): CliError {
+  const reason = preflight.reason !== null && preflight.reason.length > 0 ? preflight.reason : undefined;
+  const message = preflight.message !== null && preflight.message.length > 0 ? preflight.message : undefined;
+  return new CliError(reason ?? 'replay_unavailable', message ?? reason ?? 'replay is not available');
 }
 
 function humanList(items: readonly unknown[], nextCursor: string | null): string {
@@ -143,39 +288,54 @@ function describeError(value: unknown): string {
   }
 }
 
-async function readSystemPrompt(source: string, timeoutMs: number): Promise<string> {
-  const text = source === '-' ? await readStdinBounded(timeoutMs) : await readFileBounded(source);
-  if (text.trim().length === 0) {
-    throw usageError('system_prompt_empty', 'system prompt must not be empty');
+async function readPromptPart(
+  part: 'global' | 'group',
+  source: string,
+  context: CommandContext,
+  allowEmpty: boolean,
+): Promise<string> {
+  const text = source === '-' ? await readStdinBounded(part, context.timeoutMs) : await readFileBounded(part, source);
+  if (!allowEmpty && text.trim().length === 0) {
+    throw usageError(`${part}_prompt_empty`, `${part} prompt must not be empty`);
   }
-  if (text.length > MAX_SYSTEM_PROMPT_CHARS) {
-    throw systemPromptTooLarge();
+  if (text.length > MAX_PROMPT_CHARS) {
+    throw promptTooLarge(part);
   }
   return text;
 }
 
-async function readFileBounded(path: string): Promise<string> {
-  let size: number;
+async function readFileBounded(part: 'global' | 'group', path: string): Promise<string> {
+  let info: Stats;
   try {
-    size = (await stat(path)).size;
+    info = await stat(path);
   } catch {
-    throw usageError('system_prompt_read_failed', `cannot read system prompt file: ${path}`);
+    throw usageError(`${part}_prompt_read_failed`, `cannot read ${part} prompt file: ${path}`);
   }
-  if (size > MAX_SYSTEM_PROMPT_BYTES) {
-    throw systemPromptTooLarge();
+  // A FIFO, device or socket passes stat() but can block a plain read forever;
+  // only a regular file (or a symlink to one) is a bounded prompt source.
+  // ponytail: path-based check; use open(O_NONBLOCK) + fstat if the containing
+  // directory is adversarial and a file can be swapped in after stat().
+  if (!info.isFile()) {
+    throw usageError(`${part}_prompt_read_failed`, `${part} prompt file must be a regular file: ${path}`);
+  }
+  if (info.size > MAX_PROMPT_BYTES) {
+    throw promptTooLarge(part);
   }
   let text: string;
   try {
     text = await readFile(path, 'utf8');
   } catch {
-    throw usageError('system_prompt_read_failed', `cannot read system prompt file: ${path}`);
+    throw usageError(`${part}_prompt_read_failed`, `cannot read ${part} prompt file: ${path}`);
   }
   return text;
 }
 
-async function readStdinBounded(timeoutMs: number): Promise<string> {
+async function readStdinBounded(part: 'global' | 'group', timeoutMs: number): Promise<string> {
   if (process.stdin.isTTY === true) {
-    throw usageError('stdin_required', 'stdin is a terminal; pipe the prompt or pass --system-prompt <file>');
+    throw usageError(
+      'stdin_required',
+      'stdin is a terminal; pipe the prompt or pass --global-prompt/--group-prompt <file>',
+    );
   }
   const timer = setTimeout(() => {
     process.stdin.destroy(new CliError('timeout', `stdin timed out after ${timeoutMs}ms; no request was sent`));
@@ -186,9 +346,9 @@ async function readStdinBounded(timeoutMs: number): Promise<string> {
     for await (const chunk of process.stdin) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
       total += buffer.byteLength;
-      if (total > MAX_SYSTEM_PROMPT_BYTES) {
+      if (total > MAX_PROMPT_BYTES) {
         process.stdin.destroy();
-        throw systemPromptTooLarge();
+        throw promptTooLarge(part);
       }
       chunks.push(buffer);
     }
@@ -198,6 +358,10 @@ async function readStdinBounded(timeoutMs: number): Promise<string> {
   }
 }
 
-function systemPromptTooLarge(): CliError {
-  return usageError('system_prompt_too_large', `system prompt must be at most ${MAX_SYSTEM_PROMPT_CHARS} characters`);
+function promptTooLarge(part: 'global' | 'group'): CliError {
+  return usageError(`${part}_prompt_too_large`, promptTooLargeMessage(part));
+}
+
+function promptTooLargeMessage(part: 'global' | 'group'): string {
+  return `${part} prompt must be at most ${MAX_PROMPT_CHARS} characters`;
 }

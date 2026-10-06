@@ -120,9 +120,10 @@ test.describe('configuration file', () => {
     };
 
     await page.getByRole('button', { name: 'Apply config file' }).click();
-    // The result lists only render after a successful apply.
-    await expect(page.getByText('Restart required')).toBeVisible();
-    await expect(page.getByText('Outside serve')).toBeVisible();
+    // Only the apply result has all three lists; the status summary also names restart requirements.
+    const result = page.locator('dl').filter({ has: page.getByText('Applied', { exact: true }) });
+    await expect(result.getByText('Restart required', { exact: true })).toBeVisible();
+    await expect(result.getByText('Outside serve', { exact: true })).toBeVisible();
 
     const after = (await (await page.request.get(await adminUrl('/api/config/status'))).json()) as {
       generation: number;

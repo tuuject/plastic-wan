@@ -165,11 +165,12 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     }
     const ingestion = new TelegramIngestion(store, configStore, me);
     const modelGate = new KeyedSemaphore();
+    const mediaClient = new TelegramMediaClient(bot.api, token);
     const media = new MediaService({
       store,
       configStore,
       secrets,
-      mediaClient: new TelegramMediaClient(bot.api, token),
+      mediaClient,
       modelGate,
     });
     const stickerService = new StickerService({ store, config: loaded.config, api: bot.api, media });
@@ -331,6 +332,28 @@ export async function serve(configPath: string, takeover = false): Promise<void>
         requestRestart,
         imageService,
         imageBridge,
+        mediaDownloader: mediaClient,
+        shutdownSignal: replayShutdown.signal,
+        replayPreflight: (id) => {
+          try {
+            return replay.inspect(id);
+          } catch (error) {
+            if (error instanceof ReplayError) {
+              throw new AdminQueryError(error.code, error.message, error.status);
+            }
+            throw error;
+          }
+        },
+        invocationPrompts: (id) => {
+          try {
+            return replay.prompts(id);
+          } catch (error) {
+            if (error instanceof ReplayError) {
+              throw new AdminQueryError(error.code, error.message, error.status);
+            }
+            throw error;
+          }
+        },
         replayInvocation: async (id, input, signal) => {
           try {
             return await replay.run(id, input, signal);

@@ -25,7 +25,10 @@ const OPTIONS = {
   cursor: { type: 'string' },
   state: { type: 'string' },
   chat: { type: 'string' },
-  'system-prompt': { type: 'string' },
+  source: { type: 'string' },
+  variant: { type: 'string' },
+  'global-prompt': { type: 'string' },
+  'group-prompt': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 } as const;
 
@@ -33,6 +36,10 @@ const OPTIONS = {
 // as a dangling option, so a negative numeric value is folded into `--opt=-123`.
 const NEGATIVE_NUMBER_PATTERN = /^-\d+$/;
 const NEGATIVE_VALUE_OPTIONS = new Set(['--chat', '--cursor', '--limit', '--timeout-ms']);
+
+export type ConfigSource = 'active' | 'file';
+export type PromptScope = 'global' | 'group';
+export type MediaVariant = 'original' | 'preview';
 
 export interface ListCommand {
   readonly kind: 'list';
@@ -47,10 +54,39 @@ export interface GetCommand {
   readonly id: string;
 }
 
+export interface PromptsCommand {
+  readonly kind: 'prompts';
+  readonly id: string;
+}
+
+export interface PreflightCommand {
+  readonly kind: 'preflight';
+  readonly id: string;
+}
+
+export interface MediaCommand {
+  readonly kind: 'media';
+  readonly id: string;
+  readonly variant: MediaVariant;
+}
+
 export interface ReplayCommand {
   readonly kind: 'replay';
   readonly id: string;
-  readonly systemPromptSource: string | undefined;
+  readonly globalPromptSource: string | undefined;
+  readonly groupPromptSource: string | undefined;
+}
+
+export interface ConfigShowCommand {
+  readonly kind: 'config-show';
+  readonly source: ConfigSource | undefined;
+}
+
+export interface PromptGetCommand {
+  readonly kind: 'prompt-get';
+  readonly scope: PromptScope;
+  readonly chat: string | undefined;
+  readonly source: ConfigSource | undefined;
 }
 
 export interface LoginCommand {
@@ -62,8 +98,15 @@ export interface DoctorCommand {
   readonly kind: 'doctor';
 }
 
-export type InvocationCommand = ListCommand | GetCommand | ReplayCommand;
-export type Command = InvocationCommand | LoginCommand | DoctorCommand;
+export type InvocationCommand =
+  | ListCommand
+  | GetCommand
+  | PromptsCommand
+  | PreflightCommand
+  | MediaCommand
+  | ReplayCommand;
+export type CliCommand = InvocationCommand | ConfigShowCommand | PromptGetCommand;
+export type Command = CliCommand | LoginCommand | DoctorCommand;
 export type CredentialSource = 'argument' | 'environment' | 'file';
 
 export interface ParsedCli {
@@ -86,12 +129,29 @@ export interface ResolvedCli {
 
 interface StringFlags {
   readonly 'api-key-stdin': boolean | undefined;
-  readonly 'system-prompt': string | undefined;
+  readonly source: string | undefined;
+  readonly variant: string | undefined;
+  readonly 'global-prompt': string | undefined;
+  readonly 'group-prompt': string | undefined;
   readonly limit: string | undefined;
   readonly cursor: string | undefined;
   readonly state: string | undefined;
   readonly chat: string | undefined;
 }
+
+type FlagName = keyof StringFlags;
+
+const INSPECTION_FLAGS: readonly FlagName[] = [
+  'limit',
+  'cursor',
+  'state',
+  'chat',
+  'source',
+  'variant',
+  'global-prompt',
+  'group-prompt',
+];
+const PROMPT_PART_FLAGS: readonly FlagName[] = ['global-prompt', 'group-prompt'];
 
 export function parseCli(argv: readonly string[]): ParsedCli {
   const parsed = parseArgsStrict(argv);
@@ -103,7 +163,10 @@ export function parseCli(argv: readonly string[]): ParsedCli {
     help: parsed.values.help === true,
     flags: {
       'api-key-stdin': parsed.values['api-key-stdin'],
-      'system-prompt': parsed.values['system-prompt'],
+      source: parsed.values.source,
+      variant: parsed.values.variant,
+      'global-prompt': parsed.values['global-prompt'],
+      'group-prompt': parsed.values['group-prompt'],
       limit: parsed.values.limit,
       cursor: parsed.values.cursor,
       state: parsed.values.state,
@@ -127,7 +190,7 @@ export function resolveCli(
 ): ResolvedCli {
   const command = parsed.command;
   if (command === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|invocation');
+    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|config|prompt|invocation');
   }
   const endpointRaw = parsed.endpointRaw ?? env.PLASTICWAN_ENDPOINT ?? saved?.endpoint;
   if (endpointRaw === undefined || endpointRaw.trim().length === 0) {
@@ -194,34 +257,106 @@ function sanitizeArgumentMessage(error: unknown): string {
 function parseCommand(positionals: readonly string[], flags: StringFlags): Command {
   const [group, subcommand, ...rest] = positionals;
   if (group === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|invocation');
+    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|config|prompt|invocation');
   }
   if (group === 'login' || group === 'doctor') {
     if (positionals.length !== 1) {
       throw usageError('unexpected_argument', `${group} takes no positional arguments`);
     }
-    rejectUnsupportedFlags(flags, ['system-prompt', 'limit', 'cursor', 'state', 'chat']);
+    rejectUnsupportedFlags(flags, INSPECTION_FLAGS);
     if (group === 'doctor') {
       rejectUnsupportedFlags(flags, ['api-key-stdin']);
       return { kind: 'doctor' };
     }
     return { kind: 'login', apiKeyStdin: flags['api-key-stdin'] === true };
   }
-  if (group !== 'invocation') {
-    throw usageError('unknown_command', 'command must be login, doctor, or invocation');
-  }
   rejectUnsupportedFlags(flags, ['api-key-stdin']);
+  switch (group) {
+    case 'config':
+      return parseConfigShow(subcommand, rest, flags);
+    case 'prompt':
+      return parsePromptGet(subcommand, rest, flags);
+    case 'invocation':
+      return parseInvocation(subcommand, rest, flags);
+    default:
+      throw usageError('unknown_command', 'command must be login, doctor, config, prompt, or invocation');
+  }
+}
+
+function parseConfigShow(
+  subcommand: string | undefined,
+  rest: readonly string[],
+  flags: StringFlags,
+): ConfigShowCommand {
+  if (subcommand === undefined) {
+    throw usageError('missing_subcommand', 'usage: plasticwan-utils config show');
+  }
+  if (subcommand !== 'show') {
+    throw usageError('unknown_subcommand', 'config subcommand must be show');
+  }
+  if (rest.length > 0) {
+    throw usageError('unexpected_argument', 'config show takes no positional arguments');
+  }
+  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat', 'variant', ...PROMPT_PART_FLAGS]);
+  return { kind: 'config-show', source: parseSource(flags.source) };
+}
+
+function parsePromptGet(subcommand: string | undefined, rest: readonly string[], flags: StringFlags): PromptGetCommand {
+  if (subcommand === undefined) {
+    throw usageError('missing_subcommand', 'usage: plasticwan-utils prompt get global|group');
+  }
+  if (subcommand !== 'get') {
+    throw usageError('unknown_subcommand', 'prompt subcommand must be get');
+  }
+  const [scope, ...extra] = rest;
+  if (scope !== 'global' && scope !== 'group') {
+    throw usageError('unknown_subcommand', 'prompt get scope must be global or group');
+  }
+  if (extra.length > 0) {
+    throw usageError('unexpected_argument', 'prompt get takes exactly one scope');
+  }
+  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'variant', ...PROMPT_PART_FLAGS]);
+  const source = parseSource(flags.source);
+  if (scope === 'global') {
+    if (flags.chat !== undefined) {
+      throw usageError('unexpected_option', '--chat is only valid for prompt get group');
+    }
+    return { kind: 'prompt-get', scope, chat: undefined, source };
+  }
+  if (flags.chat === undefined) {
+    throw usageError('missing_argument', 'prompt get group requires --chat <telegram chat id>');
+  }
+  return { kind: 'prompt-get', scope, chat: parseDecimalId(flags.chat, 'chat', true), source };
+}
+
+function parseInvocation(
+  subcommand: string | undefined,
+  rest: readonly string[],
+  flags: StringFlags,
+): InvocationCommand {
   switch (subcommand) {
     case 'list':
       return parseList(rest, flags);
     case 'get':
       return parseGet(rest, flags);
+    case 'prompts':
+      return parseIdOnly('prompts', rest, flags);
+    case 'preflight':
+      return parseIdOnly('preflight', rest, flags);
+    case 'media':
+      return parseMedia(rest, flags);
     case 'replay':
       return parseReplay(rest, flags);
     case undefined:
-      throw usageError('missing_subcommand', 'usage: plasticwan-utils invocation list|get|replay');
+      throw usageError(
+        'missing_subcommand',
+        'usage: plasticwan-utils invocation list|get|prompts|preflight|media|replay',
+      );
     default:
-      throw usageError('unknown_subcommand', 'invocation subcommand must be list, get, or replay');
+      throw usageError(
+        'unknown_subcommand',
+        'invocation subcommand must be list, get, prompts, preflight, media, or replay',
+      );
   }
 }
 
@@ -229,7 +364,7 @@ function parseList(rest: readonly string[], flags: StringFlags): ListCommand {
   if (rest.length > 0) {
     throw usageError('unexpected_argument', 'invocation list takes no positional arguments');
   }
-  rejectUnsupportedFlags(flags, ['system-prompt']);
+  rejectUnsupportedFlags(flags, ['source', 'variant', ...PROMPT_PART_FLAGS]);
   return {
     kind: 'list',
     limit: flags.limit === undefined ? undefined : parseLimit(flags.limit),
@@ -247,8 +382,40 @@ function parseGet(rest: readonly string[], flags: StringFlags): GetCommand {
   if (extra.length > 0) {
     throw usageError('unexpected_argument', 'invocation get takes exactly one id');
   }
-  rejectUnsupportedFlags(flags, ['system-prompt', 'limit', 'cursor', 'state', 'chat']);
+  rejectUnsupportedFlags(flags, INSPECTION_FLAGS);
   return { kind: 'get', id: parseDecimalId(id, 'id', false) };
+}
+
+function parseIdOnly(
+  kind: 'prompts' | 'preflight',
+  rest: readonly string[],
+  flags: StringFlags,
+): PromptsCommand | PreflightCommand {
+  const [id, ...extra] = rest;
+  if (id === undefined) {
+    throw usageError('missing_argument', `invocation ${kind} requires an invocation id`);
+  }
+  if (extra.length > 0) {
+    throw usageError('unexpected_argument', `invocation ${kind} takes exactly one id`);
+  }
+  rejectUnsupportedFlags(flags, INSPECTION_FLAGS);
+  return { kind, id: parseDecimalId(id, 'id', false) };
+}
+
+function parseMedia(rest: readonly string[], flags: StringFlags): MediaCommand {
+  const [id, ...extra] = rest;
+  if (id === undefined) {
+    throw usageError('missing_argument', 'invocation media requires an invocation id');
+  }
+  if (extra.length > 0) {
+    throw usageError('unexpected_argument', 'invocation media takes exactly one id');
+  }
+  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat', 'source', ...PROMPT_PART_FLAGS]);
+  return {
+    kind: 'media',
+    id: parseDecimalId(id, 'id', false),
+    variant: parseVariant(flags.variant),
+  };
 }
 
 function parseReplay(rest: readonly string[], flags: StringFlags): ReplayCommand {
@@ -259,16 +426,44 @@ function parseReplay(rest: readonly string[], flags: StringFlags): ReplayCommand
   if (extra.length > 0) {
     throw usageError('unexpected_argument', 'invocation replay takes exactly one id');
   }
-  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat']);
-  return { kind: 'replay', id: parseDecimalId(id, 'id', false), systemPromptSource: flags['system-prompt'] };
+  rejectUnsupportedFlags(flags, ['limit', 'cursor', 'state', 'chat', 'source', 'variant']);
+  if (flags['global-prompt'] === '-' && flags['group-prompt'] === '-') {
+    throw usageError('conflicting_prompt_input', 'only one of --global-prompt and --group-prompt can read from stdin');
+  }
+  return {
+    kind: 'replay',
+    id: parseDecimalId(id, 'id', false),
+    globalPromptSource: flags['global-prompt'],
+    groupPromptSource: flags['group-prompt'],
+  };
 }
 
-function rejectUnsupportedFlags(flags: StringFlags, unsupported: readonly (keyof StringFlags)[]): void {
+function rejectUnsupportedFlags(flags: StringFlags, unsupported: readonly FlagName[]): void {
   for (const key of unsupported) {
     if (flags[key] !== undefined) {
       throw usageError('unexpected_option', `--${key} is not valid for this subcommand`);
     }
   }
+}
+
+function parseSource(text: string | undefined): ConfigSource | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  if (text !== 'active' && text !== 'file') {
+    throw usageError('invalid_source', 'source must be active or file');
+  }
+  return text;
+}
+
+function parseVariant(text: string | undefined): MediaVariant {
+  if (text === undefined || text === 'original') {
+    return 'original';
+  }
+  if (text !== 'preview') {
+    throw usageError('invalid_variant', 'variant must be original or preview');
+  }
+  return text;
 }
 
 function parseLimit(text: string): number {
@@ -291,7 +486,10 @@ function parseDecimalId(text: string, label: 'id' | 'cursor' | 'chat', allowNega
   if (value > MAX_SIGNED_64 || value < MIN_SIGNED_64) {
     throw usageError(`invalid_${label}`, `${label} is out of signed 64-bit range`);
   }
-  return text;
+  // The Admin API parses ids as signed 64-bit integers and echoes them back in
+  // canonical decimal (`42`, not `042`), so every caller must address and
+  // compare ids in that same form.
+  return value.toString();
 }
 
 function parseState(text: string): string {

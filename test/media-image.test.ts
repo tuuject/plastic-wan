@@ -1,15 +1,39 @@
-import { afterAll, describe, expect, test } from 'vitest';
+import { afterAll, afterEach, describe, expect, test, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { type MediaRow, prepareMediaImage } from '../src/capabilities/media/media-image.ts';
+import type { MediaDownloader } from '../src/capabilities/media/media-download.ts';
+
+/**
+ * `spawnProcess` is wrapped so the cancellation regressions below can observe
+ * every external command attempt: the wrapper records the argv, then delegates
+ * to the real spawn, so the ffmpeg-backed tests in this file still work. In the
+ * cancellation regressions nothing may be recorded at all.
+ */
+const spawnHooks = vi.hoisted(() => ({ calls: [] as string[][] }));
+
+vi.mock('../src/platform/subprocess.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/platform/subprocess.ts')>();
+  return {
+    ...actual,
+    spawnProcess: (argv: readonly string[], options: Parameters<typeof actual.spawnProcess>[1]) => {
+      spawnHooks.calls.push([...argv]);
+      return actual.spawnProcess(argv, options);
+    },
+  };
+});
 
 const directories: string[] = [];
 
 afterAll(async () => {
   await Promise.all(directories.map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+afterEach(() => {
+  spawnHooks.calls = [];
 });
 
 const hasFfmpeg =
@@ -107,4 +131,81 @@ test('an animated sticker that decompresses past the TGS ceiling is refused befo
   await expect(
     prepareMediaImage(sticker, join(directory, 'input'), directory, serving(bomb), new AbortController().signal),
   ).rejects.toThrow('larger than 8 MiB');
+});
+
+async function expectCancelled(promise: Promise<unknown>): Promise<void> {
+  const settled = await promise.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  if (settled.ok) {
+    throw new Error('Expected the cancelled media preparation to reject');
+  }
+  expect((settled.error as { readonly name?: string }).name).toBe('AbortError');
+}
+
+/** A downloader that downloads anyway, as if the cancellation raced its own check. */
+function ignoringCancellation(bytes: Uint8Array): MediaDownloader {
+  return {
+    download: async (_fileId, destination) => {
+      await writeFile(destination, bytes);
+    },
+  };
+}
+
+/** Aborts the signal inside the downloader, right before it resolves. */
+function abortedAfterDownload(bytes: Uint8Array): {
+  readonly signal: AbortSignal;
+  readonly downloader: MediaDownloader;
+} {
+  const controller = new AbortController();
+  return {
+    signal: controller.signal,
+    downloader: {
+      download: async (_fileId, destination) => {
+        await writeFile(destination, bytes);
+        controller.abort();
+      },
+    },
+  };
+}
+
+test('a pre-cancelled signal refuses to spawn ffprobe or ffmpeg for a video sticker', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'plasticwan-media-'));
+  directories.push(directory);
+  const controller = new AbortController();
+  controller.abort();
+  // The video sticker path has no checkpoint between the download and ffprobe:
+  // the shared command runner itself must refuse to start anything.
+  await expectCancelled(
+    prepareMediaImage(
+      videoSticker(),
+      join(directory, 'input'),
+      directory,
+      ignoringCancellation(new Uint8Array([0x1a, 0x45, 0xdf, 0xa3])),
+      controller.signal,
+    ),
+  );
+  expect(spawnHooks.calls).toEqual([]);
+});
+
+test('a cancellation landing right after the download refuses to spawn ffprobe or ffmpeg', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'plasticwan-media-'));
+  directories.push(directory);
+  const { signal, downloader } = abortedAfterDownload(new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]));
+  await expectCancelled(prepareMediaImage(videoSticker(), join(directory, 'input'), directory, downloader, signal));
+  expect(spawnHooks.calls).toEqual([]);
+});
+
+test('a cancellation landing right after the download refuses to spawn the Lottie converter', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'plasticwan-media-'));
+  directories.push(directory);
+  const { signal, downloader } = abortedAfterDownload(gzipSync(JSON.stringify({ ip: 0, op: 10 })));
+  const sticker: MediaRow = {
+    ...videoSticker(),
+    mimeType: 'application/x-tgsticker',
+    telegramJson: JSON.stringify({ is_video: false, is_animated: true }),
+  };
+  await expectCancelled(prepareMediaImage(sticker, join(directory, 'input'), directory, downloader, signal));
+  expect(spawnHooks.calls).toEqual([]);
 });
