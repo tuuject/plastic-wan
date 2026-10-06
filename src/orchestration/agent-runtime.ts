@@ -10,9 +10,10 @@ import {
   type Usage,
 } from '@earendil-works/pi-ai';
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { createExecuteTool, type ExecutableCapability } from '../capabilities/execute-tool.ts';
+import { capability, createExecuteTool, type ExecutableCapability } from '../capabilities/execute-tool.ts';
 import { createReadTool } from '../capabilities/read-tool.ts';
 import { createSendTool, type TelegramSendApi } from '../capabilities/send-tool.ts';
+import { createTyping } from '../capabilities/typing.ts';
 import { ContextBuilder, type ContextIdentity, type Injection, type StablePrompt } from '../context/context-builder.ts';
 import { encodeContextMessage, estimateMessageTokens } from '../context/context-codec.ts';
 import { type ContextGcPlan, isRenderable, planContextGc } from '../context/context-gc.ts';
@@ -295,6 +296,8 @@ export class AgentRuntime {
     }
     const startedAt = Date.now();
     const deadline = startedAt + config.agent.context.max_wall_clock_seconds * 1_000;
+    const timeoutSignal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+    const signal = AbortSignal.any([schedulerSignal, timeoutSignal]);
     const contextState = new InvocationContextState({
       invocationId,
       conversationId: identity.conversationId,
@@ -395,7 +398,11 @@ export class AgentRuntime {
       );
       return true;
     };
-    const executableCapabilities = this.#capabilityTools?.(contextState, deadline, capabilities) ?? [];
+    const typing = createTyping(this.#telegramApi, identity.chatId.toString(), identity.threadId, signal);
+    const executableCapabilities = [
+      capability(typing.tool, false),
+      ...(this.#capabilityTools?.(contextState, deadline, capabilities) ?? []),
+    ];
     const buildTools = (target: InvocationContext, exposeZzz: boolean): readonly AgentTool[] => [
       createReadTool({ store: this.#store, context: target, resources: this.#systemResources }),
       createSendTool({
@@ -494,8 +501,6 @@ export class AgentRuntime {
     agent.state.tools = [...tools];
     agent.maxRetryDelayMs = Math.max(0, deadline - Date.now());
     state.estimatedInputTokens = this.#estimateInputTokens(cached, toolDefinitionCharacters);
-    const timeoutSignal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
-    const signal = AbortSignal.any([schedulerSignal, timeoutSignal]);
     // One entry per user message handed to the agent, in delivery order. A batch
     // carries its bucket so it is acknowledged only once it is in the transcript.
     const pendingUserTags: { readonly tag: 'checkpoint' | 'harness'; readonly bucketId: bigint | null }[] = [];
@@ -565,6 +570,7 @@ export class AgentRuntime {
      * free-agent time instead of being handed over the moment the round ends.
      */
     const freeAgent = (): void => {
+      typing.stop();
       runtime.endRound(conversationId);
       state.barrierSpent = false;
       this.#deferCollectingBucket(config, conversationId, Date.now());
@@ -825,6 +831,9 @@ export class AgentRuntime {
       // User batches keep their existing turn-boundary semantics. Completion
       // receipts enter one at a time between rounds, never interrupting tools or
       // merging independent mention/budget policies into one model response.
+      if (!hasToolCalls) {
+        typing.stop();
+      }
       if (await injectPending(!hasToolCalls, turn.context)) {
         return false;
       }
@@ -931,6 +940,7 @@ export class AgentRuntime {
         outcome = { state: 'completed', reason: state.stopReason };
       }
     } finally {
+      typing.stop();
       signal.removeEventListener('abort', abortAgent);
       unsubscribe();
       // The cached agent keeps its transcript on purpose: the next invocation

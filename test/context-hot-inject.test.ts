@@ -36,6 +36,7 @@ interface Fixture {
   readonly conversationRuntime: ConversationRuntime;
   readonly ingestion: TelegramIngestion;
   readonly sendApi: TelegramSendApi;
+  readonly typingSignals: AbortSignal[];
   /** Builds a runtime over a fresh faux provider, mirroring the composition root. */
   runtimeWith(
     faux: ReturnType<typeof fauxProvider>,
@@ -73,7 +74,11 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
   // Telegram hands out a new message ID per send; a repeated one would collide
   // with the bot message the previous send recorded.
   let nextMessageId = SEND_MESSAGE_ID;
+  const typingSignals: AbortSignal[] = [];
   const sendApi: TelegramSendApi = {
+    sendTyping: async (_chatId, _threadId, signal) => {
+      typingSignals.push(signal);
+    },
     sendMessage: async () => ({ message_id: nextMessageId++, date: 1_700_000_100, chat: { id: CHAT_ID } }),
     sendSticker: async () => ({ message_id: nextMessageId++, date: 1_700_000_100, chat: { id: CHAT_ID } }),
   };
@@ -110,6 +115,7 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
     conversationRuntime,
     ingestion: new TelegramIngestion(store, configStore, { id: 999 }),
     sendApi,
+    typingSignals,
     runtimeWith: async (faux, overrides = {}) => (await build(faux, overrides)).runtime,
     runtimeAndSnapshot: (faux, overrides = {}) => build(faux, overrides),
   };
@@ -152,6 +158,71 @@ async function until(condition: () => boolean, label: string, timeoutMillisecond
 }
 
 describe('long-lived invocation', () => {
+  test.each([false, true])('silence and quick replies do not start typing with send=%s', async (send) => {
+    const f = await fixture((config) => {
+      config.agent.context.idle_grace_seconds = 0;
+    });
+    const faux = fauxAgent();
+    faux.setResponses([
+      send
+        ? fauxAssistantMessage(fauxToolCall('send', { text: 'hello' }), { stopReason: 'toolUse' })
+        : fauxAssistantMessage(''),
+      fauxAssistantMessage(''),
+    ]);
+    const { runtime, snapshot } = await f.runtimeAndSnapshot(faux);
+    const service = new InvocationQueueService(f.store, f.configStore, f.conversationRuntime);
+    try {
+      f.ingestion.ingest(update(1, 10, 'hello'), new Date());
+      const [id] = service.processDue(new Date());
+      expect(id).toBeDefined();
+      expect((await runtime.run(id!, snapshot, new AbortController().signal)).state).toBe('completed');
+      expect(f.typingSignals).toHaveLength(0);
+    } finally {
+      f.store.close();
+    }
+  });
+
+  test('model-requested typing stops before idle and restarts only when the next round requests it', async () => {
+    const f = await fixture();
+    const faux = fauxAgent();
+    let requests = 0;
+    const typingCall = () => {
+      requests += 1;
+      return fauxAssistantMessage(fauxToolCall('execute', { action: 'call', tool: 'typing', input: {} }), {
+        stopReason: 'toolUse',
+      });
+    };
+    faux.setResponses([typingCall, fauxAssistantMessage(''), typingCall, fauxAssistantMessage('')]);
+    const runtime = await f.runtimeWith(faux);
+    const scheduler = new BucketScheduler(
+      f.store,
+      f.configStore,
+      (id, snapshot, signal) => runtime.run(id, snapshot, signal),
+      f.conversationRuntime,
+    );
+    try {
+      scheduler.start();
+      f.ingestion.ingest(update(1, 10, 'first'), new Date());
+      scheduler.wake();
+      await until(() => f.typingSignals.length === 1 && f.typingSignals[0]!.aborted, 'typing stopped before idle');
+      expect(requests).toBe(1);
+      f.ingestion.ingest(update(2, 11, 'second'), new Date());
+      scheduler.wake();
+      await until(() => f.typingSignals.length === 2 && f.typingSignals[1]!.aborted, 'second round typing stopped');
+      expect(requests).toBe(2);
+      expect(f.store.db.prepare('SELECT COUNT(*) AS count FROM invocations').get()).toEqual({ count: 1n });
+      expect(
+        f.store.db
+          .prepare("SELECT COUNT(*) AS count FROM tool_calls WHERE tool_name = 'execute' AND state = 'success'")
+          .get(),
+      ).toEqual({ count: 2n });
+    } finally {
+      await scheduler.stop(2_000);
+      expect(f.typingSignals.every((signal) => signal.aborted)).toBe(true);
+      f.store.close();
+    }
+  });
+
   test('a message sent while the run is active still waits its own bucket window', async () => {
     // Regression: the ingestion pace rule used to treat any message arriving
     // while an invocation was active as immediately due. That was harmless while

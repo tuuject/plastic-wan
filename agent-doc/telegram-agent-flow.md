@@ -88,6 +88,8 @@ deadline 不看「前一次运行是否仍在 queued/running」，但**运行中
 
 ## 长活 Invocation 与热注入
 
+`typing` 是 `execute` 注册表中的可选能力（`execute.call`，`tool: "typing"`，`input: {}`）。模型只有在决定接话且接下来需要耗时处理时才调用；快速回复直接 `send`，静默不调用。runtime 每 4 秒刷新，Telegram 适配器按 Chat + Topic 节流且不重叠请求，单次平台请求最多等 3.5 秒。重复调用不重置本轮上限，55 秒后停止刷新并取消在途请求，为 Telegram 最多 5 秒的状态尾部留余量；`freeAgent` 与运行清理停止状态，空闲后下一轮可以再次调用。typing 仅为临时状态，不发布 assistant 文本，不计入 send 配额，也不把 Telegram 状态请求失败传给模型。
+
 `agent.context.idle_grace_seconds` 大于 0 时，Invocation 变成一个运行窗口：它可以跨多个 Bucket，在运行期间接收新注入的消息。
 
 ```text

@@ -37,6 +37,10 @@ Telegram 官方 FAQ 指引开发者通过 [@BotFather](https://t.me/BotFather) �
 
 修改 allowlist 后运行 `check-config`。新增 Chat 立即生效，无需重启；删除 Chat 与修改 Topic 范围后需要重启服务，变更未重启前仍可能出现 `chat_not_allowed`。
 
+## 输入状态
+
+模型决定接话且需要搜索等耗时处理时，可以显示“正在输入”。快回复直接发送，保持沉默时不显示。状态每 4 秒刷新，同一 Chat 和 Topic 的请求不重叠；每轮最长约 60 秒，本轮结束、空闲等待或中断时停止刷新，客户端已有状态可能再保留最多 5 秒。输入状态不保证最终一定有回复。
+
 ## 管理员命令与验证
 
 `telegram.admins` 中的 Telegram 用户可以使用 `/pause`、`/resume`、`/model`、`/cut_topic`、`/allowlist`。名单由 `config.jsonc` 的 `telegram.admins` 字段管理，修改后可热应用，无需重启。先在目标 Chat 发送一条测试消息，检查 `serve_started` 后的审计记录；“Bot 在线”不等于消息被允许，也不等于模型一定发言。
