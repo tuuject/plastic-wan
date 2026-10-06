@@ -47,8 +47,17 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Stop workers before closing their borrowed database or removing its files.
+  let failure: unknown;
   for (const close of cleanup.splice(0).reverse()) {
-    await close();
+    try {
+      await close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) {
+    throw failure;
   }
 });
 
@@ -115,9 +124,11 @@ async function fixture(plan: readonly boolean[] = []): Promise<ImageAgentFixture
   await writeTestKeyJar(directory, { openrouter: 'sk-image-v1' });
   const loaded = await loadConfig(configPath);
   const store = await SqliteStore.open(loaded.config);
+  cleanup.push(() => store.close());
   const service = createImageService(store, loaded.config, {
     providerAdapter: createOpenRouterAdapter({ fetchImpl: providerSink(calls, plan) }),
   });
+  cleanup.push(() => service.stop());
   const tasks = new LongTaskService(store.orm, () => undefined);
   const bridge = createImageBridge({
     service,
@@ -132,6 +143,7 @@ async function fixture(plan: readonly boolean[] = []): Promise<ImageAgentFixture
       return { base64: png.toString('base64'), mime: 'image/png' };
     },
   });
+  cleanup.push(() => bridge.stop());
   // Task rows reference real conversations; seed chat 100 / conversation 42
   // (and a second conversation 99 for the cross-conversation denial test).
   const now = new Date().toISOString();
@@ -188,11 +200,6 @@ async function fixture(plan: readonly boolean[] = []): Promise<ImageAgentFixture
   });
   const applied = await reloader.reloadFromFile();
   expect(applied.ok).toBe(true);
-  cleanup.push(() => {
-    bridge.stop();
-    service.stop();
-    store.close();
-  });
   const pluginBridge: ImagePluginBridge = {
     enabled: () => bridge.enabled(),
     submit: (params, signal) => bridge.submit(params, signal),

@@ -35,8 +35,20 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  for (const close of cleanup.splice(0)) {
-    await close();
+  // Teardown runs LIFO: fixture resources (worker, connection) release before the
+  // temp directory is removed. Deleting first would fail with EBUSY on Windows
+  // while SQLite still holds the database file. Every step still runs when an
+  // earlier one fails, and the first failure is rethrown.
+  let failure: unknown;
+  for (const close of cleanup.splice(0).reverse()) {
+    try {
+      await close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) {
+    throw failure;
   }
 });
 
@@ -55,6 +67,7 @@ async function fixture(): Promise<{
   await writeTestKeyJar(directory, {});
   const loaded = await loadConfig(configPath);
   const store = await SqliteStore.open(loaded.config);
+  cleanup.push(() => store.close());
   const now = new Date().toISOString();
   store.orm
     .insert(chats)
@@ -74,6 +87,7 @@ async function fixture(): Promise<{
       },
     }),
   });
+  cleanup.push(() => service.stop());
   const tasks = new LongTaskService(store.orm, () => undefined);
   const bridge = createImageBridge({
     service,
@@ -81,6 +95,7 @@ async function fixture(): Promise<{
     tasks,
     prepareInputImage: async () => ({ base64: '', mime: 'image/png' }),
   });
+  cleanup.push(() => bridge.stop());
   const storeForConfig = await testConfigStore(loaded);
   const reloader = new ConfigReloader({
     loaded,
@@ -124,11 +139,6 @@ async function fixture(): Promise<{
     const applied = await reloader.reloadFromFile();
     return { kind: 'json', status: 200, body: { enabled: bridge.enabled(), applied: applied.ok } };
   };
-  cleanup.push(() => {
-    bridge.stop();
-    service.stop();
-    store.close();
-  });
   return { handle, applyImageConfig, configPath, store };
 }
 

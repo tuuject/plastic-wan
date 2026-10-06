@@ -36,8 +36,20 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  for (const close of cleanup.splice(0)) {
-    await close();
+  // Teardown runs LIFO: fixture resources (worker, connection) release before the
+  // temp directory is removed. Deleting first would fail with EBUSY on Windows
+  // while SQLite still holds the database file. Every step still runs when an
+  // earlier one fails, and the first failure is rethrown.
+  let failure: unknown;
+  for (const close of cleanup.splice(0).reverse()) {
+    try {
+      await close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) {
+    throw failure;
   }
 });
 
@@ -152,9 +164,11 @@ async function fixture(providerFetch: typeof fetch): Promise<Fixture> {
   await writeTestKeyJar(directory, { openrouter: 'sk-image-v1' });
   const loaded = await loadConfig(configPath);
   const store = await SqliteStore.open(loaded.config);
+  cleanup.push(() => store.close());
   const service = createImageService(store, loaded.config, {
     providerAdapter: (await import('@plasticwan/image-service')).createOpenRouterAdapter({ fetchImpl: providerFetch }),
   });
+  cleanup.push(() => service.stop());
   const secrets = new SecretStore(keyJarPath(configPath));
   const configStore = await testConfigStore(loaded);
   const reloader = new ConfigReloader({
@@ -169,8 +183,6 @@ async function fixture(providerFetch: typeof fetch): Promise<Fixture> {
     validateAgentModel: () => undefined,
     onPublished: () => undefined,
   });
-  cleanup.push(() => service.stop());
-  cleanup.push(() => store.close());
   return { store, service, reloader, configPath };
 }
 
@@ -324,12 +336,14 @@ test('creating without a published snapshot fails loudly, then succeeds after th
   await writeTestKeyJar(directory, { openrouter: 'sk-image-v1' });
   const loaded = await loadConfig(configPath);
   const store = await SqliteStore.open(loaded.config);
+  cleanup.push(() => store.close());
   // The service starts with an empty snapshot; the first reload publishes.
   const service = createImageService(store, loaded.config, {
     providerAdapter: (await import('@plasticwan/image-service')).createOpenRouterAdapter({
       fetchImpl: fakeProviderImageSink(calls),
     }),
   });
+  cleanup.push(() => service.stop());
   const secrets = new SecretStore(keyJarPath(configPath));
   const configStore = await testConfigStore(loaded);
   const reloader = new ConfigReloader({
@@ -344,8 +358,6 @@ test('creating without a published snapshot fails loudly, then succeeds after th
     validateAgentModel: () => undefined,
     onPublished: () => undefined,
   });
-  cleanup.push(() => service.stop());
-  cleanup.push(() => store.close());
 
   expect(() =>
     service.core.generations.create(parseInput({ authoredPrompt: '排队' }), adminActor, 'queued-resume'),

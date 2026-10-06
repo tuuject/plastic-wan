@@ -207,6 +207,7 @@ test('shutdown aborts in-flight calls and records them as interrupted', async ()
   });
   const file = path.join(tmpdir(), `image-service-test-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`);
   const run = await createTestCore({ providerFetch: provider.fetchImpl, file, shutdownTimeoutMs: 2000 });
+  let reopenedClient: ReturnType<typeof openTestDatabase>['client'] | null = null;
   try {
     publishDefaultConfig(run.config);
     const id = await submit(run, { authoredPrompt: '关闭中断' }, 'shutdown');
@@ -217,10 +218,10 @@ test('shutdown aborts in-flight calls and records them as interrupted', async ()
 
     // Reopen the same database with a stopped worker: the state survives.
     const reopened = openTestDatabase(file);
-    const storeDir = path.join(tmpdir(), `image-service-test-store-${Date.now()}`);
+    reopenedClient = reopened.client;
     const second = createImageCore({
       db: reopened.db,
-      store: new ImageStore({ dir: storeDir }),
+      store: new ImageStore({ dir: run.storeDir }),
       providerAdapter: createOpenRouterAdapter({ fetchImpl: provider.fetchImpl }),
       startWorker: false,
       concurrency: 2,
@@ -232,13 +233,17 @@ test('shutdown aborts in-flight calls and records them as interrupted', async ()
     assert.equal(generation.attempts[0]?.status, 'interrupted');
     assert.ok(!generation.attempts.some((attempt) => attempt.status === 'running'));
     await second.stop();
-    rmSync(storeDir, { recursive: true, force: true });
   } finally {
-    rmSync(file, { force: true });
+    // Windows cannot unlink an open database; release both handles even if an
+    // assertion failed, and keep cleanup failures visible.
     try {
-      await run.cleanup();
-    } catch {
-      // client already closed above
+      reopenedClient?.close();
+    } finally {
+      try {
+        await run.cleanup();
+      } finally {
+        rmSync(file, { force: true });
+      }
     }
   }
 });

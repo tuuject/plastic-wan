@@ -33,16 +33,6 @@ import { writeTestConfig } from './helpers.ts';
 
 const cleanup: Array<() => void | Promise<void>> = [];
 
-/** Registers a best-effort cleanup step; double-close and missing files are tolerated. */
-function safeCleanup(step: () => void | Promise<void>): void {
-  cleanup.push(() => {
-    try {
-      return step();
-    } catch {
-      return undefined;
-    }
-  });
-}
 let directory: string;
 
 beforeEach(async () => {
@@ -51,8 +41,21 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  for (const close of cleanup.splice(0)) {
-    await close();
+  // Teardown runs LIFO: `openHostStore`/fixtures push their closers after the
+  // directory removal registered in beforeEach, so connections and workers
+  // release before the temp directory goes away. Deleting first would fail with
+  // EBUSY on Windows while SQLite still holds the database file. Every step
+  // still runs when an earlier one fails, and the first failure is rethrown.
+  let failure: unknown;
+  for (const close of cleanup.splice(0).reverse()) {
+    try {
+      await close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) {
+    throw failure;
   }
 });
 
@@ -62,7 +65,11 @@ async function openHostStore(): Promise<{ store: SqliteStore; config: RawConfig 
   await writeTestConfig(directory, configPath);
   const loaded = await loadConfig(configPath);
   const store = await SqliteStore.open(loaded.config);
-  safeCleanup(() => store.close());
+  cleanup.push(() => {
+    if (store.db.open) {
+      store.close();
+    }
+  });
   return { store, config: loaded.config };
 }
 
@@ -160,7 +167,7 @@ test('a full generation on the host safe-integer connection keeps plain numbers 
   const { store, config } = await openHostStore();
   const provider = fakeProvider();
   const service = createImageService(store, config, { providerFetch: provider.fetchImpl });
-  safeCleanup(() => service.stop());
+  cleanup.push(() => service.stop());
   publishConfig(service.core.config);
 
   // Sanity: the borrowed connection really is in bigint mode.
@@ -220,7 +227,7 @@ test('migration 024 replays cleanly on an existing host database that already ho
   // Reopening re-applies 024 (after a pre-migration backup) without touching
   // existing rows, and the core works on the upgraded schema.
   const reopened = await SqliteStore.open(config);
-  safeCleanup(() => reopened.close());
+  cleanup.push(() => reopened.close());
   const probe = reopened.db.prepare("SELECT value FROM app_state WHERE key = 'probe'").get() as { value: string };
   expect(probe.value).toBe('1');
   const tables = reopened.db
@@ -235,7 +242,7 @@ test('migration 024 replays cleanly on an existing host database that already ho
   ]);
   const provider = fakeProvider();
   const service = createImageService(reopened, config, { providerFetch: provider.fetchImpl });
-  safeCleanup(() => service.stop());
+  cleanup.push(() => service.stop());
   publishConfig(service.core.config);
   const { generation } = service.core.generations.create(
     parseInput({ authoredPrompt: '升级后' }),
@@ -253,7 +260,7 @@ test('host transactions roll back core writes atomically', async () => {
   const { store, config } = await openHostStore();
   const provider = fakeProvider();
   const service = createImageService(store, config, { providerFetch: provider.fetchImpl });
-  safeCleanup(() => service.stop());
+  cleanup.push(() => service.stop());
   publishConfig(service.core.config);
 
   expect(() =>
@@ -281,7 +288,7 @@ test('startup reconciliation interrupts claimed rounds and resumes queued ones',
     providerTimeoutMs: 5000,
     logger: null,
   });
-  safeCleanup(() => core.stop());
+  cleanup.push(() => core.stop());
   publishConfig(core.config);
 
   // Produce one legitimately completed generation; its snapshot is the seed
@@ -334,7 +341,7 @@ test('startup reconciliation interrupts claimed rounds and resumes queued ones',
     logger: null,
     configStore: core.config,
   });
-  safeCleanup(() => resumed.stop());
+  cleanup.push(() => resumed.stop());
 
   const claimed = await waitFor(() => {
     const row = db
@@ -383,7 +390,7 @@ test('graceful shutdown aborts in-flight provider work and lands interrupted', a
     shutdownTimeoutMs: 2000,
     logger: null,
   });
-  safeCleanup(() => core.stop());
+  cleanup.push(() => core.stop());
   publishConfig(core.config);
   const { generation } = core.generations.create(parseInput({ authoredPrompt: '关闭中断' }), adminActor, 'shutdown');
   await waitFor(() => (core.generations.get(generation.id, adminActor)?.status === 'running' ? true : null));
@@ -398,7 +405,7 @@ test('backups snapshot the image directory beside the SQLite copy and rotate tog
   const { store, config } = await openHostStore();
   const provider = fakeProvider();
   const service = createImageService(store, config, { providerFetch: provider.fetchImpl });
-  safeCleanup(() => service.stop());
+  cleanup.push(() => service.stop());
   publishConfig(service.core.config);
 
   const bytes = await pngBytes({ width: 9, height: 5 });
@@ -431,6 +438,9 @@ test('backups snapshot the image directory beside the SQLite copy and rotate tog
   await mkdir(join(directory, 'restore'), { recursive: true });
   await writeFile(restoredDbPath, await readFile(first));
   const restored = new Database(restoredDbPath);
+  cleanup.push(() => {
+    restored.close();
+  });
   restored.defaultSafeIntegers(true);
   const row = restored.prepare('SELECT id, file_name FROM image_assets WHERE id = ?').get(uploaded.id) as {
     id: string;

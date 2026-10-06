@@ -26,7 +26,7 @@ import { testConfigJsonc, testConfigStore, writeTestConfig, writeTestKeyJar } fr
 // ---------------------------------------------------------------------------
 
 const PASSWORD = 'correct-horse-battery';
-const cleanup: Array<() => Promise<void>> = [];
+const cleanup: Array<() => void | Promise<void>> = [];
 let directory: string;
 
 beforeEach(async () => {
@@ -36,8 +36,20 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  for (const close of cleanup.splice(0)) {
-    await close();
+  // Teardown runs LIFO: fixture resources (worker, connection) release before the
+  // temp directory is removed. Deleting first would fail with EBUSY on Windows
+  // while SQLite still holds the database file. Every step still runs when an
+  // earlier one fails, and the first failure is rethrown.
+  let failure: unknown;
+  for (const close of cleanup.splice(0).reverse()) {
+    try {
+      await close();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) {
+    throw failure;
   }
 });
 
@@ -76,6 +88,7 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
   await writeTestKeyJar(directory, {});
   const loaded = await loadConfig(configPath);
   const store = await SqliteStore.open(loaded.config);
+  cleanup.push(() => store.close());
   const service = createImageService(store, loaded.config, {
     providerAdapter: createOpenRouterAdapter({
       fetchImpl: async () =>
@@ -84,6 +97,7 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
         }),
     }),
   });
+  cleanup.push(() => service.stop());
   const storeForConfig = await testConfigStore(loaded);
   const reloader = new ConfigReloader({
     loaded,
@@ -104,6 +118,7 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
     tasks,
     prepareInputImage: async () => ({ base64: '', mime: 'image/png' }),
   });
+  cleanup.push(() => bridge.stop());
   const server = new AdminServer({
     store,
     configStore: storeForConfig,
@@ -121,10 +136,6 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
   );
   const cookie = (setup.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
   expect(setup.status).toBe(200);
-  cleanup.push(async () => {
-    await service.stop();
-    store.close();
-  });
   return {
     server,
     cookie,
