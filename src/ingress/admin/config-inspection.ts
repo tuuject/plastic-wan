@@ -1,9 +1,10 @@
 import type { RawConfig } from '../../platform/config.ts';
-import type { ConfigReloader } from '../../platform/config-reload.ts';
 import { assertConfigPermissions, loadConfig } from '../../platform/config.ts';
+import type { ConfigReloader } from '../../platform/config-reload.ts';
 import type { RuntimeConfigurationStore } from '../../platform/runtime-config.ts';
 import type { SecretStore } from '../../platform/secrets.ts';
 import { type Orm, resolveChatConfig } from '../../store/database.ts';
+import { hashPromptContent } from '../../store/prompt-versions.ts';
 import { AdminQueryError } from './audit.ts';
 import { listProviders } from './providers-admin.ts';
 
@@ -162,7 +163,13 @@ export function configurationView(config: RawConfig) {
 
 export function configuredPromptView(config: RawConfig, orm: Orm, scope: 'global' | 'group', chatId?: bigint) {
   if (scope === 'global') {
-    return { scope, chat_id: null, prompt: config.agent.system_prompt, core_read_only: true };
+    return {
+      scope,
+      chat_id: null,
+      prompt: config.agent.system_prompt,
+      content_hash: hashPromptContent(config.agent.system_prompt),
+      core_read_only: true,
+    };
   }
   const chat = chatId === undefined ? undefined : resolveChatConfig(config, orm, chatId);
   if (chat === undefined) {
@@ -173,6 +180,7 @@ export function configuredPromptView(config: RawConfig, orm: Orm, scope: 'global
     chat_id: chatId?.toString() ?? null,
     configured_chat_id: BigInt(chat.id).toString(),
     prompt: chat.instructions,
+    content_hash: hashPromptContent(chat.instructions),
     core_read_only: true,
   };
 }

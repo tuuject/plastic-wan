@@ -33,6 +33,7 @@ const SEGMENT_TO_NAV: Partial<Record<string, NavKey>> = {
   models: 'models',
   'image-settings': 'imageSettings',
   chats: 'chats',
+  prompts: 'prompts',
   developer: 'developer',
   settings: 'settings',
 };

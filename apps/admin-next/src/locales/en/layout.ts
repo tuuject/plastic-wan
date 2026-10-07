@@ -23,6 +23,7 @@ export const layout = {
     models: 'Models',
     imageSettings: 'Image settings',
     chats: 'Chats',
+    prompts: 'Prompts',
     developer: 'Developer',
     settings: 'Settings',
   },

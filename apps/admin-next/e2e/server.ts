@@ -28,6 +28,7 @@ import { buildModelRegistry } from '../../../src/platform/providers.ts';
 import { RuntimeConfigurationStore } from '../../../src/platform/runtime-config.ts';
 import { SecretStore } from '../../../src/platform/secrets.ts';
 import { asRunResult, SqliteStore } from '../../../src/store/database.ts';
+import { recordPromptVersionsFromConfig } from '../../../src/store/prompt-versions.ts';
 import { adminSessions, longTasks, taskReceipts } from '../../../src/store/schema.ts';
 import { enterSleep, wakeFromSleep } from '../../../src/store/sleep.ts';
 import { seedAdminBulkRows, seedAdminFixture } from '../../../test/fixtures/admin-seed.ts';
@@ -309,6 +310,9 @@ async function main(): Promise<void> {
   store = await SqliteStore.open(loaded.config);
   seedAdminFixture(store);
   seedAdminBulkRows(store);
+  // Production records the starting prompt versions at startup; mirror that so
+  // the Prompts page has history to show.
+  recordPromptVersionsFromConfig(store.orm, loaded.config);
 
   const secrets = new SecretStore(keyJarPath(configPath));
   const registry = await buildModelRegistry(loaded.config, null, secrets);

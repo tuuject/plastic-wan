@@ -94,6 +94,15 @@ test.describe('routes and deep links', () => {
     await expect(page.getByText('Something went wrong')).toHaveCount(0);
   });
 
+  test('/prompts shows the prompt editor and version history', async ({ page }) => {
+    await page.goto(await adminUrl('/prompts'));
+    await expect(page.getByText('Prompt editor')).toBeVisible();
+    await expect(page.locator('#prompt-text')).toHaveValue('Participate safely.');
+    await expect(page.getByText('Version history')).toBeVisible();
+    await expect(page.locator('table tbody tr').first()).toBeVisible();
+    await expect(page.getByText('Something went wrong')).toHaveCount(0);
+  });
+
   test('/admins renders the empty bot-admin list', async ({ page }) => {
     await page.goto(await adminUrl('/admins'));
     await expect(page.getByText('Telegram bot admins')).toBeVisible();

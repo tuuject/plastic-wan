@@ -799,6 +799,40 @@ export const invocationBuckets = sqliteTable(
   (t) => [primaryKey({ columns: [t.invocationId, t.bucketId] }), index('invocation_buckets_bucket_idx').on(t.bucketId)],
 );
 
+/**
+ * Version history for the editable prompt layers: the global persona prompt and
+ * each configured Chat's group instructions. One row per recorded content
+ * change — panel saves, restores, and prompt-file edits picked up at startup or
+ * on an explicit config apply. Rows are pruned per scope by `seq` (see
+ * `store/prompt-versions.ts`), never by the online retention window: prompt
+ * history is configuration, not conversation data. `chat_id` is `0` for the
+ * global scope and the configured Chat ID for the group scope.
+ */
+export const promptVersions = sqliteTable(
+  'prompt_versions',
+  {
+    id: sqliteBigIntId('id').primaryKey(),
+    scope: text('scope').notNull(),
+    chatId: sqliteBigInt('chat_id').notNull().default(0n),
+    seq: sqliteBigInt('seq').notNull(),
+    content: text('content').notNull(),
+    contentHash: text('content_hash').notNull(),
+    source: text('source').notNull(),
+    note: text('note'),
+    createdBy: text('created_by'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [
+    check('prompt_versions_scope_check', sql`scope IN ('global', 'group')`),
+    check(
+      'prompt_versions_scope_chat_check',
+      sql`(scope = 'global' AND chat_id = 0) OR (scope = 'group' AND chat_id <> 0)`,
+    ),
+    check('prompt_versions_source_check', sql`source IN ('panel', 'external', 'rollback')`),
+    uniqueIndex('prompt_versions_scope_seq_unique').on(t.scope, t.chatId, t.seq),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Image generation domain (from @plasticwan/image-service)
 //

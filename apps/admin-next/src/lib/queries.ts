@@ -7,6 +7,9 @@ import {
   getInvocation,
   getMessage,
   getOverview,
+  getPromptDiff,
+  getPromptDocument,
+  getPromptVersions,
   getProviderPresets,
   getProviders,
   getSession,
@@ -23,6 +26,7 @@ import {
   listStickerSets,
   listStickers,
   type Page,
+  type PromptScopeRef,
 } from './api.ts';
 
 export const PAGE_SIZE = 25;
@@ -135,6 +139,35 @@ export const developerQuery = queryOptions({
   queryFn: getDeveloperSettings,
   staleTime: 0,
 });
+
+/**
+ * Prompt reads and writes share one resource, so the page invalidates both
+ * queries after a write: the file view drives the editor, the versions view
+ * drives history and the applied-version status.
+ */
+export function promptDocumentQuery(reference: PromptScopeRef) {
+  return queryOptions({
+    queryKey: ['prompt-document', reference.scope, reference.scope === 'group' ? reference.chat : null],
+    queryFn: () => getPromptDocument(reference),
+    staleTime: 0,
+  });
+}
+
+export function promptVersionsQuery(reference: PromptScopeRef) {
+  return queryOptions({
+    queryKey: ['prompt-versions', reference.scope, reference.scope === 'group' ? reference.chat : null],
+    queryFn: () => getPromptVersions(reference),
+    staleTime: 0,
+  });
+}
+
+export function promptDiffQuery(from: string, to: string) {
+  return queryOptions({
+    queryKey: ['prompt-diff', from, to],
+    queryFn: () => getPromptDiff(from, to),
+    retry: false,
+  });
+}
 
 export function invocationQuery(id: string) {
   return queryOptions({

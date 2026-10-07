@@ -123,6 +123,21 @@ export class BucketScheduler {
     return this.#active.size;
   }
 
+  // Aborts the listed running invocations (used by the scoped prompt cancel).
+  // Like abortAll, this only interrupts live agent work; each run persists its
+  // own terminal state.
+  abortInvocations(ids: readonly bigint[], reason = 'admin_cancel'): number {
+    const wanted = new Set(ids);
+    let signaled = 0;
+    for (const [id, entry] of this.#active) {
+      if (wanted.has(BigInt(id))) {
+        entry.controller.abort(new Error(reason));
+        signaled += 1;
+      }
+    }
+    return signaled;
+  }
+
   async stop(graceMilliseconds = 30_000): Promise<void> {
     this.#running = false;
     this.wake();

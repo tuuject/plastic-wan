@@ -20,6 +20,7 @@ export const layout: typeof layoutEn = {
     models: '模型',
     imageSettings: '图片设置',
     chats: '会话',
+    prompts: 'Prompt',
     developer: '开发者',
     settings: '设置',
   },

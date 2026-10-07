@@ -23,6 +23,7 @@ import { Route as InvocationsRouteImport } from './routes/invocations'
 import { Route as MemoriesRouteImport } from './routes/memories'
 import { Route as MessagesRouteImport } from './routes/messages'
 import { Route as ModelsRouteImport } from './routes/models'
+import { Route as PromptsRouteImport } from './routes/prompts'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as StickersRouteImport } from './routes/stickers'
 import { Route as ContextsConversationIdRouteImport } from './routes/contexts_.$conversationId'
@@ -100,6 +101,11 @@ const ModelsRoute = ModelsRouteImport.update({
   path: '/models',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PromptsRoute = PromptsRouteImport.update({
+  id: '/prompts',
+  path: '/prompts',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -147,6 +153,7 @@ export interface FileRoutesByFullPath {
   '/memories': typeof MemoriesRoute
   '/messages': typeof MessagesRoute
   '/models': typeof ModelsRoute
+  '/prompts': typeof PromptsRoute
   '/settings': typeof SettingsRoute
   '/stickers': typeof StickersRoute
   '/contexts/$conversationId': typeof ContextsConversationIdRoute
@@ -169,6 +176,7 @@ export interface FileRoutesByTo {
   '/memories': typeof MemoriesRoute
   '/messages': typeof MessagesRoute
   '/models': typeof ModelsRoute
+  '/prompts': typeof PromptsRoute
   '/settings': typeof SettingsRoute
   '/stickers': typeof StickersRoute
   '/contexts/$conversationId': typeof ContextsConversationIdRoute
@@ -192,6 +200,7 @@ export interface FileRoutesById {
   '/memories': typeof MemoriesRoute
   '/messages': typeof MessagesRoute
   '/models': typeof ModelsRoute
+  '/prompts': typeof PromptsRoute
   '/settings': typeof SettingsRoute
   '/stickers': typeof StickersRoute
   '/contexts_/$conversationId': typeof ContextsConversationIdRoute
@@ -216,6 +225,7 @@ export interface FileRouteTypes {
     | '/memories'
     | '/messages'
     | '/models'
+    | '/prompts'
     | '/settings'
     | '/stickers'
     | '/contexts/$conversationId'
@@ -238,6 +248,7 @@ export interface FileRouteTypes {
     | '/memories'
     | '/messages'
     | '/models'
+    | '/prompts'
     | '/settings'
     | '/stickers'
     | '/contexts/$conversationId'
@@ -260,6 +271,7 @@ export interface FileRouteTypes {
     | '/memories'
     | '/messages'
     | '/models'
+    | '/prompts'
     | '/settings'
     | '/stickers'
     | '/contexts_/$conversationId'
@@ -283,6 +295,7 @@ export interface RootRouteChildren {
   MemoriesRoute: typeof MemoriesRoute
   MessagesRoute: typeof MessagesRoute
   ModelsRoute: typeof ModelsRoute
+  PromptsRoute: typeof PromptsRoute
   SettingsRoute: typeof SettingsRoute
   StickersRoute: typeof StickersRoute
   ContextsConversationIdRoute: typeof ContextsConversationIdRoute
@@ -391,6 +404,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ModelsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/prompts': {
+      id: '/prompts'
+      path: '/prompts'
+      fullPath: '/prompts'
+      preLoaderRoute: typeof PromptsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings': {
       id: '/settings'
       path: '/settings'
@@ -451,6 +471,7 @@ const rootRouteChildren: RootRouteChildren = {
   MemoriesRoute: MemoriesRoute,
   MessagesRoute: MessagesRoute,
   ModelsRoute: ModelsRoute,
+  PromptsRoute: PromptsRoute,
   SettingsRoute: SettingsRoute,
   StickersRoute: StickersRoute,
   ContextsConversationIdRoute: ContextsConversationIdRoute,

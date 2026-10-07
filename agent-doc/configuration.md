@@ -30,11 +30,11 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 | 路径 | 说明 |
 | --- | --- |
 | `agent.provider`、`agent.model` | 永远热更新：目标 Provider 可以是同一次修改里新增的，reload 会重建模型注册表并随配置一起发布 |
-| `agent.system_prompt_file` | 路径或文件内容变化都算；内容变化会重建每个 Conversation 的 Context |
+| `agent.system_prompt_file` | 路径或文件内容变化都算；内容变化会重建每个 Conversation 的 Context；可在面板编辑并保留版本历史 |
 | `developer`、`developer.record_model_payloads` | 可选节/字段的增删都热应用，缺省为 `false`；每次模型调用读取当前开关，关闭时后续快照回调停止写入 |
 | 其余 agent 字段：`thinking_level`、`context_stop_ratio`、`send_max_text_length`、`send_disallow_blank_lines`、`send_nudge_enabled`、`send_barrier_enabled`、`daily_budget.max_tokens`、`max_concurrency`、`history_messages`、`context.max_wall_clock_seconds`、`context.idle_grace_seconds`、`rate_limits.*` | 下一次 Invocation 使用新值；运行中的 Invocation 继续用它启动时的快照。唯一例外是 `daily_budget.max_tokens`：日预算在运行期实时读取，调低后下一次模型调用立即被拦截 |
 | `telegram.chats`（**新增** Chat，整项 `{ id, … }`） | 立即生效：ingestion 白名单、参与策略注册表与 `resolveChatConfig` 都读发布后的配置并按代数重建/直读，无需重启。删除 Chat、已有 Chat 的其它字段修改与 Topic 范围仍是 restart |
-| `telegram.chats[<id>].instructions_file` | 仅限两边都存在的 Chat；路径或内容变化都算 |
+| `telegram.chats[<id>].instructions_file` | 仅限两边都存在的 Chat；路径或内容变化都算；可在面板编辑并保留版本历史（Chat 尚无该字段时由面板创建） |
 | `telegram.chats[<id>].provider` / `.model` / `.thinking_level` | 仅限两边都存在的 Chat 的按群模型覆盖（语义与校验见「Telegram Chat 与 Topic」）；删除 Chat 仍是 restart |
 | `telegram.chats[<id>].ignored_user_ids` | 增删字段、替换或清空列表都热应用；下一条实时/启动追赶 Update 使用新名单，不追溯删除已有 Message 或 Context。成员可用 `/ignoreme`、`/unignoreme` 写入或移除自己的 ID |
 | `telegram.admins` | Bot 管理员白名单（`/pause`、`/resume`、`/model`、`/cut_topic`、`/allowlist` 的唯一事实源）；运行期判定直接读运行中的配置，下一次命令执行就用新列表 |
@@ -56,6 +56,7 @@ node src/cli.ts check-config --config dev-data/config.jsonc
 - 发布是原子的：新注册表在发布前没有任何人能看到，注册表与配置在同一个同步块里发布。已经开始的 Invocation 与运行中 attach 的 Bucket 继续用运行开始时冻结的快照（快照同时带着模型与 Provider 连接），下一次 Invocation 才用新配置；`invocations.config_hash` 在 `queued → running` 时写入该快照的 active hash。
 - vision 分析钉住它开始时的快照：`read_image` 的聊天分析与后台 Sticker 索引在开始时取一次当前配置，用那一份的模型与缓存版本（`<provider>/<model>/prompt-<prompt_version>`）完成这次分析并写入 `media_analyses`。换 vision 模型后聊天图片按新版本重新分析；已经索引的 Sticker 不会重跑，见 [telegram-agent-flow.md](telegram-agent-flow.md)。
 - Prompt 变化（`agent.system_prompt_file` 或 `instructions_file`）改变稳定系统提示的哈希，该 Conversation 的 Context 在下一次运行时重建，见「Conversation Context」。
+- 两层 Prompt（`agent.system_prompt_file` 与 `instructions_file`）可在 Admin Panel 的 Prompts 端点编辑：保存写 Prompt 文件（去 HTML 注释后的正文）、记录一个版本，再走上述同一套热应用，**下一次**开始的 Invocation 使用新内容；运行中的 Invocation 继续用启动时的快照，要立刻停掉仍按旧 Prompt 运行的那些需在面板显式取消（见 [admin-panel.md](admin-panel.md#prompts-页端点)）。手改 Prompt 文件不会立即产生版本：启动加载与每一次成功应用会把文件当时的内容记成 `external` 版本（去 HTML 注释后与上一条版本相同则不记录），因此改完必须显式应用才进历史。Prompt 写端点的 `If-Match` 是去 HTML 注释后内容的 SHA-256（即 Prompt 视图的 `content_hash`），不是 `config.jsonc` revision——config revision 按设计不含 Prompt 文件。
 - 每次成功应用输出 `config_reloaded` 日志事件，带 `generation`、`active_hash`、`file_hash`、`applied`、`restart_required`、`outside_serve`；失败输出 `config_reload_failed`（`code` 与脱敏后的 `error`）。失败时 active 配置与注册表都不变，错误记录在 `ConfigReloader.status().lastError`；`code` 为 `config_invalid`、`candidate_invalid`、`model_unusable`（注册模型缺失或不可用，含 vision 输出上限越界、MCP/Tool 注册表容量不足）或 `secret_unresolved`（新增或连接字段变化的 Provider 无法解析 SecretRef）。全局默认与每个 Chat 的生效组合都须通过校验；删除仍被引用的模型会在文件或 candidate 校验阶段被拒绝，任一失败都不会部分发布。
 - `/model` 在写入文件之前就被拒绝时（模型不存在、不可用，或文件无法写入），没有发生 reload：只输出 `model_switch_failed` 日志并把错误返回给调用方，不改变 `lastError`。写入之后应用失败才按上一条处理。
 - 没有任何待重启字段时 `active_hash` 等于文件哈希，可以直接与 `check-config` 的输出比对。只改注释或格式、或者把待重启字段改回原值后应用，都会发布一次内容相同的配置，让 `active_hash` 跟上新的文件哈希。有待重启字段时，`active_hash` 是 candidate RawConfig 的 JSON 序列化的 SHA-256；只有 restart 字段变化时它保持不变。

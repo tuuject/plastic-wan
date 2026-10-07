@@ -133,6 +133,10 @@ Invocation 重放不录制或读取模型请求副本：它从 `invocation_messa
 
 `daily_usage` 只保留 Token 计量：`scope = 'chat'` / `metric = 'model_tokens'` 按 Chat 归属记录 Agent 与聊天触发 `read_image` 的 Token（全局求和后与 `agent.daily_budget.max_tokens` 比较），`scope = 'system'` / `resource = 'sticker_index'` 的 `vision_images`、`vision_tokens` 服务于后台 Sticker 索引的 `vision.daily_budget`。Token 计量口径为 `input_tokens + output_tokens + cache_read_tokens + cache_write_tokens`（`meteredTokens`），缓存读写同时在 `model_calls` 与 Admin Panel 的 Model call 明细里单列；`model_calls.total_tokens` 是 Provider 原始总数，只作审计。迁移 `018` 曾按不含缓存的口径重建历史行，现已退役为空迁移；已跑过它的开发库用 `scripts/reconcile-daily-token-usage.ts` 从 `model_calls` 重新对账（默认 dry-run，`--apply` 写入；审计行已被保留期清掉的日期只报告、不猜）。Chat 每日 Invocation 数与 MCP 每日调用数已经取消，不再有对应的 metric；Admin Panel 的 Invocation 与 Tool call 曲线直接 `COUNT` `invocations` 与 `tool_calls`，因此覆盖全部 Tool 而不只是 MCP。
 
+### Prompt 版本（迁移 031）
+
+`prompt_versions` 保存两层可编辑 Prompt（全局 `agent.system_prompt_file` 与每个配置 Chat 的 `instructions_file`）的内容历史，每行是一次记录：面板保存（`panel`）、恢复（`rollback`）、启动加载或显式配置应用拾取的手改文件（`external`）。`content` 是去 HTML 注释后的模板（模型看到的那份），`content_hash` 是它的 SHA-256；`chat_id` 全局为 `0`、群级为配置 Chat ID，CHECK 保证两者一致，唯一索引 `(scope, chat_id, seq)` 因此对全局也成立，`seq` 在每个 scope 内单调递增。内容与上一条版本相同则不记录；恢复不删历史，而是追加一条 `rollback`。每个 scope 只保留最近 100 条，按 `seq` 修剪（`PROMPT_VERSIONS_RETAINED`，见 [src/store/prompt-versions.ts](../src/store/prompt-versions.ts)），且**不**随 `retention.online_days` 清理——Prompt 历史是配置，不是会话数据。写端点与版本语义见 [admin-panel.md](admin-panel.md#prompts-页端点)。
+
 ### MCP 与 Admin
 
 MCP 只有 `mcp_server_state` 一张自己的表（Server 状态、Tool registry hash、重连次数、错误码）；Tool 调用复用 `tool_calls`，没有自己的调用配额。

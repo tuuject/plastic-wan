@@ -38,6 +38,7 @@ import { loadPlugins } from './plugins/plugin.ts';
 import { runStartupCatchUp } from './startup-catch-up.ts';
 import { ServeLock, SqliteStore, stopRunningInstance, watchStopRequests } from './store/database.ts';
 import { LongTaskService } from './store/long-tasks.ts';
+import { recordPromptVersionsFromConfig } from './store/prompt-versions.ts';
 import { appState } from './store/schema.ts';
 
 const ALLOWED_UPDATES = ['message', 'edited_message', 'my_chat_member'] as const;
@@ -115,6 +116,9 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     });
     store = await SqliteStore.open(loaded.config);
     const openedStore = store;
+    // The startup load is the first place a hand-edited prompt file becomes
+    // visible to the process; record the starting versions before any apply.
+    recordPromptVersionsFromConfig(openedStore.orm, loaded.config);
     imageService = createImageService(openedStore, loaded.config, {
       logger: { warn: (message) => logEvent('image_service_warning', { message }) },
     });
@@ -277,7 +281,12 @@ export async function serve(configPath: string, takeover = false): Promise<void>
           model,
         ),
       // A raised max_concurrency only takes effect on the next scheduler tick.
-      onPublished: () => startedScheduler.wake(),
+      onPublished: () => {
+        startedScheduler.wake();
+        // A hand-edited prompt file picked up by this apply becomes a version
+        // here; panel saves already recorded themselves before applying.
+        recordPromptVersionsFromConfig(openedStore.orm, configStore.current().config);
+      },
     });
     const commands = new BotCommandService(
       store,
