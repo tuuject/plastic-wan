@@ -530,6 +530,7 @@ Developer 页使用可选的 `developer.record_model_payloads`（boolean，缺�
     "port": 8787,
     "session_ttl_hours": 168,
     "static_dir": "/opt/plasticwan/apps/admin-next/dist",
+    "public_url": "https://panel.example.com",
   },
 }
 ```
@@ -538,5 +539,6 @@ Developer 页使用可选的 `developer.record_model_payloads`（boolean，缺�
 - `host` 是任意非空字符串，不做回环限制；绑定非回环地址（如 `0.0.0.0`）会把面板暴露给所在网络，TLS 与访问控制由运维负责。推荐保持回环并经反向代理对外。
 - `session_ttl_hours` 同时决定 Session 过期与 Cookie `Max-Age`。
 - `static_dir` 可选，默认 `apps/admin-next/dist`（相对仓库根解释）；目录缺失时审计 API 仍可用，静态路由返回 503 `admin_bundle_missing`。
+- `public_url` 可选，**显式配置才启用 Passkey**：未配置时 `/api/auth/passkeys/*` 与 `DELETE /api/auth/password` 返回 404 `passkeys_disabled`，登录页与 Settings 页不显示 Passkey 入口。值必须是**规范 HTTPS origin**：无用户名/密码、路径（仅 `/`）与查询/fragment，可带一个尾部 `/`；仅开发场景允许 `http://localhost`；IPv4/IPv6 字面量不能作为 WebAuthn RP，HTTP 与 HTTPS 下均拒绝（校验在 `adminPublicOrigin`，`src/platform/config.ts`）。属于 `admin.*`，改动需重启。启用后：WebAuthn 只认配置的精确 origin，RP 是 origin 的 hostname（换域名后旧 key 失效）；Admin **全部写端点**的 Origin 校验从「与 Host 匹配」收紧为「与 public origin 全等」。语义与端点见 [admin-panel.md](admin-panel.md#passkey-登录与凭据)。
 
 详细认证、API 与前端约定见 [admin-panel.md](admin-panel.md)。

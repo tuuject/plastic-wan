@@ -163,6 +163,20 @@ printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay
 - replay 的行为边界（合成工具、不写生产数据、按 Provider 计费）见 [admin-panel.md](admin-panel.md#invocation-重放)；选项全集与响应形状以 [packages/cli/README.md](../packages/cli/README.md) 与源码为准。
 - 源码仓库根目录的 [`plasticwan-utils` Skill](../.agents/skills/plasticwan-utils/SKILL.md) 面向通过 CLI 访问 Admin API 的外部 Agent：每次任务先运行 `plasticwan-utils doctor --json`（恰好一次只读请求），只有退出码 `0` 且 `status` 为 `ok` 才读取对应指南并查询或重放；doctor 失败即停止并请操作员用 `login` 修复，不循环重试、不代为执行 `login` 或改动凭据、不直接读取聊天或存储中的 key，`--help` 只用于客户端缺失或命令不匹配时的诊断。`SKILL.md` 是轻量入口，审计与重放细节分列 `references/invocations.md`、`references/replay.md`，按当前任务加载子文档而不是一次全读。它不是 Bot 的 System Skill。npm 包不内置该 Skill，须按 [CLI README](../packages/cli/README.md#配套-agent-skill) 从源码仓库将整个目录（含 `references/` 与 `agents/openai.yaml`）复制/导入宿主并随仓库同步更新。不把服务端源码或 SQLite 访问作为前提。
 
+## 管理员凭据与 Passkey 恢复（admin-reset）
+
+`admin-reset` 是**服务端内置 CLI** 的本地恢复命令，与 `plasticwan-utils` 不是一回事——后者只通过 Admin API 做只读检查与 Invocation 重放，不能恢复凭据。
+
+```bash
+node src/cli.ts admin-reset --config <path> --username <name> [--password-stdin]
+```
+
+- **前置条件**：先停止**同一 `data_dir`** 的 `serve`。命令经 `ServeLock` 拒绝在运行中的实例上执行（锁被活动进程持有时报错退出，没有 `--takeover`），保证恢复期间的数据库不与运行中的 Bot 竞争。
+- **交互模式**：stdin 是 TTY 时隐藏输入新密码并要求重复确认，两遍不一致则报错退出；密码不 echo。
+- **非交互模式**：stdin 不是 TTY 时必须显式给 `--password-stdin`，密码从 stdin 管道读取（最多 800 字节、10 秒超时、只去掉一个尾部换行）。**不要把明文密码写进命令行参数**——会进 shell history 与进程列表；请从密码管理器或受限权限文件等安全来源经管道传入。
+- **效果**：把该账号密码替换为新 Argon2id hash，删除该账号**全部 Passkey 与全部登录 Session**；`admin_api_keys` 保留，`setup` 不会重开（账号仍存在）。成功后 stdout 输出 `{ "status": "ok", "username": ... }`。
+- **使用场景**：遗失全部 Passkey、移除 `admin.public_url` 后关闭了 Passkey，或更换域名导致旧凭据无法用于新域名时，用它恢复密码登录。删除或更换公开 URL 之前，应先恢复或设置密码。
+
 ## 日志
 
 用户可见日志写 stdout，格式为单行 JSON；框架 trace 可能写 stderr。至少监控：
@@ -215,7 +229,7 @@ printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay
 1. 确认 `admin.enabled = true` 且已重启 `serve`。
 2. 启动日志中应有一条 `admin_started`，`host`/`port` 与配置一致。
 3. 页面返回 503 `admin_bundle_missing`：先 `pnpm run admin:build`（产出 `apps/admin-next/dist`），或修正 `static_dir`；503 响应的 `message` 里带有实际查找的目录绝对路径（`admin_started` 日志只有 host/port）。
-4. 忘记密码时没有恢复入口：删除 `admin_users` 行会重新进入首次初始化流程；这是写操作，只能在停止 `serve` 后手动执行。
+4. 忘记密码或遗失 Passkey 时使用内置 CLI 本地重置，见「[管理员凭据与 Passkey 恢复](#管理员凭据与-passkey-恢复admin-reset)」。不要删除 `admin_users` 来重新开放首次设置入口。
 5. 登录返回 429 `too_many_attempts`：同一失败键连续 10 次失败后锁定 15 分钟，重启 `serve` 会清空内存计数；失败键的构成见[Admin Panel：认证](admin-panel.md#认证)。
 
 ## 备份
@@ -293,7 +307,7 @@ docker compose run --rm plasticwan doctor --config /config/config.jsonc
 docker compose run --rm plasticwan backup --config /config/config.jsonc
 ```
 
-注意：`serve` 是长期进程且受 `ServeLock` 约束，同一 `data_dir` 只能有一个实例。上面的一次性命令都不启动 `serve`，可以与运行中的容器共存；但**不要**用 `docker compose run` 再起一个 `serve`。
+注意：`serve` 是长期进程且受 `ServeLock` 约束，同一 `data_dir` 只能有一个实例。上面的一次性命令（`check-config`/`doctor`/`backup`）都不启动 `serve`，可以与运行中的容器共存；但**不要**用 `docker compose run` 再起一个 `serve`。例外是 `admin-reset`：它要独占数据库，运行前必须先停止同 `data_dir` 的 Bot 容器（`docker compose stop plasticwan`），否则 `ServeLock` 会拒绝执行，见「[管理员凭据与 Passkey 恢复](#管理员凭据与-passkey-恢复admin-reset)」。
 
 镜像不自带定时备份。需要定期备份时，用宿主机 cron 等调度器定期执行上面的 `backup` 命令，例如每天一次。
 

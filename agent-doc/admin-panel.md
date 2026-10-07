@@ -36,7 +36,18 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 - `POST /api/auth/logout` 按 Token 摘要删除 Session。
 - `POST /api/auth/credentials` 修改当前管理员用户名和密码，撤销该用户全部 Session（含当前）并签发新的 Cookie。
 
-跨站防护：所有写方法（`POST`/`PUT`/`DELETE`）校验 `Origin`——缺失（CLI、非浏览器客户端）放行，解析失败返回 400 `bad_origin`，主机不匹配返回 403 `bad_origin`；`Origin` 不参与读方法校验，`GET` 携带任意 `Origin` 仍正常处理。审计路由只接受 `GET`，其它方法返回 405。
+跨站防护：所有写方法（`POST`/`PUT`/`DELETE`）校验 `Origin`——缺失（CLI、非浏览器客户端）放行，解析失败返回 400 `bad_origin`，主机不匹配返回 403 `bad_origin`；`Origin` 不参与读方法校验，`GET` 携带任意 `Origin` 仍正常处理。审计路由只接受 `GET`，其它方法返回 405。配置了 `admin.public_url`（启用 Passkey）后，写端点的 Origin 校验从「与请求 Host 匹配」收紧为「与配置的 public origin **全等**」，见下一节。
+
+### Passkey 登录与凭据
+
+Passkey 是可选登录方式，**显式配置 `admin.public_url` 才启用**（`src/ingress/admin/server.ts`：`admin.public_url === undefined` 时不创建 `AdminPasskeys`，`/api/auth/passkeys/*` 与 `/api/auth/password` 一律返回 404 `passkeys_disabled`，前端登录页与 Settings 页也不显示 Passkey 入口）。`public_url` 的格式约束见 [configuration.md](configuration.md#admin-panel)。`src/ingress/admin/passkeys.ts` 的 `AdminPasskeys`：
+
+- **origin 与 RP**：`origin = adminPublicOrigin(public_url)`，`rpId = origin 的 hostname`。WebAuthn 只接受**配置的精确 origin**：`checkOrigin` 用请求 `Origin` 与 `this.origin` 全等比较，Host/转发头不参与选 RP，不匹配返回 403 `bad_origin`；未配置时整个端点组 404。
+- **可发现 + UV**：注册要求 `residentKey: 'required'`（`attestationType: 'none'`）；注册与登录都要求 `userVerification: 'required'`。注册排除同一 `rpId` 下已有的 credential（`excludeCredentials`）；登录是可发现流程，服务端不指定用户名，校验返回的 `userHandle` 与账号 `webauthn_user_id` 的 UTF-8/base64url 编码一致。`rp_id` 写入 `admin_passkeys`，因此**更换域名后旧 key 不再适用**。
+- **一次性 challenge**：options 响应经 `plasticwan_passkey` Cookie（`HttpOnly; SameSite=Strict; Path=/`，`Max-Age=300`，HTTPS 下加 `Secure`）下发一次性 token；challenge 只存内存（重启即失效）、5 分钟过期，register/login verify 消费（复用、过期、会话不匹配返回 400 `invalid_challenge`）。客户端按对端地址限流：同一客户端每 5 分钟最多 60 次、内存最多 1000 个客户端，超限 429 `too_many_attempts`。
+- **密码学验证失败统一 401 `invalid_passkey`**：请求结构不合法返回 400 `invalid_body`；签名、用户句柄等验证失败和校验库错误不暴露细节，库错误不进日志/响应。登录在异步验证后的事务里重读账号（`passwordHash`/`updatedAt` 变化即拒）并以乐观锁更新 `counter`，防重放与并发断言。
+- **管理端点**：`GET /api/auth/passkeys`（面板 Session）返回 `{ items, has_password }`；列表保留全部 key，每项 `usable` 表示 `rp_id` 是否等于当前 RP，前端显示旧域名提示且仅用可用数量判定按钮守卫；`DELETE /api/auth/passkeys/:id` 删除单个 key——删除「最后一个可用 key」且账号无密码时返回 409 `password_required`，key 不存在 404 `not_found`；`DELETE /api/auth/password` 删除密码（转为仅 Passkey 登录）——当前 `rpId` 下没有 key 时返回 409 `passkey_required`，成功后撤销该用户**全部** Session 并签发新 Cookie。
+- **Session 语义**：passkey 登录成功与密码登录一样签发 Session Cookie；`GET /api/auth/session` 响应新增 `passkeys_enabled`（本次是否启用 Passkey）与 `has_password`（当前账号是否仍有密码，未认证时为 `null`）。`POST /api/auth/credentials` 改密码会撤销全部 Session（含 passkey 登录的）。
 
 ## 程序化 API 密钥
 
@@ -92,6 +103,10 @@ Admin Panel 是随 `serve` 启动的本地审计与管理界面，覆盖 Tool Se
 | --- | --- |
 | `POST /auth/setup` / `POST /auth/login` | 首次建号与登录，约束见「认证」 |
 | `POST /auth/logout` / `POST /auth/credentials` | 改凭据会撤销该用户**全部** Session（含当前）并签发新 Cookie |
+| `POST /auth/passkeys/login/options` / `POST /auth/passkeys/login/verify` | 浏览器 WebAuthn 登录（可发现 + UV，无 Session）；options 返回一次性 challenge token（`plasticwan_passkey` Cookie），verify 消费并签发 Session Cookie；challenge 一次性、5 分钟、仅内存；验证失败统一 401 `invalid_passkey`；未配置 `admin.public_url` 时整组 404 `passkeys_disabled`，见「Passkey 登录与凭据」 |
+| `POST /auth/passkeys/register/options` / `POST /auth/passkeys/register/verify` | 面板 Session 注册新 key；options 排除同一 `rpId` 已有 credential，verify 校验后写 `admin_passkeys`，重复注册 409 `passkey_exists` |
+| `DELETE /auth/passkeys/:id` | 面板 Session 删除单个 key；删除最后一个可用 key 且无密码时 409 `password_required`，key 不存在 404 `not_found` |
+| `DELETE /auth/password` | 面板 Session 删除密码（转为仅 Passkey 登录）；当前 `rpId` 下无 key 时 409 `passkey_required`，成功后撤销该用户**全部** Session 并签发新 Cookie |
 | `PUT /developer` | 保存并热应用 `developer.record_model_payloads`，沿用配置 revision、校验与原子写入机制，见「Developer 页」 |
 | `DELETE /developer/model-payloads` | 分批置空历史 `model_calls.request_json` / `response_json`，保留所有审计行与关联；不执行 `VACUUM`，见「Developer 页」 |
 | `POST /api-keys` / `DELETE /api-keys/:id` | 仅面板 Session 可创建或撤销程序化密钥，见「程序化 API 密钥」 |
@@ -315,6 +330,8 @@ Messages 列表与消息详情的 Revision 在发送者姓名旁显示可复制�
 `admin_sessions.user_id` 级联删除；`admin_sessions_expiry_idx` 支撑过期清理。两张表不参与 `purgeExpiredData` 的在线保留窗口（`retention.online_days`）——管理员账号不是会话数据。
 
 迁移 `src/store/migrations/028_admin_api_keys.sql` 建立 `admin_api_keys`：每行一个程序化 API key，`token_hash` 只存明文的 SHA-256 摘要（UNIQUE），`prefix` 是展示用前缀，`created_at`/`last_used_at`/`revoked_at` 记录生命周期；撤销设置 `revoked_at` 而不删除行，`last_used_at` 在每次通过鉴权时刷新（包括随后被权限面拒绝的请求）。该表与 `admin_users`/`admin_sessions` 一样不参与在线保留清理。语义见「程序化 API 密钥」。
+
+迁移 `src/store/migrations/032_admin_passkeys.sql` 建立 `admin_passkeys` 并给 `admin_users` 补 `webauthn_user_id`（唯一，默认随机 16 字节 hex）：每行一个 WebAuthn 凭据，`credential_id` 全局唯一，`public_key`/`counter` 用于验证与防重放（登录以乐观锁更新 `counter`），`rp_id` 记录注册时的依赖方——key 只对注册它的 `rpId` 生效，换域名后旧 key 不可用；`name` 1–80 字符（CHECK 约束）。`user_id` 级联删除；`recoverCredentials`（`admin-reset` CLI 的落点）删除该账号全部 passkey 与 Session，但不触碰 `admin_api_keys`，也不重开 setup。该表不参与在线保留清理。语义见「Passkey 登录与凭据」。
 
 Bot 管理员白名单不再是数据库表：迁移 `src/store/migrations/026_drop_bot_admins.sql` 删除了旧表 `bot_admins`（迁移 `008` 引入），唯一事实源是配置文件里的 `telegram.admins`，旧表内容用 `scripts/migrate-admins.ts` 搬迁。Admin Panel「Bot admins」页面经配置写端点增删该列表并热应用。Bot 管理员决定谁能执行 `/pause`、`/resume`、`/model` 与 `/cut_topic`，与面板登录账号无关。
 

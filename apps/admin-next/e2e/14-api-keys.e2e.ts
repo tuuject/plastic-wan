@@ -348,7 +348,14 @@ test.describe('API key management UI', () => {
     await page.route('**/api/auth/session', async (route) => {
       if (expired) {
         await route.fulfill({
-          json: { setup_required: false, authenticated: false, username: null, expires_at: null },
+          json: {
+            setup_required: false,
+            authenticated: false,
+            username: null,
+            expires_at: null,
+            passkeys_enabled: process.env.E2E_PASSKEYS === '1',
+            has_password: null,
+          },
         });
         return;
       }

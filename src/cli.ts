@@ -2,6 +2,7 @@
 import { serve } from './application.ts';
 import { parseCli } from './cli-options.ts';
 import { runDoctor } from './doctor.ts';
+import { runAdminReset } from './ingress/admin/recover.ts';
 import { loadConfig } from './platform/config.ts';
 import { loadEnvFiles } from './platform/load-env.ts';
 import { backupDatabase } from './store/database.ts';
@@ -38,6 +39,17 @@ try {
     case 'configure':
       await runConfigure(options.configPath);
       break;
+    case 'admin-reset': {
+      if (options.username === undefined) {
+        throw new Error('admin-reset requires --username');
+      }
+      await runAdminReset({
+        configPath: options.configPath,
+        username: options.username,
+        passwordStdin: options.passwordStdin,
+      });
+      break;
+    }
   }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);

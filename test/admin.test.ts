@@ -92,7 +92,14 @@ test('admin panel demands first-run setup, then authenticates and revokes sessio
   const { store, server } = await fixture();
   try {
     const initial = await readJson(await server.handle(request('/api/auth/session')));
-    expect(initial).toEqual({ setup_required: true, authenticated: false, username: null, expires_at: null });
+    expect(initial).toEqual({
+      setup_required: true,
+      authenticated: false,
+      username: null,
+      expires_at: null,
+      passkeys_enabled: false,
+      has_password: null,
+    });
 
     const unauthenticated = await server.handle(request('/api/invocations'));
     expect(unauthenticated.status).toBe(401);

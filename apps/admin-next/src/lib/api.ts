@@ -1,3 +1,10 @@
+import type {
+  AuthenticationResponseJSON,
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+} from '@simplewebauthn/browser';
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -21,6 +28,10 @@ export interface SessionState {
   readonly authenticated: boolean;
   readonly username: string | null;
   readonly expires_at: string | null;
+  /** Whether passkeys are enabled at all; gated by the `admin.public_url` config. */
+  readonly passkeys_enabled: boolean;
+  /** Only a real boolean when authenticated; null before setup / while signed out. */
+  readonly has_password: boolean | null;
 }
 
 export interface Page<T> {
@@ -836,6 +847,63 @@ export const updateCredentials = postCredentials('/auth/credentials');
 
 export function logout(): Promise<{ status: string }> {
   return call('/auth/logout', { method: 'POST' });
+}
+
+// ---------------------------------------------------------------------------
+// Passkeys (frontend half of WebAuthn; the ceremony runs in the browser)
+// ---------------------------------------------------------------------------
+
+export interface PasskeyItem {
+  readonly id: string;
+  readonly name: string;
+  readonly created_at: string;
+  readonly last_used_at: string | null;
+  /** Whether the key was registered for the current panel URL and can sign in. */
+  readonly usable: boolean;
+}
+
+export interface PasskeyList {
+  readonly items: readonly PasskeyItem[];
+  readonly has_password: boolean;
+}
+
+export function listPasskeys(): Promise<PasskeyList> {
+  return call<PasskeyList>('/auth/passkeys');
+}
+
+function postJson<T>(path: string, body: unknown): Promise<T> {
+  return call<T>(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The server-generated WebAuthn request options, passed straight into `startAuthentication`. */
+export function passkeyLoginOptions(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+  return postJson<PublicKeyCredentialRequestOptionsJSON>('/auth/passkeys/login/options', {});
+}
+
+export function passkeyLoginVerify(response: AuthenticationResponseJSON): Promise<{ status: string }> {
+  return postJson<{ status: string }>('/auth/passkeys/login/verify', { response });
+}
+
+/** The server-generated WebAuthn creation options, passed straight into `startRegistration`. */
+export function passkeyRegisterOptions(): Promise<PublicKeyCredentialCreationOptionsJSON> {
+  return postJson<PublicKeyCredentialCreationOptionsJSON>('/auth/passkeys/register/options', {});
+}
+
+export function passkeyRegisterVerify(name: string, response: RegistrationResponseJSON): Promise<{ status: string }> {
+  return postJson<{ status: string }>('/auth/passkeys/register/verify', { name, response });
+}
+
+export function deletePasskey(id: string): Promise<{ status: string }> {
+  return call<{ status: string }>(`/auth/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** Removes the password; the session is rotated and the current one stays valid. */
+export function deletePassword(): Promise<{ status: string }> {
+  return call<{ status: string }>('/auth/password', { method: 'DELETE' });
 }
 
 export function getOverview(): Promise<Overview> {

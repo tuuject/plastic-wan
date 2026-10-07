@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { hash, verify } from '@node-rs/argon2';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { asRunResult, type Orm } from '../../store/database.ts';
-import { adminSessions, adminUsers } from '../../store/schema.ts';
+import { adminPasskeys, adminSessions, adminUsers } from '../../store/schema.ts';
 
 const SESSION_TOKEN_BYTES = 32;
 const MAX_FAILED_ATTEMPTS = 10;
@@ -50,7 +50,7 @@ export class AdminAuthError extends Error {
 
 interface UserRow {
   readonly id: bigint;
-  readonly passwordHash: string;
+  readonly passwordHash: string | null;
 }
 
 interface SessionRow {
@@ -113,7 +113,7 @@ export class AdminAuth {
   }
   async changeCredentials(userId: bigint, credentials: AdminCredentials, now = new Date()): Promise<string> {
     assertCredentials(credentials);
-    const passwordHash = await hash(credentials.password, HASH_OPTIONS);
+    const passwordHash = await this.#withHashSlot(() => hash(credentials.password, HASH_OPTIONS));
     const iso = now.toISOString();
     return this.#orm.transaction(
       () => {
@@ -170,7 +170,7 @@ export class AdminAuth {
       // Counted before the slow verification, so concurrent failures all count
       // instead of each overwriting the same snapshot.
       this.#recordFailure(clientKey, nowMs);
-      if (row === undefined) {
+      if (row === undefined || row.passwordHash === null) {
         // Burn comparable time on unknown usernames so response latency does not leak account existence.
         await hash(password.length === 0 ? 'absent-account-placeholder' : password, HASH_OPTIONS);
         return false;
@@ -203,6 +203,79 @@ export class AdminAuth {
       },
       { behavior: 'immediate' },
     );
+  }
+
+  hasPassword(userId: bigint): boolean {
+    const user = this.#orm.select().from(adminUsers).where(eq(adminUsers.id, userId)).get();
+    if (user === undefined) {
+      throw new AdminAuthError(401, 'unauthenticated', 'Admin session is required');
+    }
+    return user.passwordHash !== null;
+  }
+
+  removePassword(userId: bigint, rpId: string, now = new Date()): string {
+    return this.#orm.transaction(
+      () => {
+        this.hasPassword(userId);
+        const passkey = this.#orm
+          .select({ id: adminPasskeys.id })
+          .from(adminPasskeys)
+          .where(and(eq(adminPasskeys.userId, userId), eq(adminPasskeys.rpId, rpId)))
+          .get();
+        if (passkey === undefined) {
+          throw new AdminAuthError(
+            409,
+            'passkey_required',
+            'Add a passkey for this website before removing the password',
+          );
+        }
+        this.#orm
+          .update(adminUsers)
+          .set({ passwordHash: null, updatedAt: now.toISOString() })
+          .where(eq(adminUsers.id, userId))
+          .run();
+        this.#orm.delete(adminSessions).where(eq(adminSessions.userId, userId)).run();
+        return this.#createSession(userId, now);
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  /** Local, offline recovery: never reopens the unauthenticated setup endpoint. */
+  async recoverCredentials(credentials: AdminCredentials, now = new Date()): Promise<void> {
+    assertCredentials(credentials);
+    const user = this.#orm
+      .select({ id: adminUsers.id })
+      .from(adminUsers)
+      .where(eq(adminUsers.username, credentials.username))
+      .get();
+    if (user === undefined) {
+      throw new AdminAuthError(404, 'admin_not_found', 'Administrator account does not exist');
+    }
+    const passwordHash = await this.#withHashSlot(() => hash(credentials.password, HASH_OPTIONS));
+    this.#orm.transaction(
+      () => {
+        const updated = asRunResult(
+          this.#orm
+            .update(adminUsers)
+            .set({ passwordHash, updatedAt: now.toISOString() })
+            .where(and(eq(adminUsers.id, user.id), eq(adminUsers.username, credentials.username)))
+            .run(),
+        );
+        if (updated.changes !== 1) {
+          throw new AdminAuthError(409, 'credentials_changed', 'Administrator account changed during recovery');
+        }
+        this.#orm.delete(adminPasskeys).where(eq(adminPasskeys.userId, user.id)).run();
+        this.#orm.delete(adminSessions).where(eq(adminSessions.userId, user.id)).run();
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  /** Called only inside the passkey verification transaction. */
+  createPasskeySession(userId: bigint, now = new Date()): string {
+    this.#orm.update(adminUsers).set({ lastLoginAt: now.toISOString() }).where(eq(adminUsers.id, userId)).run();
+    return this.#createSession(userId, now);
   }
 
   async #withHashSlot<T>(work: () => Promise<T>): Promise<T> {

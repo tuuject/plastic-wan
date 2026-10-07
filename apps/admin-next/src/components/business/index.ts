@@ -21,6 +21,7 @@ export { type FilterOption, FilterToolbar, SelectFilter, TextFilter } from './fi
 export { JsonViewer, type JsonViewerProps } from './json-viewer';
 export { type KvItem, KvList, MonoValue, TextValue } from './kv-list';
 export { LazyDetails, type LazyDetailsProps } from './lazy-details';
+export { PasskeysCard } from './passkeys-card';
 export { PrivateReasoningNote, PrivateReasoningTag } from './private-reasoning';
 export { type BadgeSemantic, StateBadge, stateBadgeSemantic, ToneBadge } from './state-badge';
 export { type ColumnSpec, FLUSH_TABLE_CLASS, LIST_TABLE_CLASS, TableShell, type TableShellProps } from './table-shell';

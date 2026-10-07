@@ -35,6 +35,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@node-rs/argon2": "^2.2.1",
     "@plasticwan/image-service": "workspace:^",
+    "@simplewebauthn/server": "14.0.3",
     "better-sqlite3": "^13.0.3",
     "defuddle": "0.19.4",
     "dotenv": "^17.4.2",
