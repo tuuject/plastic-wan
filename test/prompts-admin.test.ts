@@ -77,7 +77,7 @@ function post(path: string, body: unknown, cookie?: string, ifMatch?: string): R
   });
 }
 
-function put(path: string, body: unknown, cookie: string, ifMatch: string): Request {
+function put(path: string, body: unknown, cookie: string, ifMatch?: string): Request {
   return request(path, { method: 'PUT', headers: promptHeaders(cookie, ifMatch), body: JSON.stringify(body) });
 }
 
@@ -112,7 +112,10 @@ function textUpdate(updateId: number, messageId: number, chatId: number, text: s
     message: {
       message_id: messageId,
       date: 1_700_000_000 + messageId,
-      chat: { id: chatId, type: chatId > 0 ? 'private' : 'group' },
+      chat:
+        chatId > 0
+          ? { id: chatId, type: 'private', first_name: 'Owner' }
+          : { id: chatId, type: 'group', title: 'E2E Group' },
       from: { id: 42, is_bot: false, first_name: 'Alice' },
       text,
     },
