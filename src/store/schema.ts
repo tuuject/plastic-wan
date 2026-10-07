@@ -520,11 +520,34 @@ export const mcpServerState = sqliteTable(
 export const adminUsers = sqliteTable('admin_users', {
   id: sqliteBigIntId('id').primaryKey(),
   username: text('username').notNull().unique(),
-  passwordHash: text('password_hash').notNull(),
+  passwordHash: text('password_hash'),
+  webauthnUserId: text('webauthn_user_id').notNull().unique().default(sql`(lower(hex(randomblob(16))))`),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   lastLoginAt: text('last_login_at'),
 });
+
+export const adminPasskeys = sqliteTable(
+  'admin_passkeys',
+  {
+    id: sqliteBigIntId('id').primaryKey(),
+    userId: sqliteBigInt('user_id')
+      .notNull()
+      .references(() => adminUsers.id, { onDelete: 'cascade' }),
+    credentialId: text('credential_id').notNull().unique(),
+    publicKey: text('public_key').notNull(),
+    counter: sqliteBigInt('counter').notNull(),
+    rpId: text('rp_id').notNull(),
+    name: text('name').notNull(),
+    createdAt: text('created_at').notNull(),
+    lastUsedAt: text('last_used_at'),
+  },
+  (t) => [
+    index('admin_passkeys_user_idx').on(t.userId),
+    check('admin_passkeys_counter_check', sql`counter >= 0`),
+    check('admin_passkeys_name_check', sql`length(name) BETWEEN 1 AND 80`),
+  ],
+);
 
 export const adminSessions = sqliteTable(
   'admin_sessions',

@@ -33,7 +33,7 @@ pnpm test test/media.test.ts test/stickers.test.ts
 pnpm test test/mcp.test.ts test/web-fetch.test.ts
 pnpm test test/operations.test.ts test/foundation.test.ts test/schema.test.ts test/load-env.test.ts
 pnpm test packages/image-service/test test/image-service-store.test.ts test/image-models.test.ts test/image-admin-server.test.ts
-pnpm test test/admin.test.ts test/admin-providers.test.ts test/admin-chats.test.ts test/model-switch.test.ts
+pnpm test test/admin.test.ts test/admin-passkeys.test.ts test/admin-recovery.test.ts test/admin-providers.test.ts test/admin-chats.test.ts test/model-switch.test.ts
 pnpm test test/bot-commands.test.ts
 pnpm test test/config-diff.test.ts test/config-reload.test.ts test/chat-model-runtime.test.ts
 pnpm test test/memory.test.ts
@@ -98,6 +98,8 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `web-fetch.test.ts` | 有界不可信文本结果与审计、公网 IPv4 放行与 IPv4 映射字面量拒绝、私网/合成地址拒绝（含跳转目标）、fake-ip 网段默认拒绝且需 `allow_proxy_synthetic_addresses` 开启、6to4/Teredo 过渡地址拒绝、`dangerously_allow_all_ip_addresses` 从配置到插件生效并放行私网/环回/跳转目标但仍拒绝非默认端口、默认 `Accept` 优先 `text/markdown` 且站点 Markdown 原样返回、`raw` 与 `accept_markdown: false` 不声明 Markdown、HTML 默认转 Markdown（正文在 32 KiB 之后仍保留、去导航/脚本/图片）、`raw` 返回原始 HTML、Markdown 按 UTF-8 边界截断、转换不发任何网络请求 |
 | `operations.test.ts` | Retention、备份轮换、Scheduler 关闭 |
 | `admin.test.ts` | Admin 首次设置、登录、登录锁定（不受 `X-Forwarded-For` 与用户名轮换影响、并发失败计数、过期后重新计数）、请求体按字节流式限长、HTTPS 下 Cookie 带 `Secure`、Session、只读审计 API（含 Conversation Context 列表/详情与写入尝试被拒）、静态托管 |
+| `admin-passkeys.test.ts` | 显式 public origin 开关、真实 P-256/CBOR WebAuthn 注册/登录、Origin/RP/UV/用户句柄与挑战绑定、过期/复用/伪造拒绝、多 key 与密码守卫、异步撤权与计数器竞态、恢复清理、旧 RP 安全、迁移保留用户/Session/外键 |
+| `admin-recovery.test.ts` | 内置 `admin-reset` 参数边界、非 TTY 拒绝、stdin 字节/超时/不泄露、运行中锁拒绝、未知用户不改写、无密码账号恢复/清 key/撤 Session、保留 API key、不重开 setup、锁释放；真实 CLI 子进程与临时数据库 |
 | `admin-providers.test.ts` | Provider/模型管理、SecretRef 只写不读、修订冲突、全局模型端点保留 Chat 覆盖、阻止删除 Chat 引用（含待重启移除的运行中 Chat）的 Provider/模型且不落盘 |
 | `admin-chats.test.ts` | Chat 管理鉴权与 Origin、字符串 ID 与安全整数边界、Topic/模型严格校验、模型覆盖必须显式带 thinking、revision 先于 body 解析与并发写入保护、JSONC 注释及未管理字段保留、新增 Chat 热应用而删除/Topic 待重启与历史保留、模型热应用/恢复继承、迁移 ID、保存后应用失败的状态与脱敏审计 |
 | `model-switch.test.ts` | 可切换模型仅列 text 能力、当前模型取配置值、`option()` 只校验不应用（未知 provider/model 与 image-only 拒绝）、`current()` 跟随 `store.publish` 变化 |
@@ -197,6 +199,19 @@ pnpm run admin:build        # 前置：E2E 驱动已构建的 dist（真实静�
 pnpm --filter plasticwan-admin-next exec playwright install chromium   # 首次运行前安装 Chromium（Linux CI 用 --with-deps）
 pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.ts）
 ```
+
+Passkey 启用模式（PowerShell）：
+
+```powershell
+$env:E2E_PASSKEYS='1'; pnpm run admin:test:e2e 00-auth 01-routes 16-passkeys
+Remove-Item Env:E2E_PASSKEYS
+```
+
+默认不设置 `E2E_PASSKEYS`，验证未配 `admin.public_url` 时无登录/设置入口且 API 返回 404。
+设置 `E2E_PASSKEYS=1` 后，夹具在 `localhost` 随机端口配置 `public_url`，通过 Chromium CDP
+虚拟认证器执行真实 WebAuthn 注册与登录；覆盖多个凭据、旧 RP 不可用保护、删密码后的
+会话轮换、无用户名登录、最后可用凭据保护、恢复密码和取消提示。旧 RP 场景仅由测试钩子
+改变临时库的 RP 标记，不 mock WebAuthn 验签；此套件不代表真实手机或平台认证器兼容性验收。
 
 - **真实后端夹具**：`globalSetup` 派生一个 Node 子进程运行 `apps/admin-next/e2e/server.ts`，
   它创建临时目录 + 临时 SQLite，加载 `test/fixtures/admin-seed.ts`（基础行 +

@@ -25,7 +25,7 @@ Plastic Wan 是一个运行在 Telegram 私聊、群组、Supergroup 与 Forum T
 plasticwan/
 ├── src/                    # Node.js/TypeScript 运行时代码；依赖自上而下
 │   ├── application.ts      # 组合根：进程装配、启动与优雅关闭
-│   ├── cli.ts              # serve/check-config/doctor/backup/configure 入口
+│   ├── cli.ts              # serve/check-config/doctor/backup/configure/admin-reset 入口
 │   ├── doctor.ts           # 真实依赖与外部连接诊断
 │   ├── startup-catch-up.ts # 启动补偿拉取与排队
 │   ├── tui/                # 交互式配置向导

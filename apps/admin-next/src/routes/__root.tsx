@@ -15,6 +15,8 @@ const UNAUTHENTICATED_SESSION: SessionState = {
   authenticated: false,
   username: null,
   expires_at: null,
+  passkeys_enabled: false,
+  has_password: null,
 };
 
 interface RouterContext {
@@ -56,7 +58,9 @@ function AuthGate(): React.ReactNode {
     return <SetupForm />;
   }
   if (!data.authenticated) {
-    return <LoginForm />;
+    // The session is the single source for whether passkeys are configured:
+    // a server built without `admin.public_url` never shows the passkey entry.
+    return <LoginForm passkeysEnabled={data.passkeys_enabled} />;
   }
 
   return (

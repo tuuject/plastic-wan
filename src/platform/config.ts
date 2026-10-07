@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { type JSONPath, type ParseError, parse as parseJsonc, printParseErrorCode } from 'jsonc-parser';
 import Type, { type Static } from 'typebox';
@@ -237,6 +238,7 @@ const AdminSchema = Type.Object(
     port: Type.Integer({ minimum: 1, maximum: 65_535 }),
     session_ttl_hours: Type.Integer({ minimum: 1, maximum: 720 }),
     static_dir: Type.Optional(Type.String({ minLength: 1 })),
+    public_url: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
   },
   Strict,
 );
@@ -650,7 +652,38 @@ export async function assertConfigPermissions(configPath: string): Promise<void>
   }
 }
 
+export function adminPublicOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('admin.public_url must be an HTTPS origin (HTTP localhost is allowed for local use)');
+  }
+  if (isIP(url.hostname) !== 0 || url.hostname.startsWith('[')) {
+    throw new Error('admin.public_url must use a domain name, not an IP address (use localhost for local testing)');
+  }
+  const local = url.hostname === 'localhost';
+  if (
+    value !== value.trim() ||
+    (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.pathname !== '/' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    ![url.origin, `${url.origin}/`].includes(value)
+  ) {
+    throw new Error(
+      'admin.public_url must be a canonical HTTPS origin without credentials, path, query or fragment (HTTP localhost is allowed for local use)',
+    );
+  }
+  return url.origin;
+}
+
 export function validateSemantics(config: FileConfig): void {
+  if (config.admin?.public_url !== undefined) {
+    adminPublicOrigin(config.admin.public_url);
+  }
   validateTimezone(config.timezone, 'timezone');
   validateParticipation(config.telegram.participation, 'telegram.participation');
   validateContextConfig(config);

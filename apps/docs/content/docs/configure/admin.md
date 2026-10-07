@@ -17,12 +17,15 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
     "enabled": true,
     "host": "0.0.0.0",
     "port": 8787,
-    "session_ttl_hours": 24
+    "session_ttl_hours": 24,
+    "public_url": "https://panel.example.com"
   }
 }
 ```
 
 `admin.*` 改动需要重启。Docker 中要从宿主机访问，容器应绑定 `0.0.0.0`，但端口发布必须限制为 `127.0.0.1:8787:8787`，再由你管理的 TLS 反向代理进行认证和访问控制。首次访问时创建管理员账号；密码长度为 12–200 字符，浏览器 Session 采用 HttpOnly 且 SameSite=Strict Cookie。
+
+`admin.public_url` 可选，**显式配置后才会启用 Passkey 登录**（登录页出现「使用 Passkey 登录」，Settings 页出现 Passkeys 卡片）。它必须是规范 HTTPS origin：不带用户名/密码、路径、查询参数或片段，可以带一个尾部 `/`；本地开发可以用 `http://localhost`；IP 地址（包括 `127.0.0.1` 和 IPv6）不能作为 WebAuthn RP，因此不接受 IP 形式的 `public_url`，即使使用 HTTPS 也不行。启用后请始终从配置的来源访问：包括首次设置、密码登录在内的全部写操作都会校验该来源，直接访问另一个回环地址或端口会返回 `bad_origin`。Passkey 的域名绑定详见下文。
 
 ## 常用任务
 
@@ -49,6 +52,44 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
 ## 界面语言
 
 界面支持英文与简体中文。顶栏右侧的语言切换按钮在两种语言间切换，立即生效并写入浏览器 `localStorage`（`admin-language`）；未手动选择时跟随浏览器语言（`zh` 开头解析为中文，否则英文）。技术名词（Invocation、Context、Prompt、Token 等）在中文界面中保留英文原文；后端返回的错误消息始终按服务端原文显示（错误码 + 消息）。
+
+## Passkey 登录与恢复
+
+配置 `admin.public_url` 并重启后，Passkey 可用：登录页出现「使用 Passkey 登录」按钮，Settings 页出现 Passkeys 卡片。Passkey 绑定的是 `public_url` 的域名（WebAuthn RP = 主机名），只在访问这个来源时有效。注册与使用需要支持 WebAuthn 的浏览器，并且页面处于安全上下文（HTTPS 域名，或 `localhost` 的 HTTP）。安全上下文只是前提，不能让 IP 地址成为有效的 WebAuthn RP。
+
+### 添加与使用
+
+1. 打开 **Settings**，在 Passkeys 卡片点 **添加 Passkey**。
+2. 输入名称（1–80 字符），用设备的屏幕锁、指纹或其他验证方式确认。
+3. 之后在登录页点 **使用 Passkey 登录**，由设备选择并确认凭据即可——使用的是可发现（discoverable）凭据，无需再输入用户名。
+
+可以注册多个 Passkey（例如办公电脑与手机各一个）。凭据绑定主机名：更换域名后旧凭据仍在列表中，但会标为无法在此登录，也不能用于满足删除密码前的保护条件；只改变同一主机名的端口并同步配置，凭据不必重建，但必须从新的精确 origin 访问。删除 `admin.public_url` 会关闭 Passkey 功能，不会删除凭据。
+
+### 删除与仅 Passkey 模式
+
+- **删除单个 Passkey**：行内点 **删除**，需要确认；立即失效且不可恢复，之后可以随时重新注册。
+- **删除最后一个可用 Passkey 前必须先设置密码**：账号没有密码时，最后一个 Passkey 的删除按钮会被禁用，界面会提示先在上方「管理员凭据」卡片设置密码，避免把自己锁在门外。
+- **删除密码**（转为仅 Passkey 登录）：前提是当前网站已注册至少一个 Passkey。删除后撤销全部旧会话，并为当前浏览器签发新会话（仍受会话过期时间限制）；下次登录只能通过 Passkey。想恢复密码，在「管理员凭据」卡片重新设置即可。
+
+### 恢复（忘记密码或遗失 Passkey）
+
+Passkey 遗失，或因更换域名、关闭 Passkey 功能而无法登录时，使用**服务端内置 CLI** 本地重置——不是 `plasticwan-utils`（它只通过 Admin API 做只读检查与 Invocation 重放，不能恢复凭据）：
+
+1. **先停止 Bot**。重置命令通过 `ServeLock` 拒绝在运行中的实例上执行，不会强抢；同一 `data_dir` 的 Bot 停止后才能运行。
+2. 交互式重置（终端会隐藏输入新密码并要求重复确认）：
+
+   ```bash
+   node src/cli.ts admin-reset --config /path/to/config.jsonc --username <name>
+   ```
+
+3. 非交互环境用 `--password-stdin`，把密码从安全来源（密码管理器或受限权限文件）经管道传入：**不要把密码写在命令行参数里**，它会留在 shell 历史与进程列表中。
+
+   ```powershell
+   # 示例：从受限权限文件读取；实际请使用你的密码管理器输出
+   Get-Content .\admin-password.txt | node src/cli.ts admin-reset --config .\config.jsonc --username <name> --password-stdin
+   ```
+
+重置会替换该账号的密码、删除其**全部** Passkey 与登录 Session；API 密钥不受影响，首次设置流程不会重新打开。恢复或设置好密码后，再删除或更换 `public_url`/域名——改动之前请先确认至少保留一个可用登录方式。
 
 ## 开发者调试报文
 

@@ -2,14 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
-import { KvList, MonoValue, ToneBadge } from '@/components/business';
+import { KvList, MonoValue, PasskeysCard, ToneBadge } from '@/components/business';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ApiError, applyConfigFile, type ConfigApplyResponse, type Credentials, updateCredentials } from '@/lib/api';
 import { errorMessage } from '@/lib/errors';
-import { configStatusQuery, sessionQuery } from '@/lib/queries';
+import { configStatusQuery, passkeysQuery, sessionQuery } from '@/lib/queries';
 import { useProviderWrite } from '@/lib/use-provider-write';
 
 function shortHash(hash: string): string {
@@ -62,13 +62,21 @@ export default function SettingsPage(): React.ReactElement {
   const [applyFailure, setApplyFailure] = useState<string | null>(null);
 
   const status = useQuery(configStatusQuery);
+  // The AuthGate already holds the session; reading it here just joins the
+  // cache entry and gates the passkey card on the configured `admin.public_url`.
+  const session = useQuery(sessionQuery);
 
   const mutation = useMutation({
     mutationFn: updateCredentials,
     onSuccess: async () => {
       setSuccess(true);
       setFailure(null);
-      await queryClient.invalidateQueries({ queryKey: sessionQuery.queryKey });
+      // A password (re)set changes `has_password` in the session and the
+      // passkey list; refresh both so the last-passkey guard stays correct.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: sessionQuery.queryKey }),
+        queryClient.invalidateQueries({ queryKey: passkeysQuery.queryKey }),
+      ]);
     },
     onError: (error) => {
       setSuccess(false);
@@ -152,6 +160,8 @@ export default function SettingsPage(): React.ReactElement {
           </form>
         </CardContent>
       </Card>
+
+      {session.data?.passkeys_enabled === true ? <PasskeysCard /> : null}
 
       <Card>
         <CardHeader>

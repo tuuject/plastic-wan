@@ -73,6 +73,7 @@ import {
   updateMemory,
 } from './memory-admin.ts';
 import { cancelOngoingSessions } from './operations.ts';
+import { AdminPasskeys } from './passkeys.ts';
 import {
   cancelPromptRunningInvocations,
   type PromptSaveResult,
@@ -216,6 +217,7 @@ export class AdminServer {
   readonly #configStore: RuntimeConfigurationStore;
   readonly #admin: AdminConfig;
   readonly #auth: AdminAuth;
+  readonly #passkeys: AdminPasskeys | undefined;
   readonly #scheduler: BucketScheduler | undefined;
   readonly #tasks: LongTaskService;
   readonly #image: ReturnType<typeof createImageAdminHandler> | undefined;
@@ -245,6 +247,8 @@ export class AdminServer {
     this.#configStore = options.configStore;
     this.#admin = admin;
     this.#auth = new AdminAuth(options.store.orm, admin.session_ttl_hours);
+    this.#passkeys =
+      admin.public_url === undefined ? undefined : new AdminPasskeys(options.store.orm, this.#auth, admin.public_url);
     this.#scheduler = options.scheduler;
     this.#tasks = options.tasks ?? new LongTaskService(options.store.orm, () => this.#scheduler?.wake());
     this.#image =
@@ -327,6 +331,58 @@ export class AdminServer {
     await closeServer(server);
   }
 
+  async #passkeyRequest(
+    request: Request,
+    url: URL,
+    segments: readonly string[],
+    clientAddress: string,
+  ): Promise<Response> {
+    const passkeys = this.#passkeys;
+    if (passkeys === undefined) {
+      return json({ error: 'passkeys_disabled', message: 'Configure admin.public_url to enable passkeys' }, 404);
+    }
+    const route = segments.join('/');
+    const sessionToken = readCookie(request, SESSION_COOKIE);
+    const challengeCookie = 'plasticwan_passkey';
+    const challengeToken = readCookie(request, challengeCookie);
+    if (request.method !== 'GET') {
+      passkeys.checkOrigin(request.headers.get('origin'));
+      passkeys.throttle(clientAddress);
+    }
+    const optionsResponse = (result: { options: unknown; token: string }): Response =>
+      json(result.options, 200, `${challengeCookie}=${result.token}; ${cookieAttributes(request, url)}; Max-Age=300`);
+    if (route === 'auth/passkeys/login/options' && request.method === 'POST') {
+      return optionsResponse(await passkeys.loginOptions(challengeToken));
+    }
+    if (route === 'auth/passkeys/login/verify' && request.method === 'POST') {
+      const token = await passkeys.login(await readJsonObject(request, 65_536), challengeToken);
+      return json({ status: 'ok' }, 200, this.#sessionCookie(request, url, token));
+    }
+    const session = this.#auth.authenticate(sessionToken);
+    if (session === null) {
+      return json({ error: 'unauthenticated', message: 'Admin session is required' }, 401);
+    }
+    if (route === 'auth/passkeys' && request.method === 'GET') {
+      return json(passkeys.list(session.userId));
+    }
+    if (route === 'auth/passkeys/register/options' && request.method === 'POST') {
+      return optionsResponse(await passkeys.registrationOptions(sessionToken, challengeToken));
+    }
+    if (route === 'auth/passkeys/register/verify' && request.method === 'POST') {
+      await passkeys.register(await readJsonObject(request, 65_536), challengeToken, sessionToken);
+      return json({ status: 'ok' });
+    }
+    if (segments[1] === 'passkeys' && segments.length === 3 && request.method === 'DELETE') {
+      passkeys.remove(session.userId, parseId(segments[2] ?? '', 'id'));
+      return json({ status: 'ok' });
+    }
+    if (route === 'auth/password' && request.method === 'DELETE') {
+      const token = this.#auth.removePassword(session.userId, passkeys.rpId);
+      return json({ status: 'ok' }, 200, this.#sessionCookie(request, url, token));
+    }
+    return json({ error: 'method_not_allowed', message: 'Unsupported passkey operation' }, 405);
+  }
+
   /** `clientAddress` is the transport peer; tests calling this directly share one. */
   async handle(request: Request, clientAddress = 'local'): Promise<Response> {
     const url = new URL(request.url);
@@ -368,8 +424,17 @@ export class AdminServer {
         if (originHost === null) {
           return json({ error: 'bad_origin', message: 'Origin header is malformed' }, 400);
         }
-        if (originHost !== url.host) {
-          return json({ error: 'bad_origin', message: 'Cross-origin admin requests are rejected' }, 403);
+        if (this.#passkeys === undefined ? originHost !== url.host : origin !== this.#passkeys.origin) {
+          return json(
+            {
+              error: 'bad_origin',
+              message:
+                this.#passkeys === undefined
+                  ? 'Cross-origin admin requests are rejected'
+                  : 'Open the exact origin configured in admin.public_url to use this panel',
+            },
+            403,
+          );
         }
       }
     }
@@ -387,7 +452,12 @@ export class AdminServer {
         authenticated: session !== null,
         username: session?.username ?? null,
         expires_at: session?.expiresAt ?? null,
+        passkeys_enabled: this.#passkeys !== undefined,
+        has_password: session === null ? null : this.#auth.hasPassword(session.userId),
       });
+    }
+    if (segments[0] === 'auth' && (segments[1] === 'passkeys' || segments[1] === 'password')) {
+      return await this.#passkeyRequest(request, url, segments, clientAddress);
     }
     if (route === 'auth/setup' && request.method === 'POST') {
       const token = await this.#auth.createFirstUser(await readCredentials(request));

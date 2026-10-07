@@ -9,6 +9,11 @@
  * - `/__e2e/**`  test-only hooks (state manipulation + shutdown);
  * - everything else is handed to `AdminServer.handle` (real API + static SPA).
  *
+ * Passkeys mode (`E2E_PASSKEYS=1`) binds `localhost` instead of `127.0.0.1`
+ * and sets `admin.public_url` to the live random origin before `AdminServer`
+ * is constructed: Chromium rejects an IP literal as a WebAuthn RP ID
+ * (`SecurityError: This is an invalid domain.`), so the RP must be a domain.
+ *
  * Graceful shutdown: POST /__e2e/shutdown, or SIGTERM/SIGINT. The temp
  * directory and its SQLite file are removed on shutdown. Nothing here reads
  * dev-data/, starts `serve`, or touches any user process.
@@ -29,7 +34,7 @@ import { RuntimeConfigurationStore } from '../../../src/platform/runtime-config.
 import { SecretStore } from '../../../src/platform/secrets.ts';
 import { asRunResult, SqliteStore } from '../../../src/store/database.ts';
 import { recordPromptVersionsFromConfig } from '../../../src/store/prompt-versions.ts';
-import { adminSessions, longTasks, taskReceipts } from '../../../src/store/schema.ts';
+import { adminPasskeys, adminSessions, longTasks, taskReceipts } from '../../../src/store/schema.ts';
 import { enterSleep, wakeFromSleep } from '../../../src/store/sleep.ts';
 import { seedAdminBulkRows, seedAdminFixture } from '../../../test/fixtures/admin-seed.ts';
 import {
@@ -61,6 +66,7 @@ process.env.PLASTICWAN_SUPERVISED = '1';
 let store: SqliteStore | null = null;
 let server: ServerType | null = null;
 let upstream: ServerType | null = null;
+let admin: AdminServer | null = null;
 let directory = '';
 let shuttingDown = false;
 let failNextConfigApply = false;
@@ -123,6 +129,21 @@ async function handleHook(request: Request, url: URL): Promise<Response> {
   if (request.method === 'POST' && route === '/revoke-sessions') {
     const result = store === null ? null : asRunResult(store.orm.delete(adminSessions).run());
     return json({ deleted: Number(result?.changes ?? 0) });
+  }
+  if (request.method === 'POST' && route === '/passkeys-rp-fixture') {
+    const active = url.searchParams.get('active');
+    if (active !== 'none' && active !== 'latest') {
+      return json({ error: 'invalid_active' }, 400);
+    }
+    if (store === null) {
+      return json({ error: 'store_closed' }, 500);
+    }
+    const latest = store.orm.select().from(adminPasskeys).orderBy(adminPasskeys.id).all().at(-1);
+    store.orm.update(adminPasskeys).set({ rpId: 'old.example.test' }).run();
+    if (active === 'latest' && latest !== undefined) {
+      store.orm.update(adminPasskeys).set({ rpId: 'localhost' }).where(eq(adminPasskeys.id, latest.id)).run();
+    }
+    return json({ ok: true });
   }
   if (request.method === 'POST' && route === '/enter-sleep') {
     if (store === null) {
@@ -316,6 +337,45 @@ async function main(): Promise<void> {
 
   const secrets = new SecretStore(keyJarPath(configPath));
   const registry = await buildModelRegistry(loaded.config, null, secrets);
+
+  // Bind the loopback listener FIRST so the random port is known before the
+  // passkeys origin is derived from it; `AdminServer` reads `admin.public_url`
+  // at construction, so the in-memory config is patched before it is created.
+  // WebAuthn RP IDs must be domains, hence `localhost` in passkeys mode.
+  const passkeysMode = process.env.E2E_PASSKEYS === '1';
+  const hostname = passkeysMode ? 'localhost' : '127.0.0.1';
+  const started = serve({
+    hostname,
+    port: 0,
+    fetch: async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname.startsWith('/__e2e/')) {
+        return await handleHook(request, url);
+      }
+      if (admin === null) {
+        return json({ error: 'admin_not_ready', message: 'E2E server is still starting' }, 503);
+      }
+      return await admin.handle(request);
+    },
+  });
+  server = started;
+  // @hono/node-server binds asynchronously; Bun.serve was listening on return.
+  await new Promise<void>((resolve, reject) => {
+    started.once('listening', resolve);
+    started.once('error', reject);
+  });
+  const address = started.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('E2E server did not bind a port');
+  }
+  const port = address.port;
+  if (passkeysMode) {
+    // Written after loadConfig because only the live port yields a valid
+    // canonical origin. It is never written to the fixture file.
+    adminConfig.public_url = `http://localhost:${port}`;
+    console.log(`E2E_PASSKEYS origin=${adminConfig.public_url} rp_id=localhost`);
+  }
+
   const configStore = new RuntimeConfigurationStore({ config: loaded.config, hash: loaded.hash, ...registry });
   const modelSwitcher = new AgentModelSwitcher(configStore);
   const configReloader = new ConfigReloader({
@@ -333,7 +393,7 @@ async function main(): Promise<void> {
     },
     onPublished: () => undefined,
   });
-  const admin = new AdminServer({
+  admin = new AdminServer({
     store,
     configStore,
     modelSwitcher,
@@ -347,29 +407,7 @@ async function main(): Promise<void> {
     },
   });
 
-  const started = serve({
-    hostname: '127.0.0.1',
-    port: 0,
-    fetch: async (request) => {
-      const url = new URL(request.url);
-      if (url.pathname.startsWith('/__e2e/')) {
-        return await handleHook(request, url);
-      }
-      return await admin.handle(request);
-    },
-  });
-  server = started;
-  // @hono/node-server binds asynchronously; Bun.serve was listening on return.
-  await new Promise<void>((resolve, reject) => {
-    started.once('listening', resolve);
-    started.once('error', reject);
-  });
-  const address = started.address();
-  if (address === null || typeof address === 'string') {
-    throw new Error('E2E server did not bind a port');
-  }
-  const port = address.port;
-  console.log(`E2E_READY base=http://127.0.0.1:${port}`);
+  console.log(`E2E_READY base=http://${hostname}:${port}`);
   // Exposed to the specs so they can log in again after revoking sessions.
   console.log(`E2E_CREDENTIALS ${ADMIN_USERNAME} ${ADMIN_PASSWORD}`);
 }

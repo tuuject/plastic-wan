@@ -23,6 +23,7 @@ import {
   listMemories,
   listMemoryChats,
   listMessages,
+  listPasskeys,
   listStickerSets,
   listStickers,
   type Page,
@@ -102,6 +103,12 @@ export const memoryChatsQuery = queryOptions({
 export const apiKeysQuery = queryOptions({
   queryKey: ['api-keys'],
   queryFn: listApiKeys,
+  staleTime: 0,
+});
+
+export const passkeysQuery = queryOptions({
+  queryKey: ['passkeys'],
+  queryFn: listPasskeys,
   staleTime: 0,
 });
 

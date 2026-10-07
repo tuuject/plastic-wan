@@ -52,7 +52,7 @@ test('migration 030 drops only legacy replay payloads; retention cascades public
     store = undefined;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       store = await SqliteStore.open(config);
-      expect(store.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual({ version: 31n });
+      expect(store.db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual({ version: 32n });
       expect(store.db.prepare('PRAGMA table_info(model_calls)').all()).not.toEqual(
         expect.arrayContaining([expect.objectContaining({ name: 'replay_input_json' })]),
       );
