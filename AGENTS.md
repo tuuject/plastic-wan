@@ -88,7 +88,7 @@ Invocation 是运行窗口而不是一次问答：`agent.context.idle_grace_seco
 | Admin Panel 认证、审计 API 与前端 | [agent-doc/admin-panel.md](agent-doc/admin-panel.md) |
 | 测试命令与真实验收矩阵 | [agent-doc/verification.md](agent-doc/verification.md) |
 | 用户文档、首页、生成参考与静态站维护 | [apps/docs/README.md](apps/docs/README.md) |
-| 审计某次 Invocation、排查 bot 为什么不回复 | [.agents/skills/plastic-wan-audit/SKILL.md](.agents/skills/plastic-wan-audit/SKILL.md)、[scripts/audit.ts](scripts/audit.ts) |
+| 审计某次 Invocation、排查 bot 为什么不回复 | [scripts/audit.ts](scripts/audit.ts) |
 
 历史资料的按需索引与读取边界见 [agent-doc/README.md](agent-doc/README.md#历史归档读取规则)。判断当前行为只看源码与上表主题文档，不以历史设计作为当前约束或待办。
 

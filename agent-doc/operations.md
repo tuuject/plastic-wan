@@ -134,7 +134,7 @@ npm install -g @tuuject/plasticwan-utils@canary    # main 每次 push 的 canary
 ```bash
 pnpm cli:build                         # 等价 pnpm --filter @tuuject/plasticwan-utils build，输出 packages/cli/dist
 pnpm cli:check                         # 对 packages/cli 做 TypeScript 检查（不产出 JS）
-pnpm --filter @tuuject/plasticwan-utils pack --pack-destination "$PWD/dist/npm"   # prepack 先构建，tarball 含 dist、skills 与 README
+pnpm --filter @tuuject/plasticwan-utils pack --pack-destination "$PWD/dist/npm"   # prepack 先构建，tarball 含 dist 与 README
 npm install -g ./dist/npm/tuuject-plasticwan-utils-0.1.0.tgz                      # 文件名以实际输出为准
 ```
 
@@ -161,7 +161,7 @@ printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay
 - 请求不跟随重定向、不自动重试；默认超时 login/doctor/list/get 30 秒、replay 300 秒；stdin 读取单独使用同一 `--timeout-ms` 上限，超时返回 `timeout`（退出码 1）且不发送 HTTP 请求；响应体超过 4 MiB 被拒绝。
 - `--json` 时 stdout 恰好一个 JSON 文档；失败时 stderr 为 `{"error","message"}`（经 key 脱敏）。退出码 `0` 成功、`1` 请求/服务端/replay 失败或保存的凭据文件无效（`invalid_credentials`）、`2` 参数、输入或凭据缺失/不合法。replay 即使返回的 `error` 非空也会把完整结构写在 stdout。
 - replay 的行为边界（合成工具、不写生产数据、按 Provider 计费）见 [admin-panel.md](admin-panel.md#invocation-重放)；选项全集与响应形状以 [packages/cli/README.md](../packages/cli/README.md) 与源码为准。
-- 包内 [`plasticwan-utils` Skill](../packages/cli/skills/plasticwan-utils/SKILL.md) 面向通过 CLI 访问 Admin API 的外部 Agent：每次任务先运行 `plasticwan-utils doctor --json`（恰好一次只读请求），只有退出码 `0` 且 `status` 为 `ok` 才读取对应指南并查询或重放；doctor 失败即停止并请操作员用 `login` 修复，不循环重试、不代为执行 `login` 或改动凭据、不直接读取聊天或存储中的 key，`--help` 只用于客户端缺失或命令不匹配时的诊断。`SKILL.md` 是轻量入口，审计与重放细节分列 `references/invocations.md`、`references/replay.md`，按当前任务加载子文档而不是一次全读。它不是 Bot 的 System Skill。全局安装 CLI 不会自动注册 Skill，须按 [CLI README](../packages/cli/README.md#安装配套-agent-skill) 将整个目录（含 `references/` 与 `agents/openai.yaml`）复制/导入宿主并在升级时同步更新。不把服务端源码或 SQLite 访问作为前提。
+- 源码仓库根目录的 [`plasticwan-utils` Skill](../.agents/skills/plasticwan-utils/SKILL.md) 面向通过 CLI 访问 Admin API 的外部 Agent：每次任务先运行 `plasticwan-utils doctor --json`（恰好一次只读请求），只有退出码 `0` 且 `status` 为 `ok` 才读取对应指南并查询或重放；doctor 失败即停止并请操作员用 `login` 修复，不循环重试、不代为执行 `login` 或改动凭据、不直接读取聊天或存储中的 key，`--help` 只用于客户端缺失或命令不匹配时的诊断。`SKILL.md` 是轻量入口，审计与重放细节分列 `references/invocations.md`、`references/replay.md`，按当前任务加载子文档而不是一次全读。它不是 Bot 的 System Skill。npm 包不内置该 Skill，须按 [CLI README](../packages/cli/README.md#配套-agent-skill) 从源码仓库将整个目录（含 `references/` 与 `agents/openai.yaml`）复制/导入宿主并随仓库同步更新。不把服务端源码或 SQLite 访问作为前提。
 
 ## 日志
 

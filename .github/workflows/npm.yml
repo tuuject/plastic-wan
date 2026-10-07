@@ -54,7 +54,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version --ignore-scripts --workspaces=false
 
-      - name: Pack CLI and companion Skill
+      - name: Pack CLI
         run: pnpm --filter @tuuject/plasticwan-utils pack --pack-destination "$RUNNER_TEMP/npm-release"
 
       - name: Inspect publish payload

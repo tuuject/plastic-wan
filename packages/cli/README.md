@@ -28,39 +28,19 @@ npm install -g ./dist/npm/tuuject-plasticwan-utils-0.1.0.tgz   # 文件名以实
 
 包以编译后的 ESM JavaScript 分发；不新增任何运行时依赖（只用标准库 `node:util` parseArgs 与全局 `fetch`）。源码内的相对导入带 `.ts` 后缀，由 `rewriteRelativeImportExtensions` 在编译产物中改写为 `.js`，因此 `node_modules` 内不会出现 Node type stripping 拒绝的 `.ts` 文件。
 
-## 安装配套 Agent Skill
+## 配套 Agent Skill
 
-包内的 [`skills/plasticwan-utils/SKILL.md`](skills/plasticwan-utils/SKILL.md) 给外部 Agent 使用：每次任务先运行 `plasticwan-utils doctor --json` 验证凭据与连通，再定位 Invocation、关联模型/工具/真实发送证据（只读核对可用 `config show`、`prompt get`、`invocation prompts` 与 `invocation preflight`），最后在明确授权后重放或分层比较 global/group prompt。它不是 Bot 的 `system:///` Skill，不需要服务器源码或数据库，也不增加 CLI 命令。
+源码仓库根目录的 [`agents/skills/plasticwan-utils/SKILL.md`](../../.agents/skills/plasticwan-utils/SKILL.md) 给外部 Agent 使用：每次任务先运行 `plasticwan-utils doctor --json` 验证凭据与连通，再定位 Invocation、关联模型/工具/真实发送证据（只读核对可用 `config show`、`prompt get`、`invocation prompts` 与 `invocation preflight`），最后在明确授权后重放或分层比较 global/group prompt。它不是 Bot 的 `system:///` Skill，不需要服务器源码或数据库，也不增加 CLI 命令。
 
 Skill 采用渐进披露：`SKILL.md` 是轻量入口，主题细节按当前任务加载子文档——审计流程在 `references/invocations.md`，重放的保真限制、授权要求与错误处理在 `references/replay.md`——不要一次加载全部内容。入口要求只有 `doctor` 以退出码 `0` 返回 `status: "ok"` 时才继续；失败即停止并请操作员用 `login` 修复（Agent 不代为执行、不重试、不读取或索取密钥），`--help` 只用于诊断 CLI 缺失或命令不匹配。
 
-安装 CLI **不会自动注册 Skill**。以 [Codex 的项目级 Skill 目录](https://developers.openai.com/codex/build-skills) 为例，在希望使用 Skill 的项目根目录执行以下一种复制方式；如果目标已存在，先比较版本，不直接覆盖。
-
-PowerShell：
-
-```powershell
-$source = Join-Path (npm root -g) '@tuuject/plasticwan-utils/skills/plasticwan-utils'
-$target = '.agents/skills/plasticwan-utils'
-if (Test-Path $target) { throw 'Skill already exists; review it before updating.' }
-New-Item -ItemType Directory -Path '.agents/skills' -Force | Out-Null
-Copy-Item -LiteralPath $source -Destination $target -Recurse
-```
-
-Bash / Zsh：
-
-```bash
-test ! -e .agents/skills/plasticwan-utils &&
-  mkdir -p .agents/skills &&
-  cp -R "$(npm root -g)/@tuuject/plasticwan-utils/skills/plasticwan-utils" .agents/skills/
-```
-
-未全局安装时，从源码的 `packages/cli/skills/plasticwan-utils/` 或解压后的 `package/skills/plasticwan-utils/` 复制整个目录（含 `references/invocations.md`、`references/replay.md` 与 `agents/openai.yaml`）。最终布局应为 `.agents/skills/plasticwan-utils/SKILL.md`，不要多嵌套一层目录。其他 Agent 按其自身 Skill 导入机制注册，不假定兼容 Codex 的目录。
+npm 包 **不再内置这个 Skill**；它随源码仓库根目录的 `.agents/skills/plasticwan-utils/` 分发。要给外部 Agent 使用，从源码仓库把整个目录复制到目标项目的根目录（以 [Codex 的项目级 Skill 目录](https://developers.openai.com/codex/build-skills) 为例）；如果目标已存在，先比较版本，不直接覆盖。未克隆仓库时，可从 GitHub 下载该目录（`SKILL.md`、`references/invocations.md`、`references/replay.md` 与 `agents/openai.yaml` 都要保留）。最终布局应为 `.agents/skills/plasticwan-utils/SKILL.md`，不要多嵌套一层目录。其他 Agent 按其自身 Skill 导入机制注册，不假定兼容 Codex 的目录。
 
 重新打开 Agent 会话，确认发现 `plasticwan-utils` 后可请求：
 
 > 使用 $plasticwan-utils 审计 Invocation 12345，说明为什么没有回复；先只查询，不执行重放。
 
-由操作员准备凭据：向 Agent 的命令执行环境安全注入 `PLASTICWAN_ENDPOINT` 与 `PLASTICWAN_API_KEY`，或由操作员在本机运行 `plasticwan-utils login` 保存到凭据文件。Agent 只运行 `doctor` 与查询命令，不自己读取、打印或修改凭据，也不要把 key 放入 Skill 或聊天。Skill 副本不会随全局 CLI 升级自动更新；更新 CLI（例如 `npm install -g @tuuject/plasticwan-utils@latest`）时同步检查 Skill 版本。是否允许注册、执行命令及访问网络，仍取决于宿主权限。
+由操作员准备凭据：向 Agent 的命令执行环境安全注入 `PLASTICWAN_ENDPOINT` 与 `PLASTICWAN_API_KEY`，或由操作员在本机运行 `plasticwan-utils login` 保存到凭据文件。Agent 只运行 `doctor` 与查询命令，不自己读取、打印或修改凭据，也不要把 key 放入 Skill 或聊天。Skill 副本不随 CLI 升级自动更新；同步仓库更新时一并检查 Skill 版本。是否允许注册、执行命令及访问网络，仍取决于宿主权限。
 
 ## 用法
 

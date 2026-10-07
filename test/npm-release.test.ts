@@ -85,7 +85,7 @@ describe('npm release selection', () => {
     }
   });
 
-  it('publishes only the standalone CLI package and includes its companion Skill', () => {
+  it('publishes only the standalone CLI package without bundling a Skill', () => {
     const manifest = JSON.parse(readFileSync(packagePath, 'utf8'));
     expect(manifest.name).toBe('@tuuject/plasticwan-utils');
     expect(manifest.private).not.toBe(true);
@@ -96,8 +96,9 @@ describe('npm release selection', () => {
       directory: 'packages/cli',
     });
     expect(manifest.bin).toEqual({ 'plasticwan-utils': './dist/bin.js' });
-    expect(manifest.files).toEqual(['dist', 'skills', 'README.md']);
+    expect(manifest.files).toEqual(['dist', 'README.md']);
     expect(manifest.dependencies).toBeUndefined();
+    expect(existsSync(new URL('../packages/cli/skills/', import.meta.url))).toBe(false);
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     const image = JSON.parse(readFileSync(new URL('../packages/image-service/package.json', import.meta.url), 'utf8'));
     expect(root.private).toBe(true);
@@ -105,8 +106,8 @@ describe('npm release selection', () => {
     expect(image.private).toBe(true);
   });
 
-  it('keeps the companion Skill entry small and links to separate Invocation guides', () => {
-    const skill = new URL('../packages/cli/skills/plasticwan-utils/', import.meta.url);
+  it('keeps the project-root Skill entry small and links to separate Invocation guides', () => {
+    const skill = new URL('../.agents/skills/plasticwan-utils/', import.meta.url);
     const entry = readFileSync(new URL('SKILL.md', skill), 'utf8');
     expect(entry).toContain('name: plasticwan-utils');
     expect(entry).toContain('(references/invocations.md)');
@@ -128,6 +129,5 @@ describe('npm release selection', () => {
     expect(replay).toContain('fidelity.omitted_images');
     const metadata = readFileSync(new URL('agents/openai.yaml', skill), 'utf8');
     expect(metadata).toContain('$plasticwan-utils');
-    expect(existsSync(new URL('../packages/cli/skills/plasticwan-debug/', import.meta.url))).toBe(false);
   });
 });
