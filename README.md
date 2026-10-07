@@ -3,7 +3,7 @@
 
   <h1>塑料碗（Plastic Wan）</h1>
 
-  <p><strong>收到消息以后，由模型决定接话还是保持安静。</strong></p>
+  <p>让你的赛博 OC 出门玩</p>
   <p>可以自行部署、使用自己的 API Key 的 Telegram Agent Bot。<br />为私聊、群组与 Forum Topic 配置人格、记忆和参与边界。</p>
 
   <p>
@@ -28,7 +28,7 @@
 
 ## 塑料碗是什么？
 
-塑料碗是一个运行在 Telegram 日常对话里的 Agent Bot，可以根据对话内容决定什么时候参与，不必逐条回答消息。
+塑料碗是一个运行在 Telegram 日常对话里的 Agent Bot，可以根据对话内容自主决定是否参与互动。
 
 它会把配置允许的会话中短时间内收到的消息放在一起，再由模型结合连续上下文决定是否参与。人格和表达方式通过 Prompt 配置；模型要把内容发到 Telegram 时，必须调用 `send` 工具，普通模型文本不会自动发布。
 
@@ -229,9 +229,3 @@ agent-doc/              架构、配置、运维与维护者文档
 scripts/                维护及验证脚本
 test/                   行为测试
 ```
-
----
-
-<div align="center">
-  <sub>Plastic Wan 是可自行部署的 Telegram Agent Bot</sub>
-</div>
