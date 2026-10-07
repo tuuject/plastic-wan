@@ -29,6 +29,7 @@
 | 实现/排查 Alarm 与 Deferred Invocation | [telegram-agent-flow.md](telegram-agent-flow.md#alarm--deferred-invocation) |
 | 本地启动、安装媒体依赖、部署或排障 | [operations.md](operations.md) |
 | 修改 Admin Panel 认证、审计 API 或前端 | [admin-panel.md](admin-panel.md) |
+| 修改 `plasticwan-utils` 模型列表、临时模型重放或配套 Skill | [admin-panel.md](admin-panel.md)、[CLI 使用说明](../packages/cli/README.md)、[客户端 Skill](../.agents/skills/plasticwan-utils/SKILL.md) |
 | 决定该运行哪些验证 | [verification.md](verification.md) |
 | 维护公开用户文档、首页、生成参考与静态构建 | [文档站维护](../apps/docs/README.md) |
 

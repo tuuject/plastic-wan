@@ -1,6 +1,6 @@
 # @tuuject/plasticwan-utils
 
-Plastic Wan Admin API 工具客户端，包内命令为 `plasticwan-utils`。它是 monorepo 工作区包（仓库根与其它 workspace 仍为 private），已配置为可公开发布到 npm；除 Invocation 的 `list`/`get`/`prompts`/`preflight`/`media`/`replay` 六个子命令外，还提供 `config show`、`prompt get global|group`、`login`（把 endpoint 与 API key 成对保存到本机）与 `doctor`（一次只读请求验证连通与鉴权）。群聊管理等其它能力尚未实现，也不包含 SDK 或 Eval 能力；`login` 只保存本机凭据，不能创建、查看或撤销服务端密钥（密钥管理仍只在 Admin Panel 进行）。API key 的权限面是 Invocation 读/重放加只读 inspection：配置与 prompt 视图、场景所用的当前 prompt 与重放预检、Invocation 媒体导出；其余接口（含面板写端点与密钥管理）仍返回 403。
+Plastic Wan Admin API 工具客户端，包内命令为 `plasticwan-utils`。它是 monorepo 工作区包（仓库根与其它 workspace 仍为 private），已配置为可公开发布到 npm；除 Invocation 的 `list`/`get`/`prompts`/`preflight`/`media`/`replay` 六个子命令外，还提供 `models list`（只读列出当前 active 配置中可接受文本输入的已配置模型）、`config show`、`prompt get global|group`、`login`（把 endpoint 与 API key 成对保存到本机）与 `doctor`（一次只读请求验证连通与鉴权）；`invocation preflight`/`replay` 支持临时模型/thinking 覆盖（`--provider`/`--model`/`--thinking-level`）。群聊管理等其它能力尚未实现，也不包含 SDK 或 Eval 能力；`login` 只保存本机凭据，不能创建、查看或撤销服务端密钥（密钥管理仍只在 Admin Panel 进行）。API key 的权限面是 Invocation 读/重放加只读 inspection：配置与 prompt 视图、可用模型列表、场景所用的当前 prompt 与重放预检、Invocation 媒体导出；其余接口（含面板写端点与密钥管理）仍返回 403。
 
 它与服务端入口 `plasticwan`（`node src/cli.ts`）不是同一个程序：本客户端只通过 Admin API 做只读检查、查询、媒体导出与重放，不包含 `serve`、`check-config`、`backup`、`configure` 等服务命令；客户端自己的 `doctor` 也不执行服务端 Doctor 的 SQLite、媒体、Telegram、Provider 与 MCP 探针，只检查 Admin API 连通与鉴权。
 
@@ -30,7 +30,7 @@ npm install -g ./dist/npm/tuuject-plasticwan-utils-0.1.0.tgz   # 文件名以实
 
 ## 配套 Agent Skill
 
-源码仓库根目录的 [`agents/skills/plasticwan-utils/SKILL.md`](../../.agents/skills/plasticwan-utils/SKILL.md) 给外部 Agent 使用：每次任务先运行 `plasticwan-utils doctor --json` 验证凭据与连通，再定位 Invocation、关联模型/工具/真实发送证据（只读核对可用 `config show`、`prompt get`、`invocation prompts` 与 `invocation preflight`），最后在明确授权后重放或分层比较 global/group prompt。它不是 Bot 的 `system:///` Skill，不需要服务器源码或数据库，也不增加 CLI 命令。
+源码仓库根目录的 [`agents/skills/plasticwan-utils/SKILL.md`](../../.agents/skills/plasticwan-utils/SKILL.md) 给外部 Agent 使用：每次任务先运行 `plasticwan-utils doctor --json` 验证凭据与连通，再定位 Invocation、关联模型/工具/真实发送证据（只读核对可用 `config show`、`prompt get`、`models list`、`invocation prompts` 与 `invocation preflight`），最后在明确授权后重放（可带临时模型/thinking 覆盖）或分层比较 global/group prompt。它不是 Bot 的 `system:///` Skill，不需要服务器源码或数据库，也不增加 CLI 命令。
 
 Skill 采用渐进披露：`SKILL.md` 是轻量入口，主题细节按当前任务加载子文档——审计流程在 `references/invocations.md`，重放的保真限制、授权要求与错误处理在 `references/replay.md`——不要一次加载全部内容。入口要求只有 `doctor` 以退出码 `0` 返回 `status: "ok"` 时才继续；失败即停止并请操作员用 `login` 修复（Agent 不代为执行、不重试、不读取或索取密钥），`--help` 只用于诊断 CLI 缺失或命令不匹配。
 
@@ -53,11 +53,12 @@ plasticwan-utils login
 # 2. 验证连通与鉴权；只有退出码 0 才继续
 plasticwan-utils doctor --json
 
-# 3. 只读检查：运行中/文件配置、全局与按群 prompt、场景所用的当前 prompt 与重放预检
+# 3. 只读检查：运行中/文件配置、全局与按群 prompt、可用模型、场景所用的当前 prompt 与重放预检
 plasticwan-utils config show --json
 plasticwan-utils config show --source file --json
 plasticwan-utils prompt get global --json
 plasticwan-utils prompt get group --chat -1001234567890 --source file --json
+plasticwan-utils models list --json
 plasticwan-utils invocation prompts 12345 --json
 plasticwan-utils invocation preflight 12345 --json
 
@@ -76,6 +77,9 @@ plasticwan-utils invocation replay 12345 --group-prompt group.txt --json
 # 切片重放：以某次成功 Bot 发言为边界重建输入窗口，需显式确认计费
 plasticwan-utils invocation preflight 12345 --before-send 678 --json
 plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
+# 临时模型/thinking 覆盖：--provider 与 --model 必须成对，预检与重放必须使用同一选择
+plasticwan-utils invocation preflight 12345 --provider openrouter --model deepseek/deepseek-v4-flash-0731 --thinking-level high --json
+plasticwan-utils invocation replay 12345 --provider openrouter --model deepseek/deepseek-v4-flash-0731 --thinking-level high --json
 ```
 
 无人值守或 CI 环境改用已注入的环境变量，或让 key 只经标准输入进入（示例中的变量都由安全渠道注入，不含明文 key）：
@@ -94,7 +98,7 @@ printf '%s' "$SECRET_KEY" | plasticwan-utils login --endpoint "$PLASTICWAN_ENDPO
 
 `login` 把 endpoint 与 key 成对保存到固定路径 `~/.config/plasticwan-utils/credentials.json`（所有平台一致；与 Bot 的 `config.jsonc`、`key.json` 无关，同一时间只保留最近一次 `login` 的一对）。文件是 JSON 对象，字段为 `endpoint` 与 `apiKey`，**未加密**；POSIX 上目录 `0700`、文件 `0600`（更窄的权限同样接受），Windows 不做 POSIX mode 检查、权限由用户目录 ACL 继承（工具不承诺 `chmod` 级别的保护）。既有文件是符号链接、不是普通文件或权限不安全时，读写都拒绝且**不自动修复或替换**，需人工处理。`login` 不访问服务器，也不读取旧凭据内容；保存成功不代表在线鉴权通过，请接着运行 `doctor`。序列化后的凭据超过 16384 字节会被拒绝（`credentials_too_large`，退出码 2）且不触碰旧文件；写入经同目录临时文件 `rename` 落地，任何失败都不会覆盖旧文件。
 
-凭据解析顺序（`doctor`、`config show`、`prompt get` 与 `invocation list/get/prompts/preflight/media/replay` 相同）：命令行参数 > 环境变量 > 保存文件。参数或环境变量显式给出的空串（含只含空白的 endpoint）按缺失/非法处理，**不会回退**到下一来源或改为提示（解析命令报 `missing_endpoint`/`missing_api_key`，`login` 报 `invalid_endpoint`/`invalid_api_key`）。endpoint 与 key 都由参数或环境变量明确给出时完全不读取凭据文件，文件损坏、是符号链接或权限不安全都不影响这次调用；只给其一才读文件，此时文件本身的问题以 `invalid_credentials` 失败（退出码 1）。保存的 key 只属于它保存时的规范化 endpoint：当前 endpoint 与文件中的 endpoint 在 `parseEndpoint` 规范化后不一致（例如换了主机）就不会使用该 key，缺少显式 key 会以 `missing_api_key` 失败（退出码 2），更换服务必须同时显式提供 key 或重新 `login`；规范化后相同（如仅尾斜杠差异）则仍可使用。参数与环境变量不会被写回文件（只有 `login` 写文件）。`login --json` 输出 `{"status":"saved","endpoint":…,"credentials_file":…}`，不含 key；`endpoint` 是规范化后的基地址。
+凭据解析顺序（`doctor`、`config show`、`prompt get`、`models list` 与 `invocation list/get/prompts/preflight/media/replay` 相同）：命令行参数 > 环境变量 > 保存文件。参数或环境变量显式给出的空串（含只含空白的 endpoint）按缺失/非法处理，**不会回退**到下一来源或改为提示（解析命令报 `missing_endpoint`/`missing_api_key`，`login` 报 `invalid_endpoint`/`invalid_api_key`）。endpoint 与 key 都由参数或环境变量明确给出时完全不读取凭据文件，文件损坏、是符号链接或权限不安全都不影响这次调用；只给其一才读文件，此时文件本身的问题以 `invalid_credentials` 失败（退出码 1）。保存的 key 只属于它保存时的规范化 endpoint：当前 endpoint 与文件中的 endpoint 在 `parseEndpoint` 规范化后不一致（例如换了主机）就不会使用该 key，缺少显式 key 会以 `missing_api_key` 失败（退出码 2），更换服务必须同时显式提供 key 或重新 `login`；规范化后相同（如仅尾斜杠差异）则仍可使用。参数与环境变量不会被写回文件（只有 `login` 写文件）。`login --json` 输出 `{"status":"saved","endpoint":…,"credentials_file":…}`，不含 key；`endpoint` 是规范化后的基地址。
 
 `doctor` 按同一顺序解析凭据后恰好发起一次 `GET /api/invocations?limit=1`——没有 replay、没有模型/Provider 调用，也不发送 Telegram 消息；`--json` 成功时 stdout 为 `{"status":"ok","endpoint":…,"credential_sources":{"endpoint":"argument|environment|file","api_key":…}}`，不输出 Invocation 正文，失败不自动重试；鉴权仍会在服务端更新该密钥的 `last_used_at`。失败时 stderr 为 `{"error","message"}`：参数/环境变量给出的凭据缺失或不合法（`missing_endpoint`、`missing_api_key`、`invalid_api_key` 等）退出码 `2`，保存文件无效（`invalid_credentials`）或请求失败退出码 `1`。
 
@@ -117,6 +121,9 @@ printf '%s' "$SECRET_KEY" | plasticwan-utils login --endpoint "$PLASTICWAN_ENDPO
 | `--confirm-paid` | 仅 `invocation replay`：切片重放（`--before-send`）需显式确认真实模型计费；缺失时以 `confirm_paid_required`、退出码 2 拒绝，不读 prompt 或 stdin，也不发预检或 POST。未切片重放不要求该 flag |
 | `--global-prompt <file\|->` | 仅 replay：临时替换 global prompt 层；`-` 从非终端标准输入读取，去空白后不能为空、最多 65,536 字符，否则在发请求前以退出码 2 失败 |
 | `--group-prompt <file\|->` | 仅 replay：临时替换 group 层；允许空内容以显式清空该层，最多 65,536 字符；与 `--global-prompt -` 不能同时从 stdin 读取（`conflicting_prompt_input`）。标准输入只用于 `login` 的 key 与 replay 的 prompt |
+| `--provider <alias>` | 仅 `invocation preflight` 与 `invocation replay`：临时模型覆盖的 Provider alias；必须与 `--model` 成对（`invalid_model_override`，退出码 2），1–256 字符、不含控制字符 |
+| `--model <id>` | 仅 `invocation preflight` 与 `invocation replay`：临时模型覆盖的模型 ID；必须与 `--provider` 成对，规则同上 |
+| `--thinking-level <level>` | 仅 `invocation preflight` 与 `invocation replay`：临时 thinking 覆盖，取 `off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`（`invalid_thinking_level`，退出码 2）。可单独使用（只临时改 thinking，模型沿用当前 Chat 配置）；与模型对同给时按该模型校验级别，给模型对而不给 thinking 时使用该模型支持的最弱级别（非推理模型为 `off`），模型不支持的级别由服务端拒绝。预检与重放必须使用同一选择 |
 
 ## API 契约
 
@@ -125,25 +132,26 @@ printf '%s' "$SECRET_KEY" | plasticwan-utils login --endpoint "$PLASTICWAN_ENDPO
 | `login` | 不访问服务器，只写凭据文件 | `{ status: "saved", endpoint, credentials_file }`（不含 key） |
 | `doctor` | `GET /api/invocations?limit=1`（只验证连通与鉴权） | `{ status: "ok", endpoint, credential_sources: { endpoint, api_key } }`，来源取值为 `argument` / `environment` / `file` |
 | `config show` | `GET /api/config/view?source` | `{ source, generation, active_hash, file_hash, restart_required, config }`；`config` 是服务端脱敏投影（不含 key、SecretRef 内容与 prompt 正文） |
+| `models list` | `GET /api/models`（无查询参数） | `{ source: "active", generation, models: [{ provider, model, name, context_window, max_tokens, input, reasoning, thinking_levels }] }`；只含 active 配置中接受 `text` 输入的已配置模型，不发起 Provider 请求，不代表上游完整目录或连通保证 |
 | `prompt get global` | `GET /api/prompts/global?source` | `{ source, scope: "global", chat_id: null, prompt, core_read_only: true, generation, active_hash, file_hash, restart_required }` |
 | `prompt get group --chat <id>` | `GET /api/prompts/group?source&chat` | 同上，`scope: "group"`，另有 `configured_chat_id`（Chat 迁移后可分辨配置 ID） |
 | `invocation list` | `GET /api/invocations?limit&cursor&state&chat&search&at&from&to` | `{ items: [...], next_cursor: string \| null }`；带搜索或时间过滤时每个 item 追加 `matched_messages`（最新 5 条命中，按时间从新到旧；`{ source: "incoming"\|"bot", telegram_message_id, telegram_send_id, at, text }`，`text` 是截断预览，bot 条目的 `telegram_send_id` 是 `--before-send` 候选，仍须用同一 ID 预检；跨 Conversation 的发送不能作为切片目标） |
 | `invocation get <id>` | `GET /api/invocations/<id>` | invocation 详情对象（含 `id: string`），原样输出 |
 | `invocation prompts <id>` | `GET /api/invocations/<id>/prompts` | `{ source: "active", source_invocation_id, global_prompt, group_prompt, template_values, core_read_only: true }`；当前场景所用模板与变量，不是历史 prompt |
-| `invocation preflight <id>` | `GET /api/invocations/<id>/replay-preflight[?before_send_id]` | `{ available, reason, message, prompt_overrides_available, omitted_images, scene?, fidelity }`；基于保留的公开场景，不依赖报文录制；切片选择时 `scene.slice` 为 `{ before_send_id, before_message_id, after_bot_message_id }`；不调用模型、不写生产业务状态 |
+| `invocation preflight <id>` | `GET /api/invocations/<id>/replay-preflight[?before_send_id][&provider&model&thinking_level]` | `{ available, reason, message, prompt_overrides_available, omitted_images, scene?, model?, fidelity }`；基于保留的公开场景，不依赖报文录制；切片选择时 `scene.slice` 为 `{ before_send_id, before_message_id, after_bot_message_id }`；带临时模型/thinking 选择时 `model` 为将使用的 `{ provider, id, thinking_level }`，`fidelity.model_selection` 为 `current_chat_config` 或 `temporary_override`；不调用模型、不写生产业务状态 |
 | `invocation media <id>` | `GET /api/invocations/<id>/media`，再对每项逐个 `GET /api/invocations/<id>/media/<media_id>/content?variant=` | 二进制逐项落盘；stdout 为 manifest 文档（见「输出与退出码」） |
-| `invocation replay <id>` | 先 `GET /api/invocations/<id>/replay-preflight[?before_send_id]`；随后 `POST /api/invocations/<id>/replay`，body `{}`、`{ "global_prompt": "...", "group_prompt": "..." }` 或 `{ "before_send_id": "<十进制字符串>" }` | 对象；`error` 非 null 表示 replay 未完成，`overrides` 报告哪两层被替换；切片重放另在 `scene.slice` 报告边界 |
+| `invocation replay <id>` | 先 `GET /api/invocations/<id>/replay-preflight[?before_send_id][&provider&model&thinking_level]`；随后 `POST /api/invocations/<id>/replay`，body `{}`、`{ "global_prompt": "...", "group_prompt": "..." }`、`{ "before_send_id": "<十进制字符串>" }` 或带 `provider`/`model`/`thinking_level` 的任意组合（模型对与 thinking 同预检） | 对象；`error` 非 null 表示 replay 未完成，`model` 为实际使用的 `{ provider, id, thinking_level }`，`overrides` 报告哪两层被替换以及临时覆盖的 `provider`/`model`/`thinking_level` 布尔，`fidelity.model_selection` 区分 `current_chat_config`/`temporary_override`；切片重放另在 `scene.slice` 报告边界 |
 
-响应边界只做最小校验：必须是 JSON 对象，且 list 的 `items` 为数组、`next_cursor` 为字符串或 null，get 必须含字符串 `id`，`config show` / `prompt get` / `invocation prompts` / `invocation preflight` 各自校验顶层字段，媒体列表校验每项的 ID、变体与大小形状；校验失败以 `invalid_response`（退出码 1）结束且不重试。JSON 响应体超过 4 MiB 会被拒绝；媒体内容单独按每文件 20 MiB、单次运行 100 MiB 设限。`doctor` 不输出 Invocation 正文，不调用模型、不发送 Telegram 消息、不重试；鉴权仍会更新密钥的 `last_used_at`。
+响应边界只做最小校验：必须是 JSON 对象，且 list 的 `items` 为数组、`next_cursor` 为字符串或 null，get 必须含字符串 `id`，`config show` / `prompt get` / `invocation prompts` / `invocation preflight` 各自校验顶层字段，`models list` 校验 `source`/`generation` 与每个模型的字段形状（provider/model/name、`input` 含 text、thinking 级别在枚举内等），媒体列表校验每项的 ID、变体与大小形状；校验失败以 `invalid_response`（退出码 1）结束且不重试。JSON 响应体超过 4 MiB 会被拒绝；媒体内容单独按每文件 20 MiB、单次运行 100 MiB 设限。`doctor` 不输出 Invocation 正文，不调用模型、不发送 Telegram 消息、不重试；鉴权仍会更新密钥的 `last_used_at`。
 
 ## 输出与退出码
 
 - 成功：stdout 一个 JSON 文档（`--json`）或简洁的人类可读输出；`login` 与 `doctor` 的成功文档不含 key。
 - 失败：stderr 一个 JSON 文档 `{"error": "<code>", "message": "<message>"}`；错误信息经 key 脱敏，key 不会出现在任何输出中。
 - replay 的响应即使 `error` 非 null 也会完整保留结构并写在 stdout，同时以非零退出码结束；stderr 仍是 JSON，`error` 为 `replay_failed`，`message` 以 `replay did not complete: ...` 开头。
-- `invocation replay` 在 POST 前先调用一次免费的 `GET /api/invocations/<id>/replay-preflight`（切片重放带同一 `before_send_id`）：不可重放时直接用引擎的稳定错误码失败（不发送 replay）；请求了 prompt 覆盖而预检的 `prompt_overrides_available` 为 false 时以 `replay_prompt_parts_unavailable` 失败，同样不 POST。覆盖内容在预检前读取并本地校验（global 为空或超过 65,536 字符等以退出码 2 失败）；`before_send_id` 是重放边界而不是 prompt 覆盖，不要求该权限。切片重放还需显式 `--confirm-paid` 确认本次真实计费。
+- `invocation replay` 在 POST 前先调用一次免费的 `GET /api/invocations/<id>/replay-preflight`（切片重放带同一 `before_send_id`，临时模型/thinking 选择也带同一 `provider`/`model`/`thinking_level`）：不可重放时直接用引擎的稳定错误码失败（不发送 replay）；请求了 prompt 覆盖而预检的 `prompt_overrides_available` 为 false 时以 `replay_prompt_parts_unavailable` 失败，同样不 POST。覆盖内容在预检前读取并本地校验（global 为空或超过 65,536 字符等以退出码 2 失败）；`before_send_id` 是重放边界而不是 prompt 覆盖，不要求该权限；模型选择也不是 prompt 覆盖，但选中模型/级别在预检不可用时按预检原因码失败。切片重放还需显式 `--confirm-paid` 确认本次真实计费。
 - `invocation media` 顺序下载到一个新建的私有临时目录（创建失败即失败；目录绝对路径写在 manifest 的 `directory` 字段），每个文件与 `manifest.json` 在 POSIX 上以 `0600` 创建（Windows 沿用用户目录 ACL，不做 POSIX mode 保证）。stdout 输出 manifest `{ invocation_id, variant, directory, items[] }`，每项为 `{ id, message_id, revision_id, kind, status, path, mime_type, bytes, sha256, error }`（`message_id` 为内部消息 ID）；`--json` 是单行 JSON，默认是缩进 JSON。全部成功退出码 0；部分失败保留已下载文件、写 `manifest.json` 并输出 manifest，以 `media_download_failed`（退出码 1）结束；全部失败先尝试删除整个目录，删除成功后把 manifest 输出到 stdout 并以 `media_download_failed` 失败；若文件系统拒绝清理，命令失败、目录可能残留，stdout 不保证含 manifest。下载前先拒绝超过 32 项或声明总量超过 100 MiB 的列表（`media_too_many_items` / `media_total_too_large`，不发生任何下载）；单项超过 20 MiB、变体不存在、超时、重定向与写入失败只记录为该条的 `error` 并继续下一项；manifest 写入失败先尝试删除目录，清理成功后以 `media_manifest_write_failed` 失败；清理受阻时同样不保证目录已删除。manifest 等文本输出与落盘元数据经 API key 脱敏；媒体二进制保留响应原字节，不做文本脱敏，`bytes` 与 `sha256` 对应实际保存的文件。
-- 退出码：`0` 成功；`1` 请求/服务端/replay/媒体下载失败，保存文件无效（`invalid_credentials`：JSON 损坏、符号链接、权限不安全等）与写入失败（`credentials_write_failed`）也走 `1`；`2` 参数、输入或凭据不合法（`missing_endpoint`、`missing_api_key`、`invalid_api_key`、`credentials_too_large`、prompt 覆盖的 `*_prompt_empty`/`*_prompt_too_large` 等）。`login` 写入失败不覆盖旧凭据。
+- 退出码：`0` 成功；`1` 请求/服务端/replay/媒体下载失败，保存文件无效（`invalid_credentials`：JSON 损坏、符号链接、权限不安全等）与写入失败（`credentials_write_failed`）也走 `1`；`2` 参数、输入或凭据不合法（`missing_endpoint`、`missing_api_key`、`invalid_api_key`、`credentials_too_large`、模型选择的 `invalid_model_override`/`invalid_thinking_level`、prompt 覆盖的 `*_prompt_empty`/`*_prompt_too_large` 等）。`login` 写入失败不覆盖旧凭据。
 - `doctor` 成功只说明当前凭据能连通并通过鉴权，不代表后续查询的数据仍在保留期内；它不输出 Invocation 正文，也不重试。
 - 标准输入只用于 `login` 的 `--api-key-stdin` 与 replay 的 `--global-prompt -` / `--group-prompt -`（两者不能同时）。
 - 请求不跟随重定向（`redirect: "error"`），只允许 `http(s)`，未知参数会直接报错而不是忽略。

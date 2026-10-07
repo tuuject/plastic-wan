@@ -238,6 +238,18 @@ test('Bearer keys reach only the invocation read/replay surface', async () => {
     const list = await server.handle(request('/api/invocations', { headers: auth }));
     expect(list.status).toBe(200);
     expect(await readJson(list)).toEqual({ items: [], next_cursor: null });
+
+    // The read-only model directory is part of the exact key surface.
+    const models = await server.handle(request('/api/models', { headers: auth }));
+    expect(models.status).toBe(200);
+    expect(await readJson(models)).toMatchObject({
+      source: 'active',
+      generation: 1,
+      models: expect.arrayContaining([expect.objectContaining({ provider: 'agent', model: 'agent-model' })]),
+    });
+    expect(
+      JSON.stringify(await readJson(await server.handle(request('/api/models', { headers: auth })))),
+    ).not.toContain('base_url');
     for (const scheme of ['bearer', 'BEARER', 'BeArEr']) {
       const response = await server.handle(
         request('/api/invocations', {
@@ -282,6 +294,7 @@ test('Bearer keys reach only the invocation read/replay surface', async () => {
       ['POST', '/api/auth/credentials'],
       ['DELETE', '/api/developer/model-payloads'],
       ['POST', '/api/wake'],
+      ['POST', '/api/models'],
       ['GET', '/api/unknown-route'],
     ];
     for (const [method, path] of forbidden) {

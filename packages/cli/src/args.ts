@@ -40,6 +40,9 @@ const OPTIONS = {
   'global-prompt': { type: 'string' },
   'group-prompt': { type: 'string' },
   'before-send': { type: 'string' },
+  provider: { type: 'string' },
+  model: { type: 'string' },
+  'thinking-level': { type: 'string' },
   'confirm-paid': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const;
@@ -75,7 +78,17 @@ export interface PromptsCommand {
   readonly id: string;
 }
 
-export interface PreflightCommand {
+export interface ReplayModelSelection {
+  readonly provider: string | undefined;
+  readonly model: string | undefined;
+  readonly thinkingLevel: string | undefined;
+}
+
+export interface ModelsListCommand {
+  readonly kind: 'models-list';
+}
+
+export interface PreflightCommand extends ReplayModelSelection {
   readonly kind: 'preflight';
   readonly id: string;
   readonly beforeSendId: string | undefined;
@@ -87,7 +100,7 @@ export interface MediaCommand {
   readonly variant: MediaVariant;
 }
 
-export interface ReplayCommand {
+export interface ReplayCommand extends ReplayModelSelection {
   readonly kind: 'replay';
   readonly id: string;
   readonly globalPromptSource: string | undefined;
@@ -123,7 +136,7 @@ export type InvocationCommand =
   | PreflightCommand
   | MediaCommand
   | ReplayCommand;
-export type CliCommand = InvocationCommand | ConfigShowCommand | PromptGetCommand;
+export type CliCommand = InvocationCommand | ModelsListCommand | ConfigShowCommand | PromptGetCommand;
 export type Command = CliCommand | LoginCommand | DoctorCommand;
 export type CredentialSource = 'argument' | 'environment' | 'file';
 
@@ -147,6 +160,9 @@ export interface ResolvedCli {
 
 interface StringFlags {
   readonly 'api-key-stdin': boolean | undefined;
+  readonly provider: string | undefined;
+  readonly model: string | undefined;
+  readonly 'thinking-level': string | undefined;
   readonly source: string | undefined;
   readonly variant: string | undefined;
   readonly 'global-prompt': string | undefined;
@@ -165,7 +181,9 @@ interface StringFlags {
 
 type FlagName = keyof StringFlags;
 
+const MODEL_FLAGS: readonly FlagName[] = ['provider', 'model', 'thinking-level'];
 const INSPECTION_FLAGS: readonly FlagName[] = [
+  ...MODEL_FLAGS,
   'limit',
   'cursor',
   'state',
@@ -184,7 +202,9 @@ const PROMPT_PART_FLAGS: readonly FlagName[] = ['global-prompt', 'group-prompt']
 /** `invocation list` time filters; every other subcommand rejects them. */
 const TIME_FILTER_FLAGS: readonly FlagName[] = ['search', 'at', 'from', 'to'];
 /** Only `invocation preflight` and `invocation replay` accept `--before-send`. */
-const PREFLIGHT_REJECTED_FLAGS: readonly FlagName[] = INSPECTION_FLAGS.filter((flag) => flag !== 'before-send');
+const PREFLIGHT_REJECTED_FLAGS: readonly FlagName[] = INSPECTION_FLAGS.filter(
+  (flag) => flag !== 'before-send' && !MODEL_FLAGS.includes(flag),
+);
 /**
  * Only `invocation replay` accepts `--confirm-paid`: a sliced replay
  * (`--before-send`) is a real, billed model call, so the acknowledgement is
@@ -203,6 +223,9 @@ export function parseCli(argv: readonly string[]): ParsedCli {
     help: parsed.values.help === true,
     flags: {
       'api-key-stdin': parsed.values['api-key-stdin'],
+      provider: parsed.values.provider,
+      model: parsed.values.model,
+      'thinking-level': parsed.values['thinking-level'],
       source: parsed.values.source,
       variant: parsed.values.variant,
       'global-prompt': parsed.values['global-prompt'],
@@ -236,7 +259,7 @@ export function resolveCli(
 ): ResolvedCli {
   const command = parsed.command;
   if (command === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|config|prompt|invocation');
+    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|models|config|prompt|invocation');
   }
   const endpointRaw = parsed.endpointRaw ?? env.PLASTICWAN_ENDPOINT ?? saved?.endpoint;
   if (endpointRaw === undefined || endpointRaw.trim().length === 0) {
@@ -303,7 +326,7 @@ function sanitizeArgumentMessage(error: unknown): string {
 function parseCommand(positionals: readonly string[], flags: StringFlags): Command {
   const [group, subcommand, ...rest] = positionals;
   if (group === undefined) {
-    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|config|prompt|invocation');
+    throw usageError('missing_command', 'usage: plasticwan-utils login|doctor|models|config|prompt|invocation');
   }
   if (group === 'login' || group === 'doctor') {
     if (positionals.length !== 1) {
@@ -318,6 +341,18 @@ function parseCommand(positionals: readonly string[], flags: StringFlags): Comma
   }
   rejectUnsupportedFlags(flags, ['api-key-stdin']);
   switch (group) {
+    case 'models':
+      if (subcommand === undefined) {
+        throw usageError('missing_subcommand', 'usage: plasticwan-utils models list');
+      }
+      if (subcommand !== 'list') {
+        throw usageError('unknown_subcommand', 'models subcommand must be list');
+      }
+      if (rest.length > 0) {
+        throw usageError('unexpected_argument', 'models list takes no positional arguments');
+      }
+      rejectUnsupportedFlags(flags, [...INSPECTION_FLAGS, ...CONFIRM_PAID_FLAGS]);
+      return { kind: 'models-list' };
     case 'config':
       return parseConfigShow(subcommand, rest, flags);
     case 'prompt':
@@ -325,7 +360,7 @@ function parseCommand(positionals: readonly string[], flags: StringFlags): Comma
     case 'invocation':
       return parseInvocation(subcommand, rest, flags);
     default:
-      throw usageError('unknown_command', 'command must be login, doctor, config, prompt, or invocation');
+      throw usageError('unknown_command', 'command must be login, doctor, models, config, prompt, or invocation');
   }
 }
 
@@ -344,6 +379,7 @@ function parseConfigShow(
     throw usageError('unexpected_argument', 'config show takes no positional arguments');
   }
   rejectUnsupportedFlags(flags, [
+    ...MODEL_FLAGS,
     'limit',
     'cursor',
     'state',
@@ -372,6 +408,7 @@ function parsePromptGet(subcommand: string | undefined, rest: readonly string[],
     throw usageError('unexpected_argument', 'prompt get takes exactly one scope');
   }
   rejectUnsupportedFlags(flags, [
+    ...MODEL_FLAGS,
     'limit',
     'cursor',
     'state',
@@ -429,7 +466,14 @@ function parseList(rest: readonly string[], flags: StringFlags): ListCommand {
   if (rest.length > 0) {
     throw usageError('unexpected_argument', 'invocation list takes no positional arguments');
   }
-  rejectUnsupportedFlags(flags, ['source', 'variant', ...PROMPT_PART_FLAGS, 'before-send', ...CONFIRM_PAID_FLAGS]);
+  rejectUnsupportedFlags(flags, [
+    ...MODEL_FLAGS,
+    'source',
+    'variant',
+    ...PROMPT_PART_FLAGS,
+    'before-send',
+    ...CONFIRM_PAID_FLAGS,
+  ]);
   const at = parseTimeFilter(flags.at, 'at');
   const from = parseTimeFilter(flags.from, 'from');
   const to = parseTimeFilter(flags.to, 'to');
@@ -476,7 +520,12 @@ function parseIdOnly(
   }
   if (kind === 'preflight') {
     rejectUnsupportedFlags(flags, [...PREFLIGHT_REJECTED_FLAGS, ...CONFIRM_PAID_FLAGS]);
-    return { kind, id: parseDecimalId(id, 'id', false), beforeSendId: parseBeforeSend(flags['before-send']) };
+    return {
+      kind,
+      id: parseDecimalId(id, 'id', false),
+      beforeSendId: parseBeforeSend(flags['before-send']),
+      ...parseReplayModel(flags),
+    };
   }
   rejectUnsupportedFlags(flags, [...INSPECTION_FLAGS, ...CONFIRM_PAID_FLAGS]);
   return { kind, id: parseDecimalId(id, 'id', false) };
@@ -491,6 +540,7 @@ function parseMedia(rest: readonly string[], flags: StringFlags): MediaCommand {
     throw usageError('unexpected_argument', 'invocation media takes exactly one id');
   }
   rejectUnsupportedFlags(flags, [
+    ...MODEL_FLAGS,
     'limit',
     'cursor',
     'state',
@@ -537,7 +587,28 @@ function parseReplay(rest: readonly string[], flags: StringFlags): ReplayCommand
     globalPromptSource: flags['global-prompt'],
     groupPromptSource: flags['group-prompt'],
     beforeSendId,
+    ...parseReplayModel(flags),
   };
+}
+
+function parseReplayModel(flags: StringFlags): ReplayModelSelection {
+  if ((flags.provider === undefined) !== (flags.model === undefined)) {
+    throw usageError('invalid_model_override', '--provider and --model must be supplied together');
+  }
+  for (const key of ['provider', 'model'] as const) {
+    const value = flags[key];
+    if (value !== undefined && (value.trim().length === 0 || value.length > 256 || /\p{Cc}/u.test(value))) {
+      throw usageError('invalid_model_override', `${key} must be 1 to 256 characters without control characters`);
+    }
+  }
+  const thinkingLevel = flags['thinking-level'];
+  if (
+    thinkingLevel !== undefined &&
+    !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(thinkingLevel)
+  ) {
+    throw usageError('invalid_thinking_level', 'thinking-level must be off, minimal, low, medium, high, xhigh, or max');
+  }
+  return { provider: flags.provider, model: flags.model, thinkingLevel };
 }
 
 function rejectUnsupportedFlags(flags: StringFlags, unsupported: readonly FlagName[]): void {

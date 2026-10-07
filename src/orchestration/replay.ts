@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { Agent } from '@earendil-works/pi-agent-core';
-import type { Api, ImageContent, Model } from '@earendil-works/pi-ai';
+import {
+  type Api,
+  getSupportedThinkingLevels,
+  type ImageContent,
+  type Model,
+  type ModelThinkingLevel,
+} from '@earendil-works/pi-ai';
 import { eq } from 'drizzle-orm';
 import { createExecuteTool } from '../capabilities/execute-tool.ts';
 import { createReadTool } from '../capabilities/read-tool.ts';
@@ -21,6 +27,7 @@ import { type InvocationContext, unavailableCapabilities } from '../platform/inv
 import type { InvocationConfigSnapshot, RuntimeConfigurationStore } from '../platform/runtime-config.ts';
 import type { SecretStore } from '../platform/secrets.ts';
 import type { SystemResources, SystemSkill } from '../platform/system-resources.ts';
+import { isThinkingLevel } from '../platform/thinking-levels.ts';
 import { applyToolSchemaKeywords } from '../platform/tool-schema.ts';
 import { resolveChatConfig, type SqliteStore } from '../store/database.ts';
 import { chats, conversations, invocations } from '../store/schema.ts';
@@ -67,10 +74,21 @@ interface ReplayToolCall {
   is_error: boolean;
 }
 
-/** Prompt overrides for one scene test; absent means the current layer is kept. */
-export interface ReplayPromptOverrides {
+/** Prompt and model overrides for one scene test; absent means the current layer or Chat settings are kept. */
+export interface ReplayPromptOverrides extends ReplaySelection {
   readonly global_prompt?: string;
   readonly group_prompt?: string;
+}
+
+/** Optional model-selection fields of one replay; absent fields inherit the current Chat settings. */
+export interface ReplayModelSelection {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly thinking_level?: ModelThinkingLevel;
+}
+
+/** The read-only selection a preflight accepts: no prompt overrides. */
+export interface ReplaySelection extends ReplayModelSelection {
   readonly before_send_id?: string;
 }
 
@@ -85,6 +103,12 @@ interface ReplayRuntime {
   readonly snapshot: InvocationConfigSnapshot;
   readonly settings: AgentSettings;
   readonly model: Model<Api>;
+  /** Which explicit model-selection fields the caller supplied, for disclosure. */
+  readonly selection: {
+    readonly provider: boolean;
+    readonly model: boolean;
+    readonly thinking_level: boolean;
+  };
 }
 
 type ReplayCheck =
@@ -107,9 +131,15 @@ export interface ReplayPreflight {
   readonly prompt_overrides_available: boolean;
   readonly omitted_images: number | null;
   readonly scene?: ReturnType<typeof sceneMetadata>;
+  /** The effective model when any model-selection field was given; absent inherits the current Chat settings. */
+  readonly model?: {
+    readonly provider: string;
+    readonly id: string;
+    readonly thinking_level: ModelThinkingLevel;
+  };
   readonly fidelity: {
     readonly input: 'historical_public_chat';
-    readonly model_selection: 'current_chat_config';
+    readonly model_selection: 'current_chat_config' | 'temporary_override';
     readonly prompt_selection: 'current_chat_config';
     readonly tool_selection: 'current_registry';
     readonly hot_injections: 'not_replayed' | 'flattened_before_send';
@@ -179,9 +209,11 @@ export class ReplayRunner {
    * invocation still throws; every other failure is reported in the result so a
    * panel or CLI can explain it.
    */
-  inspect(id: bigint, selection: Pick<ReplayPromptOverrides, 'before_send_id'> = {}): ReplayPreflight {
+  inspect(id: bigint, selection: ReplaySelection = {}): ReplayPreflight {
+    const modelSelected =
+      selection.provider !== undefined || selection.model !== undefined || selection.thinking_level !== undefined;
     try {
-      const { scene } = this.#prepare(id, selection.before_send_id);
+      const { scene, runtime } = this.#prepare(id, selection);
       return {
         available: true,
         reason: null,
@@ -190,9 +222,19 @@ export class ReplayRunner {
         omitted_images: scene.omittedImages,
         fidelity: {
           ...PREFLIGHT_FIDELITY,
+          model_selection: modelSelected ? 'temporary_override' : 'current_chat_config',
           hot_injections: scene.slice === undefined ? 'not_replayed' : 'flattened_before_send',
         },
         scene: sceneMetadata(scene),
+        ...(modelSelected
+          ? {
+              model: {
+                provider: runtime.model.provider,
+                id: runtime.model.id,
+                thinking_level: runtime.settings.thinking_level,
+              },
+            }
+          : {}),
       };
     } catch (error) {
       if (!(error instanceof ReplayError) || error.status === 404) {
@@ -204,7 +246,10 @@ export class ReplayRunner {
         message: error.message,
         prompt_overrides_available: false,
         omitted_images: null,
-        fidelity: PREFLIGHT_FIDELITY,
+        fidelity: {
+          ...PREFLIGHT_FIDELITY,
+          model_selection: modelSelected ? 'temporary_override' : 'current_chat_config',
+        },
       };
     }
   }
@@ -225,7 +270,7 @@ export class ReplayRunner {
     if (this.#running) {
       throw new ReplayError('replay_busy', 'Another replay is running', 429);
     }
-    const { source, runtime, stable, scene, registry } = this.#prepare(id, override.before_send_id);
+    const { source, runtime, stable, scene, registry } = this.#prepare(id, override);
     let globalTemplate: string | undefined;
     let groupTemplate: string | undefined;
     try {
@@ -247,7 +292,7 @@ export class ReplayRunner {
       },
       stable.templateValues,
     );
-    const { snapshot, settings, model } = runtime;
+    const { snapshot, settings, model, selection: modelSelection } = runtime;
     const { secrets, systemResources, modelGate, shutdownSignal } = this.#options;
     const config = snapshot.config;
     const imageLoader = this.#options.imageLoader;
@@ -467,6 +512,9 @@ export class ReplayRunner {
       overrides: {
         global_prompt: override.global_prompt !== undefined,
         group_prompt: override.group_prompt !== undefined,
+        provider: override.provider !== undefined,
+        model: override.model !== undefined,
+        thinking_level: override.thinking_level !== undefined,
       },
       started_at: startedAt.toISOString(),
       finished_at: new Date().toISOString(),
@@ -481,6 +529,10 @@ export class ReplayRunner {
       error,
       fidelity: {
         ...PREFLIGHT_FIDELITY,
+        model_selection:
+          modelSelection.provider || modelSelection.model || modelSelection.thinking_level
+            ? 'temporary_override'
+            : 'current_chat_config',
         hot_injections: scene.slice === undefined ? 'not_replayed' : 'flattened_before_send',
         omitted_images: scene.omittedImages,
         memory_and_alarms: 'empty_in_memory_overlay',
@@ -502,7 +554,7 @@ export class ReplayRunner {
 
   #prepare(
     id: bigint,
-    beforeSendId?: string,
+    selection: ReplaySelection = {},
   ): {
     source: ReplaySource;
     runtime: ReplayRuntime;
@@ -511,8 +563,9 @@ export class ReplayRunner {
     registry: ReplayToolRegistry;
   } {
     if (
-      beforeSendId !== undefined &&
-      (!/^[1-9]\d{0,18}$/.test(beforeSendId) || BigInt(beforeSendId) > 9_223_372_036_854_775_807n)
+      selection.before_send_id !== undefined &&
+      (!/^[1-9]\d{0,18}$/.test(selection.before_send_id) ||
+        BigInt(selection.before_send_id) > 9_223_372_036_854_775_807n)
     ) {
       throw new ReplayError('invalid_before_send_id', 'before_send_id must be a positive 64-bit decimal ID', 400);
     }
@@ -520,7 +573,7 @@ export class ReplayRunner {
     if (!check.ok) {
       throw new ReplayError(check.code, check.message);
     }
-    const checkedRuntime = this.#checkRuntime(check.source);
+    const checkedRuntime = this.#checkRuntime(check.source, selection);
     if (!checkedRuntime.ok) {
       throw new ReplayError(checkedRuntime.code, checkedRuntime.message);
     }
@@ -561,7 +614,7 @@ export class ReplayRunner {
         toolDefinitionCharacters:
           stable.systemPrompt.length + JSON.stringify(registry.tools.map(toolDefinition)).length,
         supportsImages: runtime.model.input.includes('image') && this.#options.imageLoader !== undefined,
-        ...(beforeSendId === undefined ? {} : { beforeSendId: BigInt(beforeSendId) }),
+        ...(selection.before_send_id === undefined ? {} : { beforeSendId: BigInt(selection.before_send_id) }),
       });
     } catch (error) {
       if (error instanceof SceneSliceError) {
@@ -639,8 +692,14 @@ export class ReplayRunner {
     };
   }
 
-  /** The current-configuration half of the guard: the source chat and its agent model must still exist. */
-  #checkRuntime(source: ReplaySource): ReplayRuntimeCheck {
+  /**
+   * The current-configuration half of the guard: the source chat and the
+   * effective agent model must still exist. An explicit model selection is
+   * validated against the same snapshot before anything else runs: the pair
+   * rule, registry membership, text capability and thinking-level support are
+   * all rejected before a preflight or a run can reach the model.
+   */
+  #checkRuntime(source: ReplaySource, selection: ReplayModelSelection = {}): ReplayRuntimeCheck {
     const snapshot = this.#options.configStore.beginInvocation();
     const config: RawConfig = snapshot.config;
     const chat = resolveChatConfig(config, this.#options.store.orm, source.chatId);
@@ -651,10 +710,68 @@ export class ReplayRunner {
       return { ok: false, code: 'replay_topic_unconfigured', message: 'The source topic is no longer configured' };
     }
     const settings = resolveAgentSettings(config, chat);
-    const model = snapshot.models.getModel(settings.provider, settings.model);
-    if (model === undefined) {
+    const currentModel = snapshot.models.getModel(settings.provider, settings.model);
+    if (currentModel === undefined) {
       return { ok: false, code: 'replay_model_unavailable', message: 'The current agent model is unavailable' };
     }
-    return { ok: true, runtime: { snapshot, settings, model } };
+    const selectionFlags = {
+      provider: selection.provider !== undefined,
+      model: selection.model !== undefined,
+      thinking_level: selection.thinking_level !== undefined,
+    };
+    let model = currentModel;
+    let effective: AgentSettings = settings;
+    if (selection.provider !== undefined || selection.model !== undefined) {
+      // An explicit pair overrides the Chat settings for this replay only; a
+      // pair without a thinking level resets it to the weakest level the target
+      // supports, exactly like a configuration model switch.
+      if (selection.provider === undefined || selection.model === undefined) {
+        throw new ReplayError('replay_model_pair_required', 'provider and model must be provided together', 400);
+      }
+      const target = this.#targetModel(snapshot, selection.provider, selection.model);
+      const supported = getSupportedThinkingLevels(target);
+      const thinkingLevel = selection.thinking_level ?? supported[0] ?? 'off';
+      if (!supported.includes(thinkingLevel)) {
+        throw new ReplayError(
+          'replay_thinking_level_unsupported',
+          `Thinking level ${thinkingLevel} is not supported by ${selection.provider}/${selection.model}`,
+          400,
+        );
+      }
+      model = target;
+      effective = { provider: selection.provider, model: selection.model, thinking_level: thinkingLevel };
+    } else if (selection.thinking_level !== undefined) {
+      if (!isThinkingLevel(selection.thinking_level)) {
+        throw new ReplayError(
+          'replay_thinking_level_invalid',
+          `Unknown thinking level ${selection.thinking_level}`,
+          400,
+        );
+      }
+      if (!getSupportedThinkingLevels(currentModel).includes(selection.thinking_level)) {
+        throw new ReplayError(
+          'replay_thinking_level_unsupported',
+          `Thinking level ${selection.thinking_level} is not supported by ${settings.provider}/${settings.model}`,
+          400,
+        );
+      }
+      effective = { ...settings, thinking_level: selection.thinking_level };
+    }
+    return { ok: true, runtime: { snapshot, settings: effective, model, selection: selectionFlags } };
+  }
+
+  /** Validates one explicit target against the active configuration and its registry. */
+  #targetModel(snapshot: InvocationConfigSnapshot, provider: string, modelId: string): Model<Api> {
+    if (snapshot.config.providers[provider] === undefined) {
+      throw new ReplayError('unknown_provider', `Provider ${provider} is not configured`, 400);
+    }
+    const found = snapshot.models.getModel(provider, modelId);
+    if (found === undefined) {
+      throw new ReplayError('unknown_model', `Model ${provider}/${modelId} is not registered`, 400);
+    }
+    if (!found.input.includes('text')) {
+      throw new ReplayError('not_text_capable', `Model ${provider}/${modelId} does not accept text input`, 400);
+    }
+    return found;
   }
 }

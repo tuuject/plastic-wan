@@ -10,6 +10,7 @@ import type {
   PromptGetCommand,
   PromptsCommand,
   ReplayCommand,
+  ReplayModelSelection,
 } from './args.ts';
 import { type AdminClient, isRecord } from './client.ts';
 import { CliError, usageError } from './errors.ts';
@@ -53,6 +54,8 @@ export async function executeCommand(
       return await runMedia(command, context, client);
     case 'replay':
       return await runReplay(command, context, client);
+    case 'models-list':
+      return await runModelsList(context, client);
     case 'config-show':
       return await runConfigShow(command, context, client);
     case 'prompt-get':
@@ -125,7 +128,7 @@ async function runPrompts(command: PromptsCommand, context: CommandContext, clie
 }
 
 async function runPreflight(command: PreflightCommand, context: CommandContext, client: AdminClient): Promise<number> {
-  const raw = await client.get(`api/invocations/${command.id}/replay-preflight`, preflightQuery(command.beforeSendId));
+  const raw = await client.get(`api/invocations/${command.id}/replay-preflight`, preflightQuery(command));
   if (!isPreflight(raw)) {
     throw new CliError('invalid_response', 'replay preflight response has an unexpected shape');
   }
@@ -138,7 +141,7 @@ async function runReplay(command: ReplayCommand, context: CommandContext, client
   // stalled stdin never sends a preflight the old contract would not have sent.
   // A sliced replay missing --confirm-paid is already refused while parsing
   // arguments, so this path never reads stdin or reaches the preflight either.
-  const body: Record<string, string> = {};
+  const body: Record<string, string> = replayModelFields(command);
   let hasPromptOverrides = false;
   if (command.globalPromptSource !== undefined) {
     body.global_prompt = await readPromptPart('global', command.globalPromptSource, context, false);
@@ -148,10 +151,7 @@ async function runReplay(command: ReplayCommand, context: CommandContext, client
     body.group_prompt = await readPromptPart('group', command.groupPromptSource, context, true);
     hasPromptOverrides = true;
   }
-  const preflight = await client.get(
-    `api/invocations/${command.id}/replay-preflight`,
-    preflightQuery(command.beforeSendId),
-  );
+  const preflight = await client.get(`api/invocations/${command.id}/replay-preflight`, preflightQuery(command));
   if (!isPreflight(preflight)) {
     throw new CliError('invalid_response', 'replay preflight response has an unexpected shape');
   }
@@ -182,6 +182,43 @@ async function runReplay(command: ReplayCommand, context: CommandContext, client
   if (failed) {
     throw new CliError('replay_failed', `replay did not complete: ${describeError(raw.error)}`);
   }
+  return 0;
+}
+
+async function runModelsList(context: CommandContext, client: AdminClient): Promise<number> {
+  const raw = await client.get('api/models');
+  if (
+    !isRecord(raw) ||
+    raw.source !== 'active' ||
+    !Number.isSafeInteger(raw.generation) ||
+    !Array.isArray(raw.models) ||
+    !raw.models.every(
+      (model: unknown) =>
+        isRecord(model) &&
+        typeof model.provider === 'string' &&
+        model.provider.length > 0 &&
+        typeof model.model === 'string' &&
+        model.model.length > 0 &&
+        typeof model.name === 'string' &&
+        typeof model.reasoning === 'boolean' &&
+        typeof model.context_window === 'number' &&
+        model.context_window > 0 &&
+        typeof model.max_tokens === 'number' &&
+        model.max_tokens > 0 &&
+        Array.isArray(model.input) &&
+        model.input.includes('text') &&
+        model.input.every((input: unknown) => input === 'text' || input === 'image') &&
+        Array.isArray(model.thinking_levels) &&
+        model.thinking_levels.length > 0 &&
+        model.thinking_levels.every(
+          (level: unknown) =>
+            typeof level === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(level),
+        ),
+    )
+  ) {
+    throw new CliError('invalid_response', 'active model list response has an unexpected shape');
+  }
+  writeDocument(raw, context);
   return 0;
 }
 
@@ -258,11 +295,19 @@ function unavailableError(preflight: PreflightDocument): CliError {
   return new CliError(reason ?? 'replay_unavailable', message ?? reason ?? 'replay is not available');
 }
 
+function replayModelFields(selection: ReplayModelSelection): Record<string, string> {
+  return {
+    ...(selection.provider === undefined ? {} : { provider: selection.provider }),
+    ...(selection.model === undefined ? {} : { model: selection.model }),
+    ...(selection.thinkingLevel === undefined ? {} : { thinking_level: selection.thinkingLevel }),
+  };
+}
+
 /** An absent selection keeps the old request URL byte-for-byte. */
-function preflightQuery(beforeSendId: string | undefined): URLSearchParams {
-  const query = new URLSearchParams();
-  if (beforeSendId !== undefined) {
-    query.set('before_send_id', beforeSendId);
+function preflightQuery(command: PreflightCommand | ReplayCommand): URLSearchParams {
+  const query = new URLSearchParams(replayModelFields(command));
+  if (command.beforeSendId !== undefined) {
+    query.set('before_send_id', command.beforeSendId);
   }
   return query;
 }

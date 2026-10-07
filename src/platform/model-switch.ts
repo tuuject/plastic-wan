@@ -1,4 +1,4 @@
-import type { Api, Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
+import { type Api, getSupportedThinkingLevels, type Model, type ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { RuntimeConfigurationStore } from './runtime-config.ts';
 
 export class ModelSwitchError extends Error {
@@ -17,6 +17,47 @@ export interface AgentModelOption {
   readonly name: string;
   readonly contextWindow: number;
   readonly maxTokens: number;
+}
+
+/** One text-capable model of the active snapshot, keyed by its configured provider alias. */
+export interface AgentModelCatalogEntry {
+  readonly provider: string;
+  readonly model: string;
+  readonly name: string;
+  readonly context_window: number;
+  readonly max_tokens: number;
+  readonly input: readonly ('text' | 'image')[];
+  readonly reasoning: boolean;
+  readonly thinking_levels: readonly ModelThinkingLevel[];
+}
+
+/**
+ * The text-capable models of the current generation, one entry per configured
+ * provider alias. This is a pure registry read: no upstream discovery, no
+ * secret resolution and no provider connection is touched, so it is safe for
+ * a read-only model directory.
+ */
+export function listActiveTextModels(configStore: RuntimeConfigurationStore): readonly AgentModelCatalogEntry[] {
+  const snapshot = configStore.current();
+  const entries: AgentModelCatalogEntry[] = [];
+  for (const alias of Object.keys(snapshot.config.providers)) {
+    for (const candidate of snapshot.models.getModels(alias)) {
+      if (!candidate.input.includes('text')) {
+        continue;
+      }
+      entries.push({
+        provider: alias,
+        model: candidate.id,
+        name: candidate.name,
+        context_window: candidate.contextWindow,
+        max_tokens: candidate.maxTokens,
+        input: [...candidate.input],
+        reasoning: candidate.reasoning,
+        thinking_levels: getSupportedThinkingLevels(candidate),
+      });
+    }
+  }
+  return entries;
 }
 
 /**
@@ -55,23 +96,13 @@ export class AgentModelSwitcher {
   }
 
   list(): readonly AgentModelOption[] {
-    const snapshot = this.#configStore.current();
-    const options: AgentModelOption[] = [];
-    for (const alias of Object.keys(snapshot.config.providers)) {
-      for (const candidate of snapshot.models.getModels(alias)) {
-        if (!candidate.input.includes('text')) {
-          continue;
-        }
-        options.push({
-          provider: alias,
-          model: candidate.id,
-          name: candidate.name,
-          contextWindow: candidate.contextWindow,
-          maxTokens: candidate.maxTokens,
-        });
-      }
-    }
-    return options;
+    return listActiveTextModels(this.#configStore).map((entry) => ({
+      provider: entry.provider,
+      model: entry.model,
+      name: entry.name,
+      contextWindow: entry.context_window,
+      maxTokens: entry.max_tokens,
+    }));
   }
 
   /** Validates a target without applying it. */

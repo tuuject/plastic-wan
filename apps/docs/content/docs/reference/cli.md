@@ -46,7 +46,7 @@ docker compose run --rm plasticwan backup --config /config/config.jsonc
 
 ## Admin API 工具客户端（plasticwan-utils）
 
-`packages/cli` 提供 Admin API 工具客户端 `plasticwan-utils`（npm 包 `@tuuject/plasticwan-utils`），用于只读检查当前配置与 prompt、查询/导出/重放 Invocation。子命令为 `invocation list` / `get` / `prompts` / `preflight` / `media` / `replay`、`config show` 与 `prompt get global|group`，另有 `login`（把 endpoint 与 API key 成对保存到本机）与 `doctor`（一次只读请求验证连通与鉴权）；群聊管理等其它能力尚未实现，也不包含 SDK 或 Eval 能力，`login` 也不提供服务端密钥管理（密钥的创建与撤销仍只在面板进行）。
+`packages/cli` 提供 Admin API 工具客户端 `plasticwan-utils`（npm 包 `@tuuject/plasticwan-utils`），用于只读检查当前配置与 prompt、查询/导出/重放 Invocation。子命令为 `invocation list` / `get` / `prompts` / `preflight` / `media` / `replay`、`models list`、`config show` 与 `prompt get global|group`，另有 `login`（把 endpoint 与 API key 成对保存到本机）与 `doctor`（一次只读请求验证连通与鉴权）；群聊管理等其它能力尚未实现，也不包含 SDK 或 Eval 能力，`login` 也不提供服务端密钥管理（密钥的创建与撤销仍只在面板进行）。
 
 它与服务端入口 `plasticwan`（`node src/cli.ts`）不同：本客户端直接访问 Admin API，不包含 `serve`、`check-config`、`backup`、`configure` 等服务命令；客户端自己的 `doctor` 也不执行服务端 Doctor 的 SQLite、媒体、Telegram、Provider 与 MCP 探针，只检查 Admin API 连通与鉴权。
 
@@ -68,7 +68,7 @@ npm install -g ./dist/npm/tuuject-plasticwan-utils-0.1.0.tgz   # 文件名以实
 
 不想全局安装时，也可以直接运行构建产物：`node packages/cli/dist/bin.js …`。维护者的自动化发布、首次发布 bootstrap 与 trusted publisher 配置见仓库的 [packages/cli/README.md](https://github.com/tuuject/plastic-wan/blob/main/packages/cli/README.md)。
 
-客户端用 API key 认证；密钥在面板的 **Manage → API keys**（`/api-keys`）页面创建、查看与撤销，明文只在创建弹窗出现一次，关闭后不可再取回，见[使用管理面板](../configure/admin.md#api-密钥)。密钥的能力面是只读检查（配置与 prompt 视图、场景所用的当前 prompt、重放预检、媒体导出）与 Invocation 读/重放；不要把真实 key 写进命令参数、聊天或 Skill 文件，也不要手动 `export` 明文 key（会进入 shell 历史）。
+客户端用 API key 认证；密钥在面板的 **Manage → API keys**（`/api-keys`）页面创建、查看与撤销，明文只在创建弹窗出现一次，关闭后不可再取回，见[使用管理面板](../configure/admin.md#api-密钥)。密钥的能力面是只读检查（配置与 prompt 视图、可用模型列表、场景所用的当前 prompt、重放预检、媒体导出）与 Invocation 读/重放；不要把真实 key 写进命令参数、聊天或 Skill 文件，也不要手动 `export` 明文 key（会进入 shell 历史）。
 
 ### 首次使用
 
@@ -92,6 +92,7 @@ npm install -g ./dist/npm/tuuject-plasticwan-utils-0.1.0.tgz   # 文件名以实
    ```bash
    plasticwan-utils config show --json
    plasticwan-utils prompt get global --json
+   plasticwan-utils models list --json
    plasticwan-utils invocation prompts 12345 --json
    plasticwan-utils invocation preflight 12345 --json
    plasticwan-utils invocation list --limit 20 --state completed --chat -1001234567890 --json
@@ -128,6 +129,9 @@ plasticwan-utils invocation replay 12345 --group-prompt group.txt --json
 # 切片重放：以某次成功 Bot 发言（telegram_sends 内部 ID）为边界重建输入窗口，需显式确认计费
 plasticwan-utils invocation preflight 12345 --before-send 678 --json
 plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
+# 临时模型/thinking 覆盖：--provider 与 --model 必须成对，预检与重放必须使用同一选择
+plasticwan-utils invocation preflight 12345 --provider openrouter --model deepseek/deepseek-v4-flash-0731 --thinking-level high --json
+plasticwan-utils invocation replay 12345 --provider openrouter --model deepseek/deepseek-v4-flash-0731 --thinking-level high --json
 ```
 
 | 选项 | 说明 |
@@ -147,16 +151,21 @@ plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
 | `--confirm-paid` | 仅 `invocation replay`：切片重放（`--before-send`）需显式确认真实模型计费；缺失时以 `confirm_paid_required`、退出码 2 拒绝，不读 prompt 或 stdin，也不发预检或 POST。未切片重放不要求该 flag |
 | `--global-prompt <file\|->` | 仅 `invocation replay`：完整替换 global 层；`-` 从非终端标准输入读取，去空白后不能为空、最多 65,536 字符，否则在发请求前以退出码 2 失败 |
 | `--group-prompt <file\|->` | 仅 `invocation replay`：完整替换 group 层；允许空内容以显式清空，最多 65,536 字符；与 `--global-prompt -` 不能同时从 stdin 读取 |
+| `--provider <alias>` | 仅 `invocation preflight` 与 `invocation replay`：临时模型覆盖的 Provider alias；必须与 `--model` 成对（`invalid_model_override`，退出码 2），1–256 字符、不含控制字符 |
+| `--model <id>` | 仅 `invocation preflight` 与 `invocation replay`：临时模型覆盖的模型 ID；必须与 `--provider` 成对，规则同上 |
+| `--thinking-level <level>` | 仅 `invocation preflight` 与 `invocation replay`：临时 thinking 覆盖，取 `off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`（`invalid_thinking_level`，退出码 2）。可单独使用（只临时改 thinking，模型沿用当前 Chat 配置）；与模型对同给时按该模型校验级别，给模型对而不给 thinking 时使用该模型支持的最弱级别（非推理模型为 `off`），模型不支持的级别由服务端拒绝。预检与重放必须使用同一选择 |
 
-失败时 stderr 输出 `{"error":"<code>","message":"<message>"}`，错误信息经 key 脱敏，密钥不会出现在任何输出中；退出码 `0` 表示成功，`1` 表示请求/服务端/replay/媒体下载失败或保存文件无效（`invalid_credentials`），`2` 表示参数、输入或凭据不合法（含 `missing_endpoint`、`missing_api_key`、`invalid_api_key`、`credentials_too_large`、搜索/时间过滤与 `--before-send` 的本地校验错误，以及 prompt 覆盖相关错误）。标准输入只用于 `login` 的 `--api-key-stdin` 与 replay 的 `--global-prompt -` / `--group-prompt -`（不能同时）。请求不跟随重定向；JSON 响应体超过 4 MiB 会被拒绝。
+失败时 stderr 输出 `{"error":"<code>","message":"<message>"}`，错误信息经 key 脱敏，密钥不会出现在任何输出中；退出码 `0` 表示成功，`1` 表示请求/服务端/replay/媒体下载失败或保存文件无效（`invalid_credentials`），`2` 表示参数、输入或凭据不合法（含 `missing_endpoint`、`missing_api_key`、`invalid_api_key`、`credentials_too_large`、搜索/时间过滤与 `--before-send` 的本地校验错误、模型选择的 `invalid_model_override`/`invalid_thinking_level`，以及 prompt 覆盖相关错误）。标准输入只用于 `login` 的 `--api-key-stdin` 与 replay 的 `--global-prompt -` / `--group-prompt -`（不能同时）。请求不跟随重定向；JSON 响应体超过 4 MiB 会被拒绝。
 
-`invocation media` 把每个媒体顺序下载到新建的私有临时目录（每文件不超过 20 MiB、单次合计不超过 100 MiB、最多 32 项），stdout 输出带 `sha256` 的 manifest；全部成功退出码 `0`，部分失败保留成功文件并写入 `manifest.json` 后以 `media_download_failed` 退出（退出码 `1`），全部失败先尝试清理目录，删除成功后输出 manifest；若文件系统拒绝清理，命令失败、目录可能残留，stdout 不保证含 manifest。服务端持续清理失败会作为条目错误 `media_cleanup_failed` 返回；这不等于客户端目录也已删除。manifest 等文本输出与落盘元数据经 API key 脱敏；媒体二进制保留响应原字节，不做文本脱敏，`bytes` 与 `sha256` 对应实际保存的文件。`invocation replay` 在 POST 前先调用一次免费的 `replay-preflight`（切片重放带同一 `before_send_id`）：不可重放时直接以原因码结束（不发送 replay），请求了 prompt 覆盖而预检不允许时返回 `replay_prompt_parts_unavailable`；`--before-send` 是重放边界而不是 prompt 覆盖，不要求该权限，但切片重放需 `--confirm-paid` 显式确认计费。只读检查（`config show`、`prompt get`、`invocation prompts`、`invocation preflight`、媒体列表）不调用模型、不计费；重放不会发送 Telegram 消息，也不修改生产会话与业务数据（鉴权仍会更新密钥使用时间），但它会真实调用模型并计费，限制与注意事项见[使用管理面板](../configure/admin.md#invocation-重放)。
+`invocation media` 把每个媒体顺序下载到新建的私有临时目录（每文件不超过 20 MiB、单次合计不超过 100 MiB、最多 32 项），stdout 输出带 `sha256` 的 manifest；全部成功退出码 `0`，部分失败保留成功文件并写入 `manifest.json` 后以 `media_download_failed` 退出（退出码 `1`），全部失败先尝试清理目录，删除成功后输出 manifest；若文件系统拒绝清理，命令失败、目录可能残留，stdout 不保证含 manifest。服务端持续清理失败会作为条目错误 `media_cleanup_failed` 返回；这不等于客户端目录也已删除。manifest 等文本输出与落盘元数据经 API key 脱敏；媒体二进制保留响应原字节，不做文本脱敏，`bytes` 与 `sha256` 对应实际保存的文件。`invocation replay` 在 POST 前先调用一次免费的 `replay-preflight`（切片重放带同一 `before_send_id`，临时模型/thinking 选择也带同一 `provider`/`model`/`thinking_level`）：不可重放时直接以原因码结束（不发送 replay），请求了 prompt 覆盖而预检不允许时返回 `replay_prompt_parts_unavailable`；`--before-send` 是重放边界而不是 prompt 覆盖，不要求该权限，但切片重放需 `--confirm-paid` 显式确认计费。只读检查（`config show`、`prompt get`、`models list`、`invocation prompts`、`invocation preflight`、媒体列表）不调用模型、不计费；重放不会发送 Telegram 消息，也不修改生产会话与业务数据（鉴权仍会更新密钥使用时间），但它会真实调用模型并计费，限制与注意事项见[使用管理面板](../configure/admin.md#invocation-重放)。
+
+`models list` 只读列出当前 active 配置中可接受文本输入的已配置模型（`{ source: "active", generation, models: [...] }`，每项含 `provider`/`model`/`name`/`context_window`/`max_tokens`/`input`/`reasoning`/`thinking_levels`）：不发起 Provider 请求、不是上游完整目录、不保证连通，也不支持 `--source file`；列表不构成对任何模型的使用授权。`invocation preflight`/`replay` 可临时覆盖模型与 thinking：`--provider` 与 `--model` 必须成对，`--thinking-level` 可单独使用；CLI 把相同的 `provider`/`model`/`thinking_level` 放进预检查询与重放 body，覆盖只影响这一次运行，不写回配置、不改生产 Context/审计/预算，但选中模型决定 prompt 变量、图片能力、context budget、Schema、Provider 连接与真实费用。给模型对而不给 thinking 时使用该模型支持的最弱级别（非推理模型为 `off`），不支持请求级别会被拒绝；未给任何选择时按当前 Chat 配置。响应的 `model`（`{ provider, id, thinking_level }`）、`fidelity.model_selection`（`current_chat_config`/`temporary_override`）与 `overrides` 的 `provider`/`model`/`thinking_level` 布尔可核对实际使用的选择。
 
 切片重放（`--before-send <send-id>`）只重建该次 Bot 发言之前的一小段公开输入：窗口严格位于上一条 Bot 发言之后、目标发言之前（两端不含），目标必须是本 Invocation 的成功发送，上一条 Bot 发言可以来自同一 Conversation 的另一次 Invocation；没有更早历史，也不读取历史的 reasoning、工具结果或 system prompt。输入只包含冻结且已注入的公开消息（目标发言之前已注入的批次会被拍平后一次性灌入，不按 Bucket 或历史节奏等待；模型并发与网络延迟仍可能造成等待），原 Bot 回答不进入模型，只作为审计对照。返回的 `scene.slice` 为 `{ before_send_id, before_message_id, after_bot_message_id }`，`history_count` 为 0，`cutoff_at` 取该次发送请求的开始时间（不是交付完成时间）；回复引用不能跨出该窗口。窗口内没有新的公开消息返回 `replay_slice_empty`，目标不是本 Invocation 的成功发送返回 `replay_slice_target_invalid`。
 
 ### 让外部 Agent 使用配套 Skill
 
-源码仓库根目录内置 `agents/skills/plasticwan-utils/`，指导外部 Agent 先运行 `doctor` 验证凭据与连通，再定位 Invocation（可按关键词与公开消息时间用 `invocation list --search/--at/--from/--to` 搜索）、核对模型调用/工具/真实发送记录；只读核对可用 `config show`、`prompt get`、`invocation prompts` 与 `invocation preflight`，并在明确授权后重放（含用 `--before-send` 限定窗口的切片重放）或分层比较 global/group prompt。它不是 Bot 的只读 System Skill，无需放入服务器的 `system:///` 资源树。Skill 以 `SKILL.md` 为轻量入口，主题细节按当前任务加载子文档：审计流程见 `references/invocations.md`，重放的保真限制、授权要求与错误处理见 `references/replay.md`，不要一次加载全部内容。
+源码仓库根目录内置 `agents/skills/plasticwan-utils/`，指导外部 Agent 先运行 `doctor` 验证凭据与连通，再定位 Invocation（可按关键词与公开消息时间用 `invocation list --search/--at/--from/--to` 搜索）、核对模型调用/工具/真实发送记录；只读核对可用 `config show`、`prompt get`、`models list`、`invocation prompts` 与 `invocation preflight`，并在明确授权后重放（含用 `--before-send` 限定窗口的切片重放、`--provider`/`--model`/`--thinking-level` 临时模型覆盖）或分层比较 global/group prompt。它不是 Bot 的只读 System Skill，无需放入服务器的 `system:///` 资源树。Skill 以 `SKILL.md` 为轻量入口，主题细节按当前任务加载子文档：审计流程见 `references/invocations.md`，重放的保真限制、授权要求与错误处理见 `references/replay.md`，不要一次加载全部内容。
 
 **npm 包不内置 Skill，安装 CLI 也不会自动启用 Skill。** 以下以 [Codex 的项目级目录](https://developers.openai.com/codex/build-skills)为例；其他宿主请使用其自己的 Skill 导入功能，不假定自动兼容。
 

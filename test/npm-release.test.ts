@@ -120,13 +120,26 @@ describe('npm release selection', () => {
     expect(entry).toContain('未通过时立即停止');
     expect(entry).toContain('不自动执行 `login`');
     expect(entry).toContain('不要循环重试');
+    // The models list command and its authorization isolation stay at the entry.
+    expect(entry).toContain('models list');
+    expect(entry).toContain('不是授权清单');
+    expect(entry).toContain('严禁自动尝试');
     const audit = readFileSync(new URL('references/invocations.md', skill), 'utf8');
     expect(audit).toContain('plasticwan-utils invocation get');
     expect(audit).toContain('telegram_sends[]');
+    expect(audit).toContain('plasticwan-utils models list');
+    expect(audit).toContain('不是授权清单');
     const replay = readFileSync(new URL('references/replay.md', skill), 'utf8');
     expect(replay).toContain('plasticwan-utils invocation replay');
     expect(replay).toContain('明确授权');
     expect(replay).toContain('fidelity.omitted_images');
+    // Temporary model/thinking overrides keep their own contract in the replay guide.
+    expect(replay).toContain('--provider');
+    expect(replay).toContain('--thinking-level');
+    expect(replay).toContain('invalid_model_override');
+    expect(replay).toContain('invalid_thinking_level');
+    expect(replay).toContain('fidelity.model_selection');
+    expect(replay).toContain('temporary_override');
     const metadata = readFileSync(new URL('agents/openai.yaml', skill), 'utf8');
     expect(metadata).toContain('$plasticwan-utils');
   });

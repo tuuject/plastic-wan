@@ -11,15 +11,16 @@ export const USAGE = `plasticwan-utils - Plastic Wan Admin API 工具客户端
 用法:
   plasticwan-utils login [--endpoint <url>] [--api-key-stdin] [--json]
   plasticwan-utils doctor [--json]
+  plasticwan-utils models list [--json]
   plasticwan-utils config show [--source active|file] [--json]
   plasticwan-utils prompt get global [--source active|file] [--json]
   plasticwan-utils prompt get group --chat <id> [--source active|file] [--json]
   plasticwan-utils invocation list [--limit N] [--cursor ID] [--state STATE] [--chat ID] [--search <keyword>] [--at <time>] [--from <time>] [--to <time>] [--json]
   plasticwan-utils invocation get <id> [--json]
   plasticwan-utils invocation prompts <id> [--json]
-  plasticwan-utils invocation preflight <id> [--before-send <send-id>] [--json]
+  plasticwan-utils invocation preflight <id> [--before-send <send-id>] [--provider <alias> --model <id>] [--thinking-level <level>] [--json]
   plasticwan-utils invocation media <id> [--variant original|preview] [--json]
-  plasticwan-utils invocation replay <id> [--before-send <send-id> --confirm-paid] [--global-prompt <file|->] [--group-prompt <file|->] [--json]
+  plasticwan-utils invocation replay <id> [--before-send <send-id> --confirm-paid] [--provider <alias> --model <id>] [--thinking-level <level>] [--global-prompt <file|->] [--group-prompt <file|->] [--json]
 
 全局选项:
   --endpoint <url>    Admin Panel 基地址（覆盖环境变量与登录文件）；明文 http 仅允许 loopback
@@ -27,6 +28,8 @@ export const USAGE = `plasticwan-utils - Plastic Wan Admin API 工具客户端
   --api-key-stdin     仅 login：读取标准输入至 EOF，接受单行 API key，不回显
   --source <active|file>  config show / prompt get：读取运行时生效配置或配置文件（默认 active）
   --variant <original|preview>  仅 invocation media：下载原始文件或预览（默认 original）
+  --provider <alias> --model <id>  仅 invocation preflight/replay：临时选用已启用模型，两项必须成对
+  --thinking-level <level>  仅 invocation preflight/replay：临时思考级别（off|minimal|low|medium|high|xhigh|max）
   --global-prompt <file|->  仅 invocation replay：替换 global prompt；- 表示 stdin
   --group-prompt <file|->   仅 invocation replay：替换 group prompt（允许空）；- 表示 stdin
   --search <keyword>  仅 invocation list：按字面关键词过滤消息（1-100 字符，不解释通配符）
@@ -42,6 +45,8 @@ export const USAGE = `plasticwan-utils - Plastic Wan Admin API 工具客户端
 登录文件: ~/.config/plasticwan-utils/credentials.json（未加密，包含 API key）。
 login 只保存凭据；doctor 用只读请求验证连接与鉴权，不调用模型。
 config show 与 prompt get 只读取脱敏后的配置与 prompt，不修改服务端状态。
+models list 只列当前生效、已注册且接受文本的模型及支持的 thinking_levels，不探测上游或调用模型。
+临时模型和思考级别不写配置；指定模型但未指定 thinking-level 时用目标模型支持的最低级别。预检与 POST 使用同一模型选择，未覆盖时继承当前群配置。
 invocation media 顺序下载到 mkdtemp 新建目录，stdout 输出 manifest，每个文件不超过 20MiB、总计不超过 100MiB 且至多 32 项。
 invocation list 默认保持旧输出；服务端返回 matched_messages 时人类可读输出会追加命中摘要。
 invocation replay 先请求 replay-preflight；不可重放或不允许 prompt 覆盖时不发送 replay 请求；--before-send 只选择回放边界，不属于 prompt 覆盖。切片重放必须显式给出 --confirm-paid：缺失时在读取 stdin 与发送任何请求前以 confirm_paid_required（退出码 2）拒绝；未切片的 replay 无需该 flag。

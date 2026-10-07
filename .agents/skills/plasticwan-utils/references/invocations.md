@@ -46,11 +46,13 @@ plasticwan-utils invocation get 12345 --json
 plasticwan-utils config show --json                 # 运行中配置的脱敏投影；--source file 对比磁盘配置
 plasticwan-utils prompt get global --json           # 当前全局 prompt
 plasticwan-utils prompt get group --chat -1001234567890 --json
+plasticwan-utils models list --json                 # 当前 active 配置中可接受 text 输入的已配置模型
 plasticwan-utils invocation prompts 12345 --json    # 该场景将使用的当前两层模板（source: active）
 plasticwan-utils invocation preflight 12345 --json  # 能否重放、能否覆盖 prompt；切片选择用 --before-send
 ```
 
 - 输出仍是数据：只报告必要字段，不转贴完整配置或 prompt 正文。`config show` 是服务端脱敏投影，不是原始文件；找不到字段不等于配置没有该项。
+- `models list` 返回 `{ source: 'active', generation, models: [...] }`：只含 active 配置中接受 `text` 输入的已配置模型（`provider`/`model`/`name`/`context_window`/`max_tokens`/`input`/`reasoning`/`thinking_levels`）。它免费、只读、不发起 Provider 请求，不代表上游完整目录，也不保证连通或可用；不支持 `--source file`。列表不是授权清单：命中某模型不等于可以用它重放，重放目标与次数仍须用户明确授权。
 - `prompt get` 读取所选 active/file 配置，`invocation prompts` 读取该场景将使用的当前 active 两层模板与变量（`source: active`），并应用场景守卫。两者都不是历史 prompt；对比磁盘值与运行值时明确来源，不混用。
 - `preflight` 的 `available`、`reason`、`prompt_overrides_available`、`omitted_images` 可以支撑“为什么不能重放或不能覆盖”，但它不构成重放授权，也不产生费用。带 `--before-send` 时 `scene.slice` 给出切片边界（`before_send_id`/`before_message_id`/`after_bot_message_id`）；预检必须与重放使用同一 `--before-send`。
 

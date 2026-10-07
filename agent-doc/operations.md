@@ -122,7 +122,7 @@ node src/cli.ts doctor --config dev-data/config.jsonc --output-agent-prompt
 
 ## Admin API 工具客户端（Invocation 查询与重放）
 
-`packages/cli` 提供访问 Admin API 的工具客户端 `plasticwan-utils`（npm 包 `@tuuject/plasticwan-utils`；仓库根与其它工作区仍为 private）。除 invocation 的 list/get/replay 三个子命令外，还提供 login（把 endpoint 与 API key 成对保存到本机凭据文件）与 doctor（一次只读请求验证连通与鉴权）；群聊管理等其它能力尚未实现，也不包含 SDK 或 Eval 能力，login 也不提供服务端密钥管理。Node.js ≥ 24，无运行时依赖。它与服务端入口 `plasticwan`（`node src/cli.ts`）不是同一个程序：本客户端只通过 Admin API 查询与重放 Invocation，不含 serve/check-config/backup/configure 等服务命令；客户端 doctor 也不做服务端 Doctor 的 SQLite、媒体、Telegram、Provider 与 MCP 探针，只检查 Admin API 连通与鉴权。
+[`packages/cli`](../packages/cli/README.md) 提供访问 Admin API 的工具客户端 `plasticwan-utils`（npm 包 `@tuuject/plasticwan-utils`；仓库根与其它工作区仍为 private），覆盖只读检查、当前模型目录、Invocation 查询/媒体导出/重放（含临时模型与 thinking 覆盖）。完整命令与选项以该包 README 为准。`login` 把 endpoint 与 API key 成对保存到本机凭据文件，不提供服务端密钥管理；客户端 `doctor` 只发一次只读请求检查 Admin API 连通与鉴权，不做服务端 Doctor 的 SQLite、媒体、Telegram、Provider 与 MCP 探针。Node.js ≥ 24，无运行时依赖；它与服务端入口 `plasticwan`（`node src/cli.ts`）不同，不含 serve/check-config/backup/configure 等服务命令，也不包含 SDK 或 Eval 能力。
 
 ```bash
 npm install -g @tuuject/plasticwan-utils           # 稳定版（严格 vMAJOR.MINOR.PATCH tag，dist-tag latest）

@@ -30,6 +30,35 @@ test('browsing every audit page sends no write method to /api/**', async ({ page
   expect(issues.writeApiCalls, JSON.stringify(issues.writeApiCalls)).toEqual([]);
 });
 
+test('the active replay model catalog exposes only usable model metadata to the authenticated session', async ({
+  request,
+}) => {
+  const response = await request.get(await adminUrl('/api/models'));
+  expect(response.status()).toBe(200);
+  const catalog = await response.json();
+  expect(catalog.source).toBe('active');
+  expect(Number.isSafeInteger(catalog.generation)).toBe(true);
+  expect(catalog.models.length).toBeGreaterThan(0);
+  for (const model of catalog.models) {
+    expect(Object.keys(model).sort()).toEqual([
+      'context_window',
+      'input',
+      'max_tokens',
+      'model',
+      'name',
+      'provider',
+      'reasoning',
+      'thinking_levels',
+    ]);
+    expect(model.input).toContain('text');
+    expect(model.thinking_levels.length).toBeGreaterThan(0);
+  }
+  const serialized = JSON.stringify(catalog);
+  for (const secret of ['telegram-secret', 'agent-secret', 'vision-secret']) {
+    expect(serialized).not.toContain(secret);
+  }
+});
+
 test('the production bundle is served with the strict CSP header', async ({ request }) => {
   const index = await request.get(await adminUrl('/'));
   expect(index.status()).toBe(200);

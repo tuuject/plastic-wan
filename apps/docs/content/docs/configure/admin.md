@@ -36,7 +36,7 @@ Admin Panel 与 `serve` 同进程启动，用于本地审计和受控管理；�
 - **Settings**：对手改配置使用 **Apply config file**，并查看 Saved 与 Running 状态及 `restart_required`。
 - **Developer**：按需记录模型调用的调试报文，或在确认后清除已有报文。
 - **API keys**（Manage 组）：创建、查看与撤销供 CLI 与评估工具使用的密钥，明文只在创建弹窗中出现一次，见下文。
-- **Invocation 重放**：仍只有携带 API 密钥的 CLI/API 入口，没有页面入口；只读的配置/prompt 检查、场景 prompt、Invocation 搜索、重放预检与媒体导出同样在 CLI/API 层提供，见下文。
+- **Invocation 重放**：仍只有携带 API 密钥的 CLI/API 入口，没有页面入口；只读的配置/prompt 检查、可用模型列表、场景 prompt、Invocation 搜索、重放预检与媒体导出同样在 CLI/API 层提供，见下文。
 
 ## 查看和复制 Telegram ID
 
@@ -88,11 +88,11 @@ SQLite 释放的页可供后续写入复用，但数据库文件不一定立即�
 - 页面不把明文写入浏览器 `localStorage`/`sessionStorage` 或查询缓存，列表接口也不返回它。复制失败时弹窗保留文字并提示手动复制。
 - 点行内 **Revoke** 后需在确认框点 **Revoke key**；撤销立即生效且不可恢复，密钥行与元数据保留，**Status** 变为 **Revoked**，不再提供撤销操作。
 
-密钥的能力范围是只读检查与 Invocation 读/重放：允许查看当前配置与 global/group prompt 的脱敏视图、比较磁盘配置、读取 Invocation 场景将使用的当前两层 prompt、运行免费的重放预检、下载该 Invocation 快照授权的媒体，以及读取 Invocation 列表/详情并发起重放；它不能读取其它审计（Overview、Messages、Contexts、记忆等）、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
+密钥的能力范围是只读检查与 Invocation 读/重放：允许查看当前配置与 global/group prompt 的脱敏视图、比较磁盘配置、列出当前 active 配置中可接受文本输入的已配置模型（`GET /api/models`，不探测 Provider）、读取 Invocation 场景将使用的当前两层 prompt、运行免费的重放预检、下载该 Invocation 快照授权的媒体，以及读取 Invocation 列表/详情并发起重放；它不能读取其它审计（Overview、Messages、Contexts、记忆等）、不能修改配置，也不能管理密钥。请求带密钥时服务器不再使用浏览器 Cookie，因此用密钥访问其它接口不会因为面板已登录而放行。列表里的 `last_used_at` 在每次密钥通过校验时更新；撤销后立即失效。明文遗失只能撤销后重建。请把密钥当密码对待，不要粘贴进聊天、日志或提交到仓库。
 
 ## Invocation 重放
 
-重放从已经结束的 Invocation 重建一段历史公开聊天场景，用当前 Prompt、模型与工具定义观察它会怎样回复。入口是携带 API 密钥的 CLI/API，面板登录会话不能直接重放；免费的预检、场景 prompt 查看与媒体导出也没有页面入口。它不会发送 Telegram 消息、不修改生产会话与业务数据（鉴权仍更新密钥使用时间），但会**真实调用模型并计费**，不计入生产用量预算。交给 Agent 时，明确授权目标 ID、次数与可选覆盖，不把查询授权当重放授权。
+重放从已经结束的 Invocation 重建一段历史公开聊天场景，用当前 Prompt、模型与工具定义观察它会怎样回复。入口是携带 API 密钥的 CLI/API，面板登录会话不能直接重放；免费的预检、场景 prompt 查看与媒体导出也没有页面入口。它不会发送 Telegram 消息、不修改生产会话与业务数据（鉴权仍更新密钥使用时间），但会**真实调用模型并计费**，不计入生产用量预算。交给 Agent 时，明确授权目标 ID、次数与可选覆盖（prompt 与临时模型/thinking），不把查询授权当重放授权。
 
 不需要开启 Developer 报文录制；关闭录制或清除调试报文不影响场景重建，也不要求源 Invocation 曾调用模型。需要仍在保留期内的开场公开消息；尚未结束、开场缺失或损坏、Chat/Topic 已不允许或当前模型不可用时会明确拒绝，先用免费预检确认。
 
@@ -101,6 +101,8 @@ SQLite 释放的页可供后续写入复用，但数据库文件不一定立即�
 plasticwan-utils invocation preflight 12345 --json
 # 查看该场景使用的当前两层 prompt（source: active，不是历史记录）
 plasticwan-utils invocation prompts 12345 --json
+# 列出当前 active 配置中可接受文本输入的已配置模型（免费、不探测 Provider；列表不是授权）
+plasticwan-utils models list --json
 
 plasticwan-utils invocation replay 12345 --json
 # 临时替换 global / group 层（每层最多 64Ki 字符；不写回配置）
@@ -108,10 +110,23 @@ plasticwan-utils invocation replay 12345 --global-prompt prompt.txt --json
 plasticwan-utils invocation replay 12345 --group-prompt group.txt --json
 printf '%s' '临时替换的 global prompt' | plasticwan-utils invocation replay 12345 --global-prompt - --json
 
+# 临时模型/thinking 覆盖：--provider 与 --model 必须成对，预检与重放必须使用同一选择
+plasticwan-utils invocation preflight 12345 --provider openrouter --model deepseek/deepseek-v4-flash-0731 --thinking-level high --json
+plasticwan-utils invocation replay 12345 --provider openrouter --model deepseek/deepseek-v4-flash-0731 --thinking-level high --json
+
 # 切片重放：只重放某次成功 Bot 发言之前的一小段公开输入，需确认计费
 plasticwan-utils invocation preflight 12345 --before-send 678 --json
 plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
 ```
+
+### 临时模型/thinking 覆盖
+
+默认按当前 Chat 配置解析模型与 thinking；`invocation preflight`/`replay` 可临时覆盖：
+
+- `--provider <alias>` 与 `--model <id>` 必须成对（1–256 字符、不含控制字符），`--thinking-level` 取 `off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` 且可单独使用（只临时改 thinking，模型沿用当前 Chat 配置）；本地校验失败以 `invalid_model_override`/`invalid_thinking_level`、退出码 2 拒绝，不发任何请求。
+- 给模型对而不给 thinking 时，使用该模型支持的最弱级别（非推理模型为 `off`）；请求模型不支持的级别会被拒绝；未给任何选择时按当前 Chat 配置。
+- 预检与重放必须使用同一选择：CLI 把相同的 `provider`/`model`/`thinking_level` 放进预检查询与 POST body，可与 `--before-send` 切片和 prompt 覆盖组合。
+- 覆盖不修改生产配置、Context、审计或预算；选中模型影响 prompt 变量、图片能力、context budget、Schema、Provider 连接与成本。响应的 `model`（`{ provider, id, thinking_level }`）与 `fidelity.model_selection`（`current_chat_config`/`temporary_override`）可核对实际使用的选择。`models list` 只列出 active 配置中接受文本输入的已配置模型，不保证连通，列表不构成使用授权。
 
 ### 切片重放
 
@@ -126,7 +141,7 @@ plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
 限制与取舍：
 
 - 默认输入是开场批次的冻结公开消息与当时可证明存在的历史，不加入后续批次与热注入；切片重放只取 `--before-send` 窗口内的冻结输入，并拍平可证明在发送前已注入的批次。两种模式都不加入后来编辑，当前上下文预算、Topic 范围与话题切点仍可能收窄场景；默认模式还受当前历史长度限制。不是恢复历史私有推理、工具结果或完整 Conversation Context。
-- prompt、模板变量、模型、思考强度与工具定义都取**当前**该 Chat 的配置；`invocation prompts` 返回 `source: active`，不能当历史记录。只允许覆盖 global/group，固定协议和整体 system prompt **不能**覆盖；global 不能清空，group 可以清空，模板按当前白名单校验。
+- prompt、模板变量、模型、思考强度与工具定义默认取**当前**该 Chat 的配置；`invocation prompts` 返回 `source: active`，不能当历史记录。重放可临时覆盖模型/thinking（`--provider`/`--model` 成对、`--thinking-level` 可单独），只影响本次运行、不写回配置，但会改变 prompt 变量、图片能力、上下文预算、Schema、Provider 连接与真实费用；实际选择见响应的 `model` 与 `fidelity.model_selection`（`current_chat_config`/`temporary_override`）。只允许覆盖 global/group，固定协议和整体 system prompt **不能**覆盖；global 不能清空，group 可以清空，模板按当前白名单校验。
 - `send` 只收集到 `outputs`，校验当前参数、文字限制与场景内的回复目标，不执行真实发送限流或 Sticker/生成资产的世界状态检查。记忆和 Alarm 从空内存开始，typing、生图、`zzz` 只合成；`read` 读取当前系统文档。
 - 当前模型支持图片时，可按需读取本次场景授权且仍保留的 Photo、Sticker 与图片 Document，引用不跨场景；读图只下载/规范化图片给当前模型，不调用生产 Vision 或写分析缓存。缺失、不支持或下载失败会明确省略/报错，`omitted_images` 不代表之后下载成功的保证。网页抓取、Sticker 搜索、MCP 和未支持能力被拒绝。
 - 场景时间默认为开场冻结时间，切片模式取目标发送请求的开始时间（不是交付完成时间）；不恢复当时记忆/回执，不模拟全局睡眠、发送提醒或新消息发送屏障。当前低预算可暴露 `zzz`，但执行不写睡眠状态。

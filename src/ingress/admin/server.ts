@@ -9,7 +9,7 @@ import { DEFAULT_MEMORY_TTL_WARNING_DAYS } from '../../context/memory.ts';
 import type { ImageBridge } from '../../image/bridge.ts';
 import type { ImageService } from '../../image/service.ts';
 import type { BucketScheduler } from '../../orchestration/scheduler.ts';
-import { assertConfigPermissions, loadConfig, type RawConfig } from '../../platform/config.ts';
+import { assertConfigPermissions, loadConfig, type RawConfig, ThinkingLevelSchema } from '../../platform/config.ts';
 import { type ConfigEdit, readConfigRevision } from '../../platform/config-file.ts';
 import type { ConfigErrorCode, ConfigReloader } from '../../platform/config-reload.ts';
 import {
@@ -17,9 +17,10 @@ import {
   listOpenRouterImageModels,
   validImageModelId,
 } from '../../platform/image-models.ts';
-import type { AgentModelOption, AgentModelSwitcher } from '../../platform/model-switch.ts';
+import { type AgentModelOption, type AgentModelSwitcher, listActiveTextModels } from '../../platform/model-switch.ts';
 import type { RuntimeConfigurationStore } from '../../platform/runtime-config.ts';
 import type { SecretStore } from '../../platform/secrets.ts';
+import { isThinkingLevel } from '../../platform/thinking-levels.ts';
 import { cancelAlarm, listAlarms, parseAlarmId } from '../../plugins/alarm/admin.ts';
 import type { SqliteStore } from '../../store/database.ts';
 import { resolveChatConfig } from '../../store/database.ts';
@@ -130,6 +131,9 @@ const replayBodyValidator = Compile(
       global_prompt: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_PROMPT_LENGTH })),
       group_prompt: Type.Optional(Type.String({ maxLength: MAX_PROMPT_LENGTH })),
       before_send_id: Type.Optional(Type.String({ pattern: '^[1-9]\\d{0,18}$' })),
+      provider: Type.Optional(Type.String({ minLength: 1 })),
+      model: Type.Optional(Type.String({ minLength: 1 })),
+      thinking_level: Type.Optional(ThinkingLevelSchema),
     },
     { additionalProperties: false },
   ),
@@ -160,12 +164,21 @@ const CONTENT_TYPES: Record<string, string> = {
 
 export type AdminConfig = NonNullable<RawConfig['admin']>;
 
-/** Replay-only template overrides. Runtime protocol and other fixed prompt parts are never writable. */
+/** Replay-only template and model overrides. Runtime protocol and other fixed prompt parts are never writable. */
 export interface ReplayInvocationInput {
   readonly global_prompt?: string;
   readonly group_prompt?: string;
   readonly before_send_id?: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly thinking_level?: ModelThinkingLevel;
 }
+
+/** The read-only replay selection a preflight accepts; absent model fields inherit the Chat settings. */
+export type ReplayPreflightSelection = Pick<
+  ReplayInvocationInput,
+  'before_send_id' | 'provider' | 'model' | 'thinking_level'
+>;
 
 export interface AdminServerOptions {
   readonly store: SqliteStore;
@@ -185,7 +198,7 @@ export interface AdminServerOptions {
   /** Replays one audit invocation; absent when the agent runtime is not wired. */
   readonly replayInvocation?: (id: bigint, input: ReplayInvocationInput, signal: AbortSignal) => Promise<unknown>;
   /** Read-only replay checks and retained editable templates; neither calls a model. */
-  readonly replayPreflight?: (id: bigint, selection?: Pick<ReplayInvocationInput, 'before_send_id'>) => unknown;
+  readonly replayPreflight?: (id: bigint, selection?: ReplayPreflightSelection) => unknown;
   readonly invocationPrompts?: (id: bigint) => unknown;
   /** Telegram bytes stay on the server; the caller can only name invocation-associated media IDs. */
   readonly mediaDownloader?: MediaDownloader;
@@ -756,19 +769,36 @@ export class AdminServer {
             },
       );
     }
+    if (route === 'models') {
+      if (url.searchParams.size > 0) {
+        throw new AdminQueryError('invalid_query', 'The models listing takes no query parameters');
+      }
+      const snapshot = this.#configStore.current();
+      return inspectedJson({
+        source: 'active',
+        generation: snapshot.generation,
+        models: listActiveTextModels(this.#configStore),
+      });
+    }
     if (segments[0] !== 'invocations') {
       return undefined;
     }
     const action = segments[2];
     if (segments.length === 3 && (action === 'replay-preflight' || action === 'prompts')) {
       for (const key of url.searchParams.keys()) {
-        if (action !== 'replay-preflight' || key !== 'before_send_id' || url.searchParams.getAll(key).length !== 1) {
-          throw new AdminQueryError('invalid_query', 'Only replay preflight accepts one before_send_id parameter');
+        if (
+          action !== 'replay-preflight' ||
+          !REPLAY_PREFLIGHT_PARAMS.has(key) ||
+          url.searchParams.getAll(key).length !== 1
+        ) {
+          throw new AdminQueryError(
+            'invalid_query',
+            'Replay preflight accepts at most one before_send_id, provider, model and thinking_level parameter',
+          );
         }
       }
       const id = parseId(segments[1] ?? '', 'id');
-      const beforeSendId = url.searchParams.get('before_send_id');
-      const selection = beforeSendId === null ? {} : { before_send_id: validateBeforeSendId(beforeSendId) };
+      const selection = preflightSelection(url);
       if (action === 'replay-preflight') {
         if (this.#replayPreflight === undefined) {
           throw new AdminQueryError('replay_unavailable', 'Invocation replay inspection is not wired', 503);
@@ -1655,13 +1685,52 @@ function parseReplayInput(value: unknown): ReplayInvocationInput {
   if (!replayBodyValidator.Check(value)) {
     throw new AdminQueryError(
       'invalid_body',
-      `Only before_send_id and global_prompt/group_prompt templates of at most ${MAX_PROMPT_LENGTH} characters are accepted; system prompt overrides are forbidden`,
+      'Only before_send_id, provider/model, thinking_level and global_prompt/group_prompt templates of at most 65536 characters are accepted; system prompt overrides are forbidden',
     );
   }
   if (value.before_send_id !== undefined) {
     validateBeforeSendId(value.before_send_id);
   }
+  validateReplayModelPair(value.provider, value.model, 'invalid_body');
   return value;
+}
+
+function validateReplayModelPair(
+  provider: string | undefined,
+  model: string | undefined,
+  code: 'invalid_body' | 'invalid_query',
+): void {
+  if ((provider === undefined) !== (model === undefined)) {
+    throw new AdminQueryError(code, 'provider and model must be provided together');
+  }
+  for (const value of [provider, model]) {
+    if (value !== undefined && (value.trim().length === 0 || value.length > 256 || /\p{Cc}/u.test(value))) {
+      throw new AdminQueryError(code, 'provider and model must be 1 to 256 characters without control characters');
+    }
+  }
+}
+
+const REPLAY_PREFLIGHT_PARAMS = new Set(['before_send_id', 'provider', 'model', 'thinking_level']);
+
+/**
+ * Builds the read-only replay selection from a preflight query. Unknown or
+ * repeated keys were already rejected; this validates the values: `provider`
+ * and `model` must arrive together and `thinking_level` must be a known level.
+ */
+function preflightSelection(url: URL): ReplayPreflightSelection {
+  const beforeSendId = url.searchParams.get('before_send_id');
+  const provider = url.searchParams.get('provider');
+  const model = url.searchParams.get('model');
+  const thinkingLevel = url.searchParams.get('thinking_level');
+  validateReplayModelPair(provider ?? undefined, model ?? undefined, 'invalid_query');
+  if (thinkingLevel !== null && !isThinkingLevel(thinkingLevel)) {
+    throw new AdminQueryError('invalid_query', 'thinking_level must be a supported level');
+  }
+  return {
+    ...(beforeSendId === null ? {} : { before_send_id: validateBeforeSendId(beforeSendId) }),
+    ...(provider === null || model === null ? {} : { provider, model }),
+    ...(thinkingLevel === null ? {} : { thinking_level: thinkingLevel }),
+  };
 }
 
 function validateBeforeSendId(value: string): string {
