@@ -19,6 +19,7 @@ pnpm test test/scheduler.test.ts test/sleep.test.ts
 pnpm test test/context-store.test.ts test/context-gc.test.ts test/context-hot-inject.test.ts
 pnpm test test/context-send.test.ts test/cut-topic.test.ts
 pnpm test test/image-agent.test.ts test/image-delivery.test.ts test/image-delivery-runtime.test.ts
+pnpm test test/image-config-reload.test.ts test/image-config-degrade.test.ts
 pnpm test test/agent-runtime.test.ts test/model-request-audit.test.ts
 pnpm test test/typing.test.ts test/context-hot-inject.test.ts
 pnpm test test/admin-developer.test.ts
@@ -49,10 +50,11 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `typing.test.ts` | 模型显式开始、4 秒节流、Chat/Topic 隔离、请求不重叠、重复调用不延长上限、轮次重启、取消在途和排队刷新、平台失败不阻塞 |
 | `foundation.test.ts` | 严格配置（含 `agent.context` 与 `agent.rate_limits`）、Secret 脱敏（含前缀与重叠值）、迁移与备份 |
 | `packages/image-service/test/*.test.ts` | 图片域核心（包内测试自带连接）：意图档位/能力校验、引用展开与去重、幂等重放/冲突、retry 全轮、透明像素校验由 adapter 决定、部分成功与未知上游结果不自动重试、崩溃恢复、关停缺项、并发上限、单 Worker 串行化 |
-| `test/image-models.test.ts` / `test/image-admin-server.test.ts` | 图片模型目录鉴权、禁用时发现、真实路由标签、能力映射、非法/超大/错误响应、自动配置到 adapter 的参数契约、配置回显与凭据保留、复用 OpenRouter SecretRef 修复旧空凭据、重复模型/未知凭据/错误来源在写入前拒绝、修订冲突拒绝及 Origin 边界 |
+| `test/image-models.test.ts` / `test/image-admin-server.test.ts` | 图片模型目录鉴权、禁用时发现、真实路由标签、能力映射、非法/超大/错误响应、自动配置到 adapter 的参数契约、配置回显与凭据保留、模型备注的文件往返及非法备注拒绝不落盘、复用 OpenRouter SecretRef 修复旧空凭据、重复模型/未知凭据/错误来源在写入前拒绝、修订冲突拒绝及 Origin 边界 |
+| `test/image-config-reload.test.ts` / `test/image-config-degrade.test.ts` | 图片配置热更新与同名密钥轮换、在途轮次固定快照、候选校验与并发应用；仅改备注发布新版本且不调用上游；空/1000 字符边界通过、非法备注仅禁用图片段、修复后恢复 |
 | `test/image-service-store.test.ts` | 宿主借入连接下的图片域：safe-integer 列返回 number 且 JSON 无 BigInt、迁移 024 在有数据的既有库重放、宿主事务回滚核心写入、启动对账（claimed→interrupted、queued→恢复）、优雅关停中断落盘、备份图片快照成对轮换与恢复字节一致 |
 | `test/image-startup.test.ts` | 真实 `serve` 本地启动流程在首次 Telegram 调用前发布已保存图片配置，第二次启动自动恢复；缺失/结构错误/无法解析凭据仅禁用图片能力，启动日志与实际快照一致且不泄露凭据。Telegram 边界使用 mock，无外部连接 |
-| `test/image-agent.test.ts` | 图片插件桥：生成落定推进 long task 与回执、`send kind:image` 交付本 Conversation 已落定输出并审计 bot 消息与 `media`、跨 Conversation 拒绝、失败生成仍回执、重启后 `reconcile` 对账、能力开关、输入引用授权；声明输出文件缺失时发送以 `image_generation_unavailable` 拒绝且不新增发送行 |
+| `test/image-agent.test.ts` | 图片插件桥：生成落定推进 long task 与回执、`send kind:image` 交付本 Conversation 已落定输出并审计 bot 消息与 `media`、跨 Conversation 拒绝、失败生成仍回执、重启后 `reconcile` 对账、能力开关、输入引用授权；模型目录只读、无凭据、热更新/禁用与取消审计、转义备注的完整字节预算分页、超大单项拒绝；显式模型选择钉住路由/提示词/回执、无效选择零生成；声明输出文件缺失时发送以 `image_generation_unavailable` 拒绝且不新增发送行 |
 | `load-env.test.ts` | CLI `.env.local`/`.env` 加载语义：缺失跳过、dotenv 解析（含 BOM）、真实环境变量 > `.env.local` > `.env` 优先级 |
 | `schema.test.ts` | Drizzle 层 bigint/boolean 往返、STRICT 与 CHECK 约束、better-sqlite3 IMMEDIATE 事务回滚、`sql` 模板绑定与 FTS5 查询；Invocation 审计索引的新建/升级、分页统计与查询计划；图片交付台账旧库升级、已知/未知资产回填与查询索引 |
 | `telegram-ingestion.test.ts` | allowlist、Revision、Bot/Service、Topic 隔离、先到的 `migrate_from_chat_id` 授权新 Supergroup、匿名管理员（占位 Bot + `sender_chat`）按真人处理 |
@@ -88,8 +90,8 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `scene-context.test.ts` | 开场冻结快照优先、当时可证明的公开历史、后续 attach/编辑/迟到消息排除、切点/Topic/字符预算、损坏身份拒绝、缺修订与媒体降级、scene-local media/reply 引用、构建全表无写入 |
 | `scene-slice.test.ts` | 切片构建：两条 Bot 消息之间的冻结输入、上一条 Bot 可来自另一次 Invocation 或不带 send 行的消息、同一秒内边界仍精确、切点继续生效、只并入注入时间严格早于发送开始的 attach 批次（同毫秒保守省略）、同一消息重复冻结取最新合格快照、渲染冻结快照而非后续编辑、reply 引用只保留切片内消息、只授权冻结 revision 且已渲染的媒体、拒绝非本 Invocation/失败/跨 Conversation 的目标发送、连续两次发送之间为空、字符预算从新到旧裁剪、构建不写库 |
 | `scene-retention.test.ts` | 真实 029→030 有数据迁移仅移除旧 replay payload，调用/工具/发送/用量/冻结快照整行保留，迁移前备份含完整旧列且 integrity check 通过，重复打开、外键检查与 retention 级联后来源不可用 |
-| `replay-tools.test.ts` | 当前定义下合成 send 与内存记忆/Alarm、生图假回执、zzz 不写状态、当前只读 system 资源、MCP/未知能力阻断、execute search/help/call 共用校验、abort 不 dispatch、无生产执行器 |
-| `replay.test.ts` | 历史公开场景 + 当前 prompt/模型/工具、录制关闭与调试报文清除后仍可用、全表无写入、两层覆盖与模板边界、scene-local 图片读取和 reply 校验、图片错误脱敏/文本模型降级、来源守卫、共享模型闸门/单飞、取消与模型错误、context/turn/tool/trace/wall-clock 预算、参数键与 dispatch 脱敏、合成 sleep 终止 |
+| `replay-tools.test.ts` | 当前定义下合成 send 与内存记忆/Alarm、`list_image_models` 内存分页（带 description、无凭据、offset 越界拒绝）、生图假回执、zzz 不写状态、当前只读 system 资源、MCP/未知能力阻断、execute search/help/call 共用校验、abort 不 dispatch、无生产执行器 |
+| `replay.test.ts` | 历史公开场景 + 当前 prompt/模型/工具、`list_image_models` 回放当前图片目录且无凭据无付费调用、录制关闭与调试报文清除后仍可用、全表无写入、两层覆盖与模板边界、scene-local 图片读取和 reply 校验、图片错误脱敏/文本模型降级、来源守卫、共享模型闸门/单飞、取消与模型错误、context/turn/tool/trace/wall-clock 预算、参数键与 dispatch 脱敏、合成 sleep 终止 |
 | `replay-http.test.ts` | CLI 子进程 → 回环 AdminServer → ReplayRunner → Faux Provider 真实 HTTP 链路，当前 prompt/模型与分层覆盖、合成 send/记忆/Alarm、MCP 阻断、preflight 与 active prompts 免费只读、切片 preflight/replay（`before_send_id` 在查询与 body 的校验：0/溢出/重复/未知参数 400、非法目标 409；窗口输入一次注入且生产表不变；缺少 `--confirm-paid` 时模型调用为零、连密钥使用时间都不更新）、keyword+公开消息时间搜索经 key 与 Session 结果一致、生产表不变（密钥使用时间除外）、无场景 409/非零退出、撤销 key 401 |
 | `media.test.ts` | 图片标准化、缓存和 Vision reasoning、换 vision 模型后按新 `analysis_version` 重新分析；下载客户端把 content-length 与流式超限统一类型化为 `MediaTooLargeError`，并在 `getFile` 挂起时立即中止而迟到响应不写文件 |
 | `stickers.test.ts` | Set 同步、结构化视觉 Tool Call、索引、搜索、发送 |

@@ -123,6 +123,7 @@ export const modelDefinitionSchema = z
   .object({
     id: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
     name: nameSchema,
+    description: z.string().max(1000).optional(),
     provider: z.literal('openrouter'),
     upstreamModel: z.string().regex(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/),
     credentialRef: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),

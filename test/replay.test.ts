@@ -28,6 +28,7 @@ import type { InvocationContext } from '../src/platform/invocation-context.ts';
 import { SecretStore } from '../src/platform/secrets.ts';
 import { BUNDLED_SYSTEM_RESOURCES_DIR, SystemResources } from '../src/platform/system-resources.ts';
 import { AlarmInputSchema, ListAlarmInputSchema } from '../src/plugins/alarm/alarm.ts';
+import { ListImageModelsInputSchema } from '../src/plugins/image/image.ts';
 import { SqliteStore } from '../src/store/database.ts';
 import { invocationMessages, invocations, media, messageRevisions, messages, modelCalls } from '../src/store/schema.ts';
 import { seedAdminFixture } from './fixtures/admin-seed.ts';
@@ -467,6 +468,100 @@ test('a scene replay runs the historical public chat under the current config wi
   // The whole database, production tables included, is untouched.
   expect(f.rows()).toEqual(before);
 });
+
+test.each([false, true])(
+  'list_image_models replays validated config without credentials (invalid=%s)',
+  async (invalid) => {
+    const f = await fixture({
+      change: (config) => {
+        config.image = {
+          credentials: { openrouter: { env: 'OPENROUTER_IMAGE_KEY' } },
+          models: [
+            {
+              id: 'line-art',
+              name: 'Line Art',
+              description: 'clean line art for stickers',
+              provider: 'openrouter',
+              upstreamModel: 'org/line-art',
+              credentialRef: 'openrouter',
+              providerTag: 'art',
+              capabilities: {
+                imageInput: false,
+                maxInputImages: 0,
+                maxOutputs: 4,
+                aspectRatios: ['1:1', '16:9'],
+                resolutionClasses: invalid ? ['unsupported'] : ['auto', 'medium'],
+              },
+            },
+            {
+              id: 'anime',
+              name: 'Anime',
+              provider: 'openrouter',
+              upstreamModel: 'org/anime',
+              credentialRef: 'openrouter',
+              providerTag: 'art',
+              capabilities: {
+                imageInput: true,
+                maxInputImages: 2,
+                maxOutputs: 4,
+                aspectRatios: ['1:1'],
+                resolutionClasses: ['auto'],
+              },
+            },
+          ],
+        };
+      },
+      definitions: () => ({
+        tools: [
+          definition('read', Type.Object({ uri: Type.String(), base: Type.Optional(Type.String()) })),
+          definition('send', SendInputSchema),
+          definition('execute'),
+          definition('zzz'),
+        ],
+        capabilities: [definition('list_image_models', ListImageModelsInputSchema)],
+      }),
+    });
+    f.faux.setResponses([
+      () =>
+        fauxAssistantMessage([fauxToolCall('execute', { action: 'call', tool: 'list_image_models', input: {} })], {
+          stopReason: 'toolUse',
+        }),
+      fauxAssistantMessage('done'),
+    ]);
+    const before = f.rows();
+    const result = await f.run();
+    const call = result.tool_calls.find((entry) => JSON.stringify(entry.arguments).includes('"list_image_models"'));
+    expect(call?.is_error).toBe(false);
+    const body = call?.result as { content?: Array<{ type?: string; text?: string }> } | undefined;
+    const content = body?.content ?? [];
+    const envelopeText = content
+      .flatMap((entry) => (entry.type === 'text' && typeof entry.text === 'string' ? [entry.text] : []))
+      .join('\n');
+    const envelope = JSON.parse(envelopeText) as { text: string };
+    const page = JSON.parse(envelope.text) as {
+      models: Array<{ id: string; description?: string }>;
+      total: number;
+      next_offset: number | null;
+    };
+    // The directory is projected from the current config: descriptions are kept,
+    // credentialRef and the resolved credential value never leave the runner.
+    if (invalid) {
+      expect(page).toEqual({ models: [], total: 0, next_offset: null });
+    } else {
+      expect(page.total).toBe(2);
+      expect(page.models[0]).toMatchObject({ id: 'line-art', description: 'clean line art for stickers' });
+      expect(page.models[1]).toMatchObject({ id: 'anime' });
+    }
+    expect(JSON.stringify(page)).not.toMatch(/credential/i);
+    expect(JSON.stringify(page)).not.toContain('OPENROUTER_IMAGE_KEY');
+    expect(result.fidelity.dispatches).toContainEqual(
+      expect.objectContaining({ tool_name: 'execute', mode: 'synthetic', capability: 'list_image_models' }),
+    );
+    expect(f.faux.state.callCount).toBe(2);
+    // The whole database, production tables included, is untouched.
+    expect(f.rows()).toEqual(before);
+  },
+);
 
 test('the scene prompt is the current config and an override replaces only its own layer', async () => {
   const f = await fixture();

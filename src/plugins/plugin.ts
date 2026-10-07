@@ -1,3 +1,4 @@
+import type { PublicModel } from '@plasticwan/image-service';
 import type { ExecutableCapability } from '../capabilities/execute-tool.ts';
 import type { RawConfig } from '../platform/config.ts';
 import type { InvocationContext } from '../platform/invocation-context.ts';
@@ -38,7 +39,7 @@ export interface ImagePluginBridge {
     modelId: string;
     outputCount: number;
   }>;
-  modelList(): readonly { readonly id: string; readonly name: string }[];
+  modelList(): readonly PublicModel[];
 }
 
 export interface InvocationScope {

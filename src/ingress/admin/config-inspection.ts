@@ -151,6 +151,7 @@ export function configurationView(config: RawConfig) {
             models: config.image.models.map((model) => ({
               id: model.id,
               name: model.name,
+              ...(model.description === undefined ? {} : { description: model.description }),
               provider: model.provider,
               upstreamModel: model.upstreamModel,
               providerTag: model.providerTag,

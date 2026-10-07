@@ -78,6 +78,10 @@ export const image = {
     addModel: 'Add selected model',
     mergedDuplicates: 'Merged {{count}} identical legacy model entries; takes effect on save',
     noModelsYet: 'No models added yet; select at least one',
+    modelDescriptionLabel: 'Usage & prompt notes',
+    modelDescriptionPlaceholder: 'When to prefer this model and how to style prompts',
+    modelDescriptionHint:
+      'Shown to the agent when choosing a model and writing prompts (up to 1000 characters). Never put API keys or secrets here.',
     credentialRef: 'credential {{name}}',
     removeModel: 'Remove {{name}}',
     remove: 'Remove',

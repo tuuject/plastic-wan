@@ -393,6 +393,7 @@ Agent 不再配置 `max_output_tokens`：每次请求的输出上限直接使用
       {
         "id": "gpt-image-1",
         "name": "GPT Image",
+        "description": "示例偏好：日常插画优先选用；用自然语言描述主体、构图和光线",
         "provider": "openrouter",
         "upstreamModel": "openai/gpt-image-1",
         "credentialRef": "openrouter",
@@ -413,7 +414,7 @@ Agent 不再配置 `max_output_tokens`：每次请求的输出上限直接使用
 字段语义：
 
 - `credentials`: 凭据名 → SecretRef，与 Provider 的 SecretRef 同一机制（明文只能进 key jar，文件里写 `{jar}` / `{env}` / `{command}` 引用）。Admin 设置页保存时，编辑请求里附带的明文凭据写入 jar，文件只留条目名；删除段后不再被任何 `credentialRef` 引用的 jar 条目会被回收。
-- `models[]`: 可路由的生图模型，上限 64 个。`id` 是模型在 Admin 下拉与 Agent 工具参数里的标识；`credentialRef` 必须指向 `credentials` 里的条目；`provider`/`providerTag` 描述经哪个 Provider 连接与上游打标；`upstreamModel` 是上游真实模型 ID。`capabilities` 由 image-service 包在准备快照时做能力契约校验（host schema 只做结构校验）：`imageInput` 决定能否携带参考图，`maxInputImages`/`maxOutputs` 约束参考图数量与单次输出数，`aspectRatios`/`resolutionClasses` 是参数白名单——模型接受的取值必须列在这里，否则该次提交在参数校验阶段就被拒绝。
+- `models[]`: 可路由的生图模型，上限 64 个。`id` 是模型在 Admin 下拉与 Agent 工具参数里的标识；`credentialRef` 必须指向 `credentials` 里的条目；`provider`/`providerTag` 描述经哪个 Provider 连接与上游打标；`upstreamModel` 是上游真实模型 ID。`description` 可选（最长 1000 字符，可空）：该模型路由的独立备注，说明它适用的画风/任务与提示词风格。备注只作为 Agent 选型与编写提示词的指导——系统不自动拼接备注原文、不把它作为独立字段发送给生图上游、也不能覆盖任何工具授权；Agent 经只读的 `list_image_models` 能力读取（见 [telegram-agent-flow.md](telegram-agent-flow.md#image-生成)），Admin「图片设置」的模型卡片可直接编辑并随保存热应用。`capabilities` 由 image-service 包在准备快照时做能力契约校验（host schema 只做结构校验）：`imageInput` 决定能否携带参考图，`maxInputImages`/`maxOutputs` 约束参考图数量与单次输出数，`aspectRatios`/`resolutionClasses` 是参数白名单——模型接受的取值必须列在这里，否则该次提交在参数校验阶段就被拒绝。
 - **软校验降级**：`loadConfig` 对 `image` 段单独校验，结构不合法的段被剥离（记录 warning），进程以「图片生成禁用」状态启动——坏掉的 image 段永远不会阻止 bot 上线，管理员随后经 Admin 面板修复或启用。剥离信息记录在 `LoadedConfig.warnings`，Admin 配置状态页可见。
 - 图片快照随每次 reload 原子发布：reload 重新解析 `credentials` 的 SecretRef 并重建快照，同一轮生成的凭据在轮次开始时固定（轮次中途轮换密钥不影响进行中的生成）；运行中的生成不受 reload 影响，下一次提交才用新配置。
 - 原始生成图与参考图存放在 `<data_dir>/images`，按 SQLite 中的资产行索引；`backup` 把该目录快照为备份文件旁的 `<备份名>.images/`（best-effort：目录缺失就跳过，拷贝失败只记日志不中断备份；SQLite 快照与目录拷贝之间没有跨库原子性）。

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
+import type { ImageContent } from '@earendil-works/pi-ai';
+import type { PublicModel } from '@plasticwan/image-service';
 import Type, { type TSchema } from 'typebox';
 import Compile from 'typebox/compile';
 import { capability, createExecuteTool, type ExecutableCapability } from '../capabilities/execute-tool.ts';
@@ -12,8 +14,7 @@ import {
 } from '../context/memory.ts';
 import { SystemResourceError, type SystemResources } from '../platform/system-resources.ts';
 import { AlarmInputSchema, DeleteAlarmInputSchema, ListAlarmInputSchema } from '../plugins/alarm/alarm.ts';
-import { ImageGenerateInputSchema } from '../plugins/image/image.ts';
-import type { ImageContent } from '@earendil-works/pi-ai';
+import { ImageGenerateInputSchema, imageModelPage, ListImageModelsInputSchema } from '../plugins/image/image.ts';
 import type { ToolAudit } from '../store/tool-audit.ts';
 
 /**
@@ -22,7 +23,10 @@ import type { ToolAudit } from '../store/tool-audit.ts';
  * (`synthetic`), served from readonly system resources or scene-authorized
  * image bytes (`live_read`), or refused (`blocked`). Production executors for
  * web fetching, sticker search, Vision, unknown capabilities, unknown
- * top-level tools, and MCP tools are all deny-by-default.
+ * top-level tools, and MCP tools are all deny-by-default. `list_image_models`
+ * is synthetic: it pages the runner-provided current model directory
+ * (`imageModels`, already stripped of credentials) in memory, exactly like
+ * `list_alarm` pages its in-memory overlay; it never touches the image bridge.
  */
 
 export type ReplayDispatchMode = 'synthetic' | 'live_read' | 'blocked';
@@ -39,6 +43,8 @@ export function toolDefinition(tool: ReplayToolDefinition): ReplayToolDefinition
 
 export interface ReplayToolOptions {
   readonly readImage?: (ref: string, signal: AbortSignal) => Promise<ImageContent>;
+  /** The current image model directory, credential-free; absent means an empty catalog. */
+  readonly imageModels?: readonly PublicModel[];
   readonly maxTextLength?: number;
   readonly disallowBlankLines?: boolean;
   readonly replyMessageIds?: ReadonlySet<string>;
@@ -102,6 +108,7 @@ const AlarmInputValidator = Compile(AlarmInputSchema);
 const ListAlarmInputValidator = Compile(ListAlarmInputSchema);
 const DeleteAlarmInputValidator = Compile(DeleteAlarmInputSchema);
 const ImageGenerateInputValidator = Compile(ImageGenerateInputSchema);
+const ListImageModelsInputValidator = Compile(ListImageModelsInputSchema);
 const ZzzInputValidator = Compile(Type.Object({}, { additionalProperties: false }));
 /**
  * Mirrors the current ReadInputSchema, which is module-private in
@@ -130,6 +137,7 @@ const SYNTHETIC_CAPABILITIES: ReadonlySet<string> = new Set([
   'list_alarm',
   'delete_alarm',
   'image_generate',
+  'list_image_models',
   'typing',
 ]);
 
@@ -392,6 +400,9 @@ function replayCapability(definition: ReplayToolDefinition, state: ReplayState):
   if (definition.name === 'image_generate') {
     return capability(replayImageGenerateTool(definition), true);
   }
+  if (definition.name === 'list_image_models') {
+    return capability(replayListImageModelsTool(definition, state), false);
+  }
   return replayBlockedCapability(definition);
 }
 
@@ -511,6 +522,25 @@ function replayImageGenerateTool(definition: ReplayToolDefinition): AgentTool {
         ],
         details: { generation_id: generationId, model_id: modelId, output_count: outputCount, replayed: false },
       };
+    },
+  };
+}
+
+/**
+ * Pages the runner-provided model directory in memory: no bridge, no network,
+ * no generation submission, and no credentials (the projection is made before
+ * the directory reaches replay). An absent or empty directory is an explicit
+ * empty page, mirroring the production store when no snapshot is published.
+ */
+function replayListImageModelsTool(definition: ReplayToolDefinition, state: ReplayState): AgentTool {
+  return {
+    ...replayToolBase(definition),
+    execute: async (_toolCallId, params, signal) => {
+      signal?.throwIfAborted();
+      const input = checkedInput(ListImageModelsInputValidator, params, 'list_image_models');
+      const page = imageModelPage(state.options.imageModels ?? [], input.offset);
+      const text = JSON.stringify(page);
+      return { content: [{ type: 'text' as const, text }], details: page };
     },
   };
 }

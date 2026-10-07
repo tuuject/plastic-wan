@@ -53,6 +53,27 @@ async function fixture() {
           },
         ],
       };
+      config.image = {
+        credentials: { openrouter: { jar: 'openrouter' } },
+        models: [
+          {
+            id: 'gpt-image-1',
+            name: 'GPT Image 1',
+            description: 'inspection-note',
+            provider: 'openrouter',
+            upstreamModel: 'openai/gpt-image-1',
+            credentialRef: 'openrouter',
+            providerTag: 'openai',
+            capabilities: {
+              imageInput: true,
+              maxInputImages: 2,
+              maxOutputs: 4,
+              aspectRatios: ['auto', '1:1'],
+              resolutionClasses: ['auto', 'high'],
+            },
+          },
+        ],
+      };
     }),
     'You are a concise test agent.',
     'Be brief.',
@@ -183,6 +204,9 @@ test('configuration and prompts are explicit read projections for both keys and 
           { alias: 'agent', header_names: ['x-private'] },
           { alias: 'vision', header_names: [] },
         ],
+        image: {
+          models: [{ id: 'gpt-image-1', name: 'GPT Image 1', description: 'inspection-note' }],
+        },
       },
     });
     const encoded = JSON.stringify(body);
@@ -198,6 +222,10 @@ test('configuration and prompts are explicit read projections for both keys and 
     ]) {
       expect(encoded).not.toContain(forbidden);
     }
+    // The description is the only new field on the read projection: the
+    // credentials map that binds it to a jar never crosses the inspection
+    // surface alongside it.
+    expect(encoded).not.toContain('"credentials"');
     const global = await f.server.handle(request('/api/prompts/global', { headers }));
     expect(global.status).toBe(200);
     expect(await global.json()).toMatchObject({

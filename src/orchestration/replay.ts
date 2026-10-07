@@ -7,6 +7,7 @@ import {
   type Model,
   type ModelThinkingLevel,
 } from '@earendil-works/pi-ai';
+import { modelDefinitionSchema, type PublicModel } from '@plasticwan/image-service';
 import { eq } from 'drizzle-orm';
 import { createExecuteTool } from '../capabilities/execute-tool.ts';
 import { createReadTool } from '../capabilities/read-tool.ts';
@@ -193,6 +194,23 @@ const PREFLIGHT_FIDELITY = {
   side_effects: 'synthetic',
 } as const;
 
+/** Validate the core contract without resolving secrets or calling a provider. */
+function publicImageModels(config: RawConfig): PublicModel[] {
+  const parsed = modelDefinitionSchema.array().safeParse(config.image?.models ?? []);
+  if (!parsed.success) {
+    return [];
+  }
+  return parsed.data.map((model) => ({
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    upstreamModel: model.upstreamModel,
+    providerTag: model.providerTag,
+    capabilities: model.capabilities,
+    ...(model.description === undefined ? {} : { description: model.description }),
+  }));
+}
+
 /** A fresh in-memory Pi loop. It never receives production tool executors or context writers. */
 export class ReplayRunner {
   readonly #options: ReplayOptions;
@@ -297,6 +315,7 @@ export class ReplayRunner {
     const config = snapshot.config;
     const imageLoader = this.#options.imageLoader;
     const capture = createReplayTools(registry, systemResources, {
+      imageModels: publicImageModels(config),
       ...(config.agent.send_max_text_length === undefined ? {} : { maxTextLength: config.agent.send_max_text_length }),
       disallowBlankLines: config.agent.send_disallow_blank_lines === true,
       replyMessageIds: new Set(scene.replyMessageIds),

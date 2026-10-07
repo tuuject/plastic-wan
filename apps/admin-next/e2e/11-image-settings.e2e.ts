@@ -108,6 +108,154 @@ test('selects an API model, fills capabilities, saves, and reloads existing conf
   await page.screenshot({ path: '/tmp/plasticwan-image-settings-desktop.png', fullPage: true });
 });
 
+test('keeps per-model description notes while typing, persists them on save, and restores them on reload', async ({
+  page,
+}) => {
+  const gptEndpoint = {
+    id: 'gpt-image-2',
+    providerTag: 'openai',
+    providerName: 'OpenAI',
+    capabilities,
+    unavailableReason: null,
+  };
+  let config: ImageConfigView = {
+    revision: 'notes',
+    enabled: true,
+    credentials: ['openrouter'],
+    credential_providers: [],
+    models: [
+      {
+        id: 'nano-banana',
+        name: 'Nano Banana 2',
+        provider: 'openrouter',
+        upstreamModel: 'google/gemini-3.1-flash-image',
+        credentialRef: 'openrouter',
+        providerTag: 'google-ai-studio',
+        capabilities,
+        description: 'Default model; realistic photos',
+      },
+    ],
+  };
+  const writes: Array<{ enabled: boolean; credentials: Record<string, string>; models: ImageConfigView['models'] }> =
+    [];
+  await page.route('**/api/image/**', async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path.endsWith('/config') && route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      writes.push(body);
+      config = { ...config, revision: `revision-${writes.length}`, models: body.models };
+      await route.fulfill({ json: { enabled: true, apply: { applied: ['image'], restart_required: [] } } });
+    } else if (path.endsWith('/config')) {
+      await route.fulfill({ json: config });
+    } else if (path.endsWith('/endpoints')) {
+      await route.fulfill({
+        json: { endpoints: [url.searchParams.get('model') === 'openai/gpt-image-2' ? gptEndpoint : endpoint] },
+      });
+    } else if (path.endsWith('/models')) {
+      await route.fulfill({
+        json: {
+          models: [
+            { id: 'google/gemini-3.1-flash-image', name: 'Nano Banana 2' },
+            { id: 'openai/gpt-image-2', name: 'GPT Image 2' },
+          ],
+        },
+      });
+    } else {
+      await route.fulfill({ json: { enabled: config.enabled, models: config.models } });
+    }
+  });
+  await page.goto(await adminUrl('/image-settings'));
+  const notes = page.getByLabel('Usage & prompt notes');
+  const banana = notes.first();
+  await expect(notes).toHaveCount(1);
+  await expect(banana).toHaveValue('Default model; realistic photos');
+  await expect(banana).toHaveAttribute('maxlength', '1000');
+
+  // Add a second model from the catalog and type its note keystroke by
+  // keystroke; the list item must not remount while typing (focus is kept).
+  await page.getByLabel('Search models').fill('gpt');
+  await page.getByLabel('OpenRouter image model').selectOption('openai/gpt-image-2');
+  await expect(page.getByLabel('Provider')).toHaveValue('openai');
+  await page.getByRole('button', { name: 'Add selected model' }).click();
+  await expect(notes).toHaveCount(2);
+  const gpt = notes.nth(1);
+  await gpt.click();
+  await gpt.pressSequentially('Stylized illustrations; bold colors');
+  await expect(gpt).toBeFocused();
+  await expect(gpt).toHaveValue('Stylized illustrations; bold colors');
+
+  // Extend the seeded note of the first model, still without losing focus.
+  await banana.press('End');
+  await banana.pressSequentially('; keep as default');
+  await expect(banana).toBeFocused();
+  await expect(banana).toHaveValue('Default model; realistic photos; keep as default');
+
+  await page.getByRole('button', { name: 'Save and apply' }).click();
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0]?.models).toEqual([
+    {
+      id: 'nano-banana',
+      name: 'Nano Banana 2',
+      provider: 'openrouter',
+      upstreamModel: 'google/gemini-3.1-flash-image',
+      credentialRef: 'openrouter',
+      providerTag: 'google-ai-studio',
+      capabilities,
+      description: 'Default model; realistic photos; keep as default',
+    },
+    {
+      id: 'gpt-image-2',
+      name: 'GPT Image 2',
+      provider: 'openrouter',
+      upstreamModel: 'openai/gpt-image-2',
+      credentialRef: 'openrouter',
+      providerTag: 'openai',
+      capabilities,
+      description: 'Stylized illustrations; bold colors',
+    },
+  ]);
+
+  // Reload: both notes come back from the saved configuration.
+  await page.reload();
+  await expect(notes).toHaveCount(2);
+  await expect(banana).toHaveValue('Default model; realistic photos; keep as default');
+  await expect(gpt).toHaveValue('Stylized illustrations; bold colors');
+
+  // Modify one note and clear the other; an empty note is omitted from the payload.
+  await banana.fill('Default model; realistic photos; keep as default; landscape preferred');
+  await gpt.fill('');
+  await page.getByRole('button', { name: 'Save and apply' }).click();
+  await expect.poll(() => writes.length).toBe(2);
+  expect(writes[1]?.models).toEqual([
+    {
+      id: 'nano-banana',
+      name: 'Nano Banana 2',
+      provider: 'openrouter',
+      upstreamModel: 'google/gemini-3.1-flash-image',
+      credentialRef: 'openrouter',
+      providerTag: 'google-ai-studio',
+      capabilities,
+      description: 'Default model; realistic photos; keep as default; landscape preferred',
+    },
+    {
+      id: 'gpt-image-2',
+      name: 'GPT Image 2',
+      provider: 'openrouter',
+      upstreamModel: 'openai/gpt-image-2',
+      credentialRef: 'openrouter',
+      providerTag: 'openai',
+      capabilities,
+    },
+  ]);
+
+  // No horizontal overflow with notes on a phone-sized viewport.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(banana).toBeVisible();
+  await expect(gpt).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test('catalog and endpoint failures are retryable without inventing a model or capabilities', async ({ page }) => {
   let catalogFailed = false;
   let endpointFailed = false;

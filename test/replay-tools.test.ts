@@ -1,19 +1,20 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import type { PublicModel } from '@plasticwan/image-service';
 import Type, { type TSchema } from 'typebox';
 import { expect, test } from 'vitest';
 import { SendInputSchema } from '../src/capabilities/send-tool.ts';
 import { AddMemoryInputSchema, DeleteMemoryInputSchema } from '../src/context/memory.ts';
 import {
   createReplayTools,
-  type ReplayTools,
   type ReplayToolDefinition,
   type ReplayToolRegistry,
+  type ReplayTools,
 } from '../src/orchestration/replay-tools.ts';
 import { BUNDLED_SYSTEM_RESOURCES_DIR, SystemResources } from '../src/platform/system-resources.ts';
 import { AlarmInputSchema, DeleteAlarmInputSchema, ListAlarmInputSchema } from '../src/plugins/alarm/alarm.ts';
-import { ImageGenerateInputSchema } from '../src/plugins/image/image.ts';
+import { ImageGenerateInputSchema, ListImageModelsInputSchema } from '../src/plugins/image/image.ts';
 
 const EMPTY_PARAMETERS = Type.Object({}, { additionalProperties: false });
 const ReadParameters = Type.Object(
@@ -62,6 +63,25 @@ function callCapability(
   return toolOf(replay.tools, 'execute').execute(toolCallId, { action: 'call', tool: name, input }) as Promise<
     AgentToolResult<unknown>
   >;
+}
+
+/** A credential-free PublicModel directory entry; `description` is optional. */
+function imageModel(overrides: Partial<PublicModel> = {}): PublicModel {
+  return {
+    id: 'model-a',
+    name: 'Model A',
+    provider: 'openrouter',
+    upstreamModel: 'org/model-a',
+    providerTag: 'image',
+    capabilities: {
+      imageInput: false,
+      maxInputImages: 0,
+      maxOutputs: 4,
+      aspectRatios: ['1:1', '16:9'],
+      resolutionClasses: ['auto', 'medium'],
+    },
+    ...overrides,
+  };
 }
 
 test('send synthesizes text, image, and sticker messages and preserves arguments', async () => {
@@ -205,6 +225,72 @@ test('image_generate synthesizes distinct generation ids without the image bridg
   expect(replay.dispatches).toEqual([
     { tool_call_id: 'image-1', tool_name: 'execute', mode: 'synthetic', capability: 'image_generate' },
     { tool_call_id: 'image-2', tool_name: 'execute', mode: 'synthetic', capability: 'image_generate' },
+  ]);
+});
+
+test('list_image_models pages the configured directory with descriptions and no credentials', async () => {
+  const models = [
+    imageModel({ id: 'line-art', name: 'Line Art', description: 'clean line art, good for stickers' }),
+    imageModel({ id: 'anime', name: 'Anime', description: 'anime style' }),
+    imageModel({ id: 'photo', name: 'Photo' }),
+    imageModel({ id: 'pixel', name: 'Pixel' }),
+    imageModel({ id: 'ink', name: 'Ink' }),
+  ];
+  const replay = createReplayTools(
+    replayInput({
+      tools: [definition('execute')],
+      capabilities: [definition('list_image_models', ListImageModelsInputSchema)],
+    }),
+    SystemResources.empty(),
+    { imageModels: models },
+  );
+  const first = envelopeOf(await callCapability(replay, 'models-1', 'list_image_models', {}));
+  expect(JSON.parse(first.text)).toEqual({ models: models.slice(0, 4), total: 5, next_offset: 4 });
+  expect(first.text).toContain('clean line art, good for stickers');
+  // The directory is credential-free by contract; the serialized page must never
+  // mention credentials, and nothing here can submit a generation or touch the bridge.
+  expect(first.text).not.toMatch(/credential/i);
+  const second = envelopeOf(await callCapability(replay, 'models-2', 'list_image_models', { offset: 4 }));
+  expect(JSON.parse(second.text)).toEqual({ models: models.slice(4), total: 5, next_offset: null });
+  await expect(callCapability(replay, 'models-3', 'list_image_models', { offset: 101 })).rejects.toThrow(
+    'execute.call input does not match the schema of list_image_models',
+  );
+  await expect(callCapability(replay, 'models-4', 'list_image_models', { offset: -1 })).rejects.toThrow(
+    'execute.call input does not match the schema of list_image_models',
+  );
+  expect(replay.outputs).toEqual([]);
+  expect(replay.dispatches).toEqual([
+    { tool_call_id: 'models-1', tool_name: 'execute', mode: 'synthetic', capability: 'list_image_models' },
+    { tool_call_id: 'models-2', tool_name: 'execute', mode: 'synthetic', capability: 'list_image_models' },
+    { tool_call_id: 'models-3', tool_name: 'execute', mode: 'synthetic', capability: 'list_image_models' },
+    { tool_call_id: 'models-4', tool_name: 'execute', mode: 'synthetic', capability: 'list_image_models' },
+  ]);
+});
+
+test('list_image_models without a catalog is an explicit empty page and stays blocked when unregistered', async () => {
+  const replay = createReplayTools(
+    replayInput({
+      tools: [definition('execute')],
+      capabilities: [definition('list_image_models', ListImageModelsInputSchema)],
+    }),
+    SystemResources.empty(),
+  );
+  const empty = envelopeOf(await callCapability(replay, 'models-1', 'list_image_models', {}));
+  expect(JSON.parse(empty.text)).toEqual({ models: [], total: 0, next_offset: null });
+  expect(replay.dispatches).toEqual([
+    { tool_call_id: 'models-1', tool_name: 'execute', mode: 'synthetic', capability: 'list_image_models' },
+  ]);
+  // A registry that never listed the capability still refuses it: the current
+  // registry is the only source of truth for what a scene may call.
+  const without = createReplayTools(
+    replayInput({ tools: [definition('execute')], capabilities: [] }),
+    SystemResources.empty(),
+  );
+  await expect(callCapability(without, 'models-2', 'list_image_models', {})).rejects.toThrow(
+    'execute has no capability named list_image_models',
+  );
+  expect(without.dispatches).toEqual([
+    { tool_call_id: 'models-2', tool_name: 'execute', mode: 'blocked', capability: 'list_image_models' },
   ]);
 });
 

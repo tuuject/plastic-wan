@@ -1256,6 +1256,11 @@ export interface ImageModelConfig {
   upstreamModel: string;
   credentialRef: string;
   providerTag: string;
+  /**
+   * Optional notes for the agent's model choice and prompt style (≤1000 chars).
+   * Never sent to the upstream image provider.
+   */
+  description?: string;
   capabilities: {
     imageInput: boolean;
     maxInputImages: number;
@@ -1405,7 +1410,7 @@ export function retryImageGeneration(id: string): Promise<{ generation: ImageGen
 }
 
 export function putImageConfig(
-  body: { enabled: boolean; credentials?: Record<string, string>; models?: unknown[] },
+  body: { enabled: boolean; credentials?: Record<string, string>; models?: ImageModelConfig[] },
   revision: string,
 ): Promise<{ enabled: boolean; apply: ModelApplySummary }> {
   return call('/image/config', {

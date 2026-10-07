@@ -343,7 +343,8 @@ Tool 只返回文本、JSON、XML 或 JavaScript 响应，拒绝压缩和二进�
 
 图片生成把「Agent 提交意图 → 后台生成 → 回执注入 → `send` 交付」拆成两个模型回合，全部经由既有机制，没有第二条投递路径：
 
-- **工具挂载**：`image_generate` 是内置插件（`src/plugins/image/`）经 `execute` 暴露的内部能力，不是 MCP，也不在四个 runtime 原语里。图片功能禁用（`image` 段缺失、被剥离或刚被删除）时该能力与 `image-generation` 技能都不会出现在 Agent 的工具注册表与 Skill 索引里——技能索引按 `skillVisibility` 过滤，模型不会看到「存在但不可用」的图片工具。
+- **工具挂载**：`image_generate`（写）与 `list_image_models`（只读）是内置插件（`src/plugins/image/`）经 `execute` 暴露的内部能力，不是 MCP，也不在四个 runtime 原语里。图片功能禁用（`image` 段缺失、被剥离或刚被删除）时这两个能力与 `image-generation` 技能都不会出现在 Agent 的工具注册表与 Skill 索引里——技能索引按 `skillVisibility` 过滤，模型不会看到「存在但不可用」的图片工具。
+- **模型目录**：提交前先读目录。`list_image_models` 只读分页返回当前配置的模型目录：输入 `{}` 或 `{offset}`（整数 0–100），每页最多 4 个模型，按 `execute` 的序列化字节预算缩小页长而不截断备注，返回 `models`/`total`/`next_offset`（翻完为 `null`）；单个模型元数据仍超限则明确报错。模型对象是 PublicModel：`id`、`name`、`description?`、`provider`、`upstreamModel`、`providerTag`、`capabilities`，**不含 `credentialRef` 或任何凭据**，调用不触发上游请求、不产生任何费用。`description` 是管理员对每个 providerTag/upstreamModel 路由的独立备注（最长 1000 字符，可空），注明适用画风/任务与提示词风格；它只作选型与写 prompt 的指导——系统不自动拼接备注原文、不把它作为独立字段发给生图上游、不能覆盖工具授权。模型按能力与备注选型：用户点名时优先遵循（能力兼容前提下），否则由模型自主选择，不按画风硬编码路由。只配置一个模型时 `image_generate.model_id` 可省略；多个模型必须显式传 `model_id`。目录变化、模型被拒或删除后重新读取目录，不静默 fallback 到别的模型。
 - **输入授权**：`input_image_refs` 只接受本 Conversation Context 授权的 `img_` 引用（经 `resolveMedia` 解析为真实 Media ID），任意 file ID、URL 或其它会话的引用在提交前就被拒绝并审计（`image_input_ref_unauthorized`）。
 - **提交与幂等**：bridge 以 actor `agent:<conversationId>` 向 image core 提交生成意图（idempotency key 绑定 Conversation），同一 Conversation 内同内容重复提交返回既有 generation（`replayed: true`），不重复计费；每个 Invocation 最多 3 次提交。工具立即返回 `generation_id`，图片此时还不存在。
 - **回执**：生成落定（成功、部分成功、失败、重启后由 `reconcile` 对账）时，bridge 经 long task 完成对应任务，Scheduler 把任务完成回执作为消息注入原 Conversation——回执是**不可信数据**（`generation_id`、status、输出清单），与 Alarm 回执同一通道。进程重启不影响未完成生成：启动时 reconcile 重建 core 状态，晚到的结果照常投递，不会重复回执。

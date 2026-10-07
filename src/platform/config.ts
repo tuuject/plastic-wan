@@ -259,6 +259,7 @@ export const ImageSectionSchema = Type.Object(
         {
           id: Type.String({ pattern: '^[a-zA-Z0-9_-]{1,80}$' }),
           name: Type.String({ minLength: 1, maxLength: 80 }),
+          description: Type.Optional(Type.String({ maxLength: 1000 })),
           provider: Type.String({ minLength: 1, maxLength: 40 }),
           upstreamModel: Type.String({ pattern: '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$' }),
           credentialRef: Type.String({ pattern: '^[a-zA-Z0-9_-]{1,80}$' }),

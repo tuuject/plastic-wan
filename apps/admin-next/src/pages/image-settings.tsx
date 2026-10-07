@@ -6,6 +6,7 @@ import { Panel } from '@/components/layout/panel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import {
   getImageConfig,
   getImageModelCatalog,
@@ -19,6 +20,15 @@ import { errorMessage } from '@/lib/errors';
 
 const selectClass =
   'h-10 w-full min-w-0 rounded-lg border border-input bg-background px-3 text-sm transition-colors focus-visible:outline-ring disabled:opacity-50';
+
+/** Model row in the form: `key` is a stable React key, `description` is normalized to a string. */
+type EditableModel = ImageModelConfig & { key: string; description: string };
+
+/** Strip the stable key and omit empty descriptions before persisting. */
+function toModelPayload(model: EditableModel): ImageModelConfig {
+  const { key: _key, description, ...rest } = model;
+  return description.trim() === '' ? rest : { ...rest, description };
+}
 
 export default function ImageSettingsPage() {
   const { t } = useTranslation();
@@ -76,9 +86,13 @@ function ImageSettingsForm({ initial }: { initial: ImageConfigView }) {
             : '',
     })),
   );
-  const [models, setModels] = useState(() => [
-    ...new Map(initial.models.map((model) => [JSON.stringify(model), model])).values(),
-  ]);
+  const [models, setModels] = useState(() =>
+    [...new Map(initial.models.map((model) => [JSON.stringify(model), model])).values()].map((model) => ({
+      ...model,
+      key: crypto.randomUUID(),
+      description: model.description ?? '',
+    })),
+  );
   const mergedDuplicates = initial.models.length - new Set(initial.models.map((model) => JSON.stringify(model))).size;
   const [search, setSearch] = useState('');
   const [modelId, setModelId] = useState('');
@@ -159,7 +173,7 @@ function ImageSettingsForm({ initial }: { initial: ImageConfigView }) {
                     .filter((entry) => entry.source !== '' && entry.secret.trim() === '')
                     .map((entry) => [entry.name, entry.source]),
                 ),
-                models,
+                models: models.map(toModelPayload),
               }
             : {}),
         },
@@ -185,6 +199,7 @@ function ImageSettingsForm({ initial }: { initial: ImageConfigView }) {
     setModels((current) => [
       ...current,
       {
+        key: crypto.randomUUID(),
         id: selectedEndpoint.id,
         name: selectedModel.name,
         provider: 'openrouter',
@@ -192,6 +207,7 @@ function ImageSettingsForm({ initial }: { initial: ImageConfigView }) {
         credentialRef: selectedCredential,
         providerTag: selectedEndpoint.providerTag,
         capabilities: selectedEndpoint.capabilities,
+        description: '',
       },
     ]);
     setModelId('');
@@ -461,7 +477,7 @@ function ImageSettingsForm({ initial }: { initial: ImageConfigView }) {
             ) : (
               <ul className="space-y-5">
                 {models.map((model) => (
-                  <li key={JSON.stringify(model)} className="space-y-2">
+                  <li key={model.key} className="space-y-2">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 space-y-1">
                         <p className="text-sm font-medium">{model.name}</p>
@@ -478,6 +494,26 @@ function ImageSettingsForm({ initial }: { initial: ImageConfigView }) {
                       >
                         {t('image.settings.remove')}
                       </Button>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor={`model-description-${model.key}`}>
+                        {t('image.settings.modelDescriptionLabel')}
+                      </Label>
+                      <Textarea
+                        id={`model-description-${model.key}`}
+                        rows={2}
+                        maxLength={1000}
+                        value={model.description}
+                        placeholder={t('image.settings.modelDescriptionPlaceholder')}
+                        onChange={(event) =>
+                          setModels((current) =>
+                            current.map((item) =>
+                              item.key === model.key ? { ...item, description: event.target.value } : item,
+                            ),
+                          )
+                        }
+                      />
+                      <p className="text-muted-foreground text-xs">{t('image.settings.modelDescriptionHint')}</p>
                     </div>
                     <ModelCapabilities capabilities={model.capabilities} />
                   </li>

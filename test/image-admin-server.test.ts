@@ -154,6 +154,7 @@ test('image config enable request answers JSON through the admin dispatch, not a
     {
       id: 'gpt-image-1',
       name: 'GPT Image',
+      description: '风格偏写实，适合产品图与照片修复',
       provider: 'openrouter',
       upstreamModel: 'openai/gpt-image-1',
       credentialRef: 'openrouter',
@@ -207,6 +208,32 @@ test('image config enable request answers JSON through the admin dispatch, not a
   expect((await loadConfig(app.configPath)).fileConfig.image?.credentials).toEqual({
     openrouter: { jar: 'openrouter' },
   });
+
+  // The note rides the file roundtrip: view reads the section back from disk.
+  const viewAfterUpdate = await app.server.handle(
+    new Request('http://admin.test/api/image/config', { headers: { cookie: app.cookie } }),
+  );
+  expect(((await viewAfterUpdate.json()) as { models: typeof models }).models).toEqual([
+    { ...models[0], name: 'Renamed' },
+  ]);
+
+  // A bad note is rejected before anything is written: 400 and the file stays.
+  const revisionAfterUpdate = await app.revision();
+  const beforeBadNote = await readFile(app.configPath, 'utf8');
+  for (const bad of [
+    { ...models[0], description: 'x'.repeat(1001) },
+    { ...models[0], description: 42 },
+  ]) {
+    const rejected = await app.server.handle(
+      new Request('http://admin.test/api/image/config', {
+        method: 'PUT',
+        headers: { cookie: app.cookie, 'if-match': revisionAfterUpdate },
+        body: JSON.stringify({ enabled: true, credentials: {}, models: [bad] }),
+      }),
+    );
+    expect(rejected.status).toBe(400);
+    expect(await readFile(app.configPath, 'utf8')).toBe(beforeBadNote);
+  }
 
   const beforeConflict = await readFile(app.configPath, 'utf8');
   const stale = await app.server.handle(

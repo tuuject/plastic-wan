@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { capability } from '../../capabilities/execute-tool.ts';
 import { definePlugin } from '../plugin.ts';
-import { createImageGenerateTool } from './image.ts';
+import { createImageGenerateTool, createListImageModelsTool } from './image.ts';
 
 /**
  * Image generation. Contributes nothing unless the host wired an image bridge
@@ -16,6 +16,6 @@ export default definePlugin({
     if (scope.image === undefined || !scope.image.enabled()) {
       return [];
     }
-    return [capability(createImageGenerateTool(scope), true)];
+    return [capability(createImageGenerateTool(scope), true), capability(createListImageModelsTool(scope), false)];
   },
 });

@@ -77,6 +77,8 @@
       {
         "id": "gpt-image-1",
         "name": "GPT Image",
+        // 可选：该模型路由的用途/画风与提示词风格备注（最长 1000 字符），只供 Agent 选型参考，不发给生图上游。
+        "description": "示例偏好：日常插画优先选用；用自然语言描述主体、构图和光线",
         "provider": "openrouter",
         "upstreamModel": "openai/gpt-image-1",
         "credentialRef": "openrouter",

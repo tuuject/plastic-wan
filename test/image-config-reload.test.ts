@@ -6,14 +6,13 @@ import {
   type GenerationInput,
   generationCreateSchema,
   imageSchema,
-  type ModelDefinition,
 } from '@plasticwan/image-service';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import sharp from 'sharp';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import { createImageService, type ImageService } from '../src/image/service.ts';
-import { loadConfig } from '../src/platform/config.ts';
+import { type FileConfig, loadConfig } from '../src/platform/config.ts';
 import { ConfigReloader } from '../src/platform/config-reload.ts';
 import { keyJarPath } from '../src/platform/key-jar.ts';
 import { AgentModelSwitcher } from '../src/platform/model-switch.ts';
@@ -53,8 +52,11 @@ afterEach(async () => {
   }
 });
 
-const imageModels = (overrides: Partial<ModelDefinition> = {}): ModelDefinition[] => [
-  {
+type ConfigImageModel = NonNullable<FileConfig['image']>['models'][number];
+type ModelOverrides = Omit<Partial<ConfigImageModel>, 'description'> & { description?: string };
+const imageModels = (overrides: ModelOverrides = {}): ConfigImageModel[] => {
+  const { description, ...rest } = overrides;
+  const model: ConfigImageModel = {
     id: 'gpt-image-1',
     name: 'GPT Image 1',
     provider: 'openrouter',
@@ -68,9 +70,13 @@ const imageModels = (overrides: Partial<ModelDefinition> = {}): ModelDefinition[
       aspectRatios: ['auto', '1:1'],
       resolutionClasses: ['auto', 'high'],
     },
-    ...overrides,
-  },
-];
+    ...rest,
+  };
+  if (description !== undefined) {
+    model.description = description;
+  }
+  return [model];
+};
 
 type ProviderCall = { headers: Record<string, string>; resolve?: () => void };
 
@@ -126,7 +132,7 @@ async function rotateJarEntry(configPath: string, name: string, value: string): 
 
 async function rewriteImageSection(
   configPath: string,
-  image: { credentials: Record<string, unknown>; models: ModelDefinition[] } | undefined,
+  image: { credentials: Record<string, unknown>; models: ConfigImageModel[] } | undefined,
 ): Promise<void> {
   const { readConfigRevision, writeConfigEdits } = await import('../src/platform/config-file.ts');
   const revision = await readConfigRevision(configPath);
@@ -227,6 +233,32 @@ test('an invalid image candidate is rejected and the previously published snapsh
   expect(second.ok).toBe(false);
   expect(second.ok ? null : second.code).toBe('config_invalid');
   expect(service.core.config.current()?.models[0]?.provider).toBe('openrouter');
+});
+
+test('a description-only edit republishes with a new snapshot version and never calls the provider', async () => {
+  const calls: ProviderCall[] = [];
+  const { service, reloader, configPath } = await fixture(fakeProviderImageSink(calls));
+
+  const first = await reloader.reloadFromFile();
+  expect(first.ok).toBe(true);
+  const before = service.core.config.current();
+  expect(before?.models[0]?.description).toBeUndefined();
+
+  // Only the note changes; credentials and every other model field stay put.
+  await rewriteImageSection(configPath, {
+    credentials: { openrouter: { jar: 'openrouter' } },
+    models: imageModels({ description: '风格偏日系插画，适合角色立绘' }),
+  });
+  const second = await reloader.reloadFromFile();
+  expect(second.ok).toBe(true);
+  const after = service.core.config.current();
+  expect(after?.models[0]?.description).toBe('风格偏日系插画，适合角色立绘');
+  // The snapshot identity covers the model metadata, so the note alone bumps
+  // the version even though the config file's own hash changed only in text.
+  expect(after?.version).not.toBe(before?.version);
+
+  // Preparing and publishing a snapshot performs no provider traffic.
+  expect(calls).toHaveLength(0);
 });
 
 test('a same-name SecretRef rotation is adopted on the next reload without a file change', async () => {

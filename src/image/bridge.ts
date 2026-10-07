@@ -326,9 +326,8 @@ export function createImageBridge(options: ImageBridgeOptions) {
     assetContent,
     reconcile,
     stop,
-    /** For tests and admin views. */
-    modelList: (): readonly { readonly id: string; readonly name: string }[] =>
-      (enabled() ? core.config.current().models : []).map((model) => ({ id: model.id, name: model.name })),
+    /** The live model directory shared by Agent discovery and Admin views; no credentials. */
+    modelList: () => core.config.publicModels(),
   };
 }
 
