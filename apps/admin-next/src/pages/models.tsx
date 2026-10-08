@@ -1,9 +1,10 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Eye, Lightbulb, Pencil, Trash2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import {
+  type BadgeSemantic,
   type ColumnSpec,
   ConfirmDialog,
   FLUSH_TABLE_CLASS,
@@ -25,6 +26,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import {
   deleteProvider,
   deleteProviderModel,
+  type HealthCheckResult,
+  type HealthCheckStatus,
+  healthCheckProviderModel,
   type ProviderApi,
   type ProviderModelConfig,
   type ProviderView,
@@ -34,7 +38,7 @@ import {
   switchVisionModel,
 } from '@/lib/api.ts';
 import { errorMessage } from '@/lib/errors.ts';
-import { formatNumber } from '@/lib/format.ts';
+import { formatDuration, formatNumber } from '@/lib/format.ts';
 import {
   isConfigConflict,
   isImageCapable,
@@ -80,6 +84,12 @@ function ProviderBadges({
   );
 }
 
+const HEALTH_TONES: Record<HealthCheckStatus, BadgeSemantic> = {
+  ok: 'success',
+  unexpected_response: 'warning',
+  error: 'danger',
+};
+
 export default function ModelsPage(): React.ReactElement {
   const { t } = useTranslation();
   const write = useProviderWrite();
@@ -97,10 +107,97 @@ export default function ModelsPage(): React.ReactElement {
   } | null>(null);
   const [deletingModel, setDeletingModel] = useState<{ readonly alias: string; readonly model: string } | null>(null);
   const [deletingProvider, setDeletingProvider] = useState<ProviderView | null>(null);
+  // Health-check probes: page-local state, never persisted. The key is the same
+  // `${alias}/${model.id}` row key, so a selection survives provider switches.
+  const [healthSelected, setHealthSelected] = useState<ReadonlySet<string>>(new Set());
+  const [health, setHealth] = useState<Record<string, HealthCheckResult | 'checking'>>({});
+  const healthBatch = useRef<AbortController | null>(null);
+  // Leaving the page must not keep charging for a queued batch in the background.
+  useEffect(() => () => healthBatch.current?.abort(), []);
 
   const view = providers.data;
   const revision = view?.revision ?? '';
   const restartPaths = useMemo(() => view?.restart_required ?? [], [view]);
+
+  // Selection keys resolve back to provider/model through the live model list,
+  // so model ids containing `/` never need splitting.
+  const healthRefs = useMemo(() => {
+    const map = new Map<string, { readonly provider: string; readonly model: string }>();
+    for (const provider of view?.providers ?? []) {
+      for (const model of provider.models) {
+        map.set(`${provider.alias}/${model.id}`, { provider: provider.alias, model: model.id });
+      }
+    }
+    return map;
+  }, [view]);
+  const runnableSelected = useMemo(
+    () => [...healthSelected].filter((key) => healthRefs.has(key)),
+    [healthSelected, healthRefs],
+  );
+  const running = Object.values(health).some((entry) => entry === 'checking');
+
+  /**
+   * Runs the probe for each key, at most three in flight. Results land in
+   * `health` as they finish; thrown HTTP/validation errors become per-item
+   * error results so one failure never blanks the batch.
+   */
+  const runHealthChecks = async (keys: readonly string[]): Promise<void> => {
+    if (healthBatch.current !== null) {
+      return;
+    }
+    const controller = new AbortController();
+    healthBatch.current = controller;
+    setHealth((previous) => {
+      const next: Record<string, HealthCheckResult | 'checking'> = { ...previous };
+      for (const key of keys) {
+        next[key] = 'checking';
+      }
+      return next;
+    });
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (!controller.signal.aborted && cursor < keys.length) {
+        const key = keys[cursor];
+        cursor += 1;
+        if (key === undefined) {
+          continue;
+        }
+        const ref = healthRefs.get(key);
+        if (ref === undefined) {
+          continue;
+        }
+        const started = performance.now();
+        try {
+          const result = await healthCheckProviderModel(ref, controller.signal);
+          if (controller.signal.aborted) {
+            return;
+          }
+          setHealth((previous) => ({ ...previous, [key]: result }));
+        } catch (error) {
+          if (controller.signal.aborted) {
+            return;
+          }
+          setHealth((previous) => ({
+            ...previous,
+            [key]: {
+              provider: ref.provider,
+              model: ref.model,
+              status: 'error',
+              ttfb_ms: null,
+              duration_ms: Math.round(performance.now() - started),
+              response_text: '',
+              error: errorMessage(error),
+            },
+          }));
+        }
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: Math.min(3, keys.length) }, () => worker()));
+    } finally {
+      healthBatch.current = null;
+    }
+  };
 
   const switchAgent = useMutation({
     mutationFn: ({ alias, model }: { readonly alias: string; readonly model: string }) =>
@@ -224,7 +321,37 @@ export default function ModelsPage(): React.ReactElement {
   const rows: readonly ModelRow[] =
     selected === null ? [] : selected.models.map((model) => ({ alias: selected.alias, api: selected.api, model }));
 
+  const rowKey = (row: ModelRow): string => `${row.alias}/${row.model.id}`;
+  const allSelected = rows.length > 0 && rows.every((row) => healthSelected.has(rowKey(row)));
+
   const columns: readonly ColumnSpec<ModelRow>[] = [
+    {
+      key: 'select',
+      title: '',
+      render: (row) => {
+        const key = rowKey(row);
+        return (
+          <input
+            type="checkbox"
+            className="size-4 rounded border-input"
+            aria-label={t('models.models.page.selectForHealthAria', { model: row.model.id })}
+            checked={healthSelected.has(key)}
+            disabled={running}
+            onChange={() => {
+              setHealthSelected((previous) => {
+                const next = new Set(previous);
+                if (next.has(key)) {
+                  next.delete(key);
+                } else {
+                  next.add(key);
+                }
+                return next;
+              });
+            }}
+          />
+        );
+      },
+    },
     {
       key: 'model',
       title: t('models.models.page.colModel'),
@@ -291,6 +418,36 @@ export default function ModelsPage(): React.ReactElement {
       },
     },
     {
+      key: 'health',
+      title: t('models.models.page.colHealth'),
+      render: (row) => {
+        const entry = health[rowKey(row)];
+        if (entry === undefined) {
+          return <span className="text-muted-foreground">—</span>;
+        }
+        if (entry === 'checking') {
+          return <ToneBadge tone="info">{t('models.models.page.checking')}</ToneBadge>;
+        }
+        const label =
+          entry.status === 'ok'
+            ? t('models.models.page.healthOk')
+            : entry.status === 'unexpected_response'
+              ? t('models.models.page.healthUnexpected')
+              : t('models.models.page.healthError');
+        return (
+          <div className="space-y-1">
+            <ToneBadge tone={HEALTH_TONES[entry.status]}>{label}</ToneBadge>
+            <p className="text-muted-foreground text-xs tabular-nums">
+              {t('models.models.page.healthTiming', {
+                ttfb: entry.ttfb_ms === null ? t('models.models.page.ttfbUnavailable') : formatDuration(entry.ttfb_ms),
+                duration: formatDuration(entry.duration_ms),
+              })}
+            </p>
+          </div>
+        );
+      },
+    },
+    {
       key: 'actions',
       title: t('models.models.page.colActions'),
       align: 'right',
@@ -315,6 +472,16 @@ export default function ModelsPage(): React.ReactElement {
               onClick={() => switchVision.mutate({ alias: row.alias, model: row.model.id })}
             >
               {t('models.models.page.setAsVision')}
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              disabled={running}
+              aria-label={t('models.models.page.checkHealthAria', { model: row.model.id })}
+              onClick={() => void runHealthChecks([rowKey(row)])}
+            >
+              {t('models.models.page.checkHealth')}
             </Button>
             <Button
               type="button"
@@ -479,17 +646,83 @@ export default function ModelsPage(): React.ReactElement {
                     >
                       {t('models.models.page.addById')}
                     </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={runnableSelected.length === 0 || running}
+                      onClick={() => void runHealthChecks(runnableSelected)}
+                    >
+                      {t('models.models.page.checkSelected', { count: runnableSelected.length })}
+                    </Button>
                   </div>
                 }
               >
                 {/* Flush: the panel is the frame, so the table only keeps the
                     rule under the header. */}
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-6 pb-3">
+                  <p className="text-muted-foreground min-w-0 text-xs">{t('models.models.page.healthCheckNote')}</p>
+                  <label className="text-muted-foreground flex shrink-0 cursor-pointer items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      className="size-4 rounded border-input"
+                      ref={(element) => {
+                        if (element !== null) {
+                          element.indeterminate = !allSelected && rows.some((row) => healthSelected.has(rowKey(row)));
+                        }
+                      }}
+                      checked={allSelected}
+                      disabled={running || rows.length === 0}
+                      onChange={() => {
+                        setHealthSelected((previous) => {
+                          const next = new Set(previous);
+                          for (const row of rows) {
+                            const key = rowKey(row);
+                            if (allSelected) {
+                              next.delete(key);
+                            } else {
+                              next.add(key);
+                            }
+                          }
+                          return next;
+                        });
+                      }}
+                    />
+                    {t('models.models.page.selectAllForHealth')}
+                  </label>
+                </div>
                 <TableShell
                   columns={columns}
                   data={rows}
-                  rowKey={(row) => `${row.alias}/${row.model.id}`}
+                  rowKey={rowKey}
                   className={FLUSH_TABLE_CLASS}
                   emptyText={t('models.models.page.emptyModels')}
+                  expandedRender={(row) => {
+                    const entry = health[rowKey(row)];
+                    if (entry === undefined || entry === 'checking') {
+                      return null;
+                    }
+                    const error = entry.error !== null && entry.error.length > 0 ? entry.error : null;
+                    const text = entry.response_text.length > 0 ? entry.response_text : null;
+                    if (error === null && text === null) {
+                      return null;
+                    }
+                    return (
+                      <div className="max-h-64 max-w-3xl space-y-2 overflow-auto whitespace-normal">
+                        {error === null ? null : <p className="text-destructive text-sm break-words">{error}</p>}
+                        {text === null ? null : (
+                          <p className="text-muted-foreground text-sm break-words whitespace-pre-wrap">{text}</p>
+                        )}
+                      </div>
+                    );
+                  }}
+                  isExpandable={(row) => {
+                    const entry = health[rowKey(row)];
+                    if (entry === undefined || entry === 'checking') {
+                      return false;
+                    }
+                    return (entry.error !== null && entry.error.length > 0) || entry.response_text.length > 0;
+                  }}
                 />
               </Panel>
             </>

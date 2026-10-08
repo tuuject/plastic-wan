@@ -7,6 +7,7 @@ import {
   type OpenAICompletionsCompat,
   type Provider,
   type ProviderAuth,
+  type ProviderHeaders,
   type ProviderStreams,
 } from '@earendil-works/pi-ai';
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
@@ -49,9 +50,9 @@ export interface PreviousRegistry {
  * Builds one generation's model registry: one provider object per configured
  * alias, plus the vision model the configuration points at.
  *
- * A provider whose connection fields are unchanged keeps the object the process
- * already has, so credentials are never resolved twice — a `command` SecretRef
- * runs a process, and only an explicitly requested reload of a new or changed
+ * A provider whose connection fields are unchanged keeps its resolved connection
+ * and auth, so credentials are never resolved twice — a `command` SecretRef runs
+ * a process, and only an explicitly requested reload of a new or changed
  * connection may have that side effect. `previous` is `null` at startup, which
  * builds every provider from the file.
  *
@@ -109,7 +110,7 @@ export async function buildModelRegistry(
         headers,
         auth: fixedAuth(alias, apiKey),
         api: adapter(),
-        models: providerModels(alias, configured.api, baseUrl, configured.models),
+        models: providerModels(alias, configured.api, baseUrl, configured.models, headers),
       }),
     );
   }
@@ -188,6 +189,7 @@ function providerModelsFor(alias: string, configured: ProviderFileConfig, existi
       configured.api,
       existing.baseUrl ?? configured.base_url.replace(/\/+$/, ''),
       configured.models,
+      existing.headers,
     );
   }
   const source = findBuiltinProvider(configured.provider);
@@ -199,14 +201,33 @@ function providerModelsFor(alias: string, configured: ProviderFileConfig, existi
   if (baseUrl === undefined) {
     throw new Error(`Built-in provider ${configured.provider} has no base URL`);
   }
-  return providerModels(alias, api, baseUrl, configured.models);
+  return providerModels(alias, api, baseUrl, configured.models, existing.headers);
 }
 
 /**
  * The configured model list of one provider. Builtin and custom providers share
  * this mapping: the only difference is where `api` comes from.
+ *
+ * Pi's completion path reads connection headers from the model rather than the
+ * provider, so every model must carry them. Model headers accept strings only;
+ * null provider-header entries are omitted.
  */
-function providerModels(alias: string, api: Api, baseUrl: string, models: readonly ModelFileConfig[]): Model<Api>[] {
+function providerModels(
+  alias: string,
+  api: Api,
+  baseUrl: string,
+  models: readonly ModelFileConfig[],
+  headers?: ProviderHeaders,
+): Model<Api>[] {
+  let modelHeaders: Record<string, string> | undefined;
+  if (headers !== undefined) {
+    modelHeaders = {};
+    for (const [name, value] of Object.entries(headers)) {
+      if (value !== null) {
+        modelHeaders[name] = value;
+      }
+    }
+  }
   return models.map((model) => {
     const built: Model<Api> = {
       id: model.id,
@@ -214,6 +235,7 @@ function providerModels(alias: string, api: Api, baseUrl: string, models: readon
       api,
       provider: alias,
       baseUrl,
+      ...(modelHeaders !== undefined && Object.keys(modelHeaders).length > 0 ? { headers: modelHeaders } : {}),
       reasoning: model.reasoning,
       input: [...model.input],
       contextWindow: model.context_window,
@@ -271,7 +293,7 @@ function aliasBuiltinProvider(
   baseUrl: string,
   configuredModels: readonly ModelFileConfig[],
 ): Provider {
-  const aliasedModels = providerModels(alias, api, baseUrl, configuredModels);
+  const aliasedModels = providerModels(alias, api, baseUrl, configuredModels, source.headers);
   const fetchDeferred = source.fetchDeferred?.bind(source);
   const cancelDeferred = source.cancelDeferred?.bind(source);
   return {

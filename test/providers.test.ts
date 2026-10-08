@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, test } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Api, type Context, getSupportedThinkingLevels, type Model } from '@earendil-works/pi-ai';
+import { afterEach, describe, expect, test } from 'vitest';
 import { findBuiltinProvider } from '../src/platform/builtin-providers.ts';
 import { type FileConfig, type LoadedConfig, loadConfig, type RawConfig } from '../src/platform/config.ts';
 import { keyJarPath } from '../src/platform/key-jar.ts';
@@ -335,5 +335,45 @@ describe('model registry', () => {
       baseUrl: 'https://relay.example.test/v1',
       compat: { requiresReasoningContentOnAssistantMessages: true },
     });
+  });
+
+  test('carries resolved custom headers onto every registered model', async () => {
+    const loaded = await loadFixture((draft) => {
+      const provider = draft.providers.agent;
+      if (provider?.kind !== 'custom') {
+        throw new Error('Expected custom agent provider fixture');
+      }
+      provider.headers = { 'x-route': { jar: 'custom' } };
+    });
+    const registry = await buildModelRegistry(loaded.config, null, new SecretStore(keyJarPath(loaded.configPath)));
+    // Pi's request path only reads headers from the model, so the resolved
+    // connection headers must travel with every registered model.
+    expect(registry.models.getModels('agent').map((model) => model.headers)).toEqual([{ 'x-route': 'custom-secret' }]);
+  });
+
+  test('keeps resolved custom headers on a same-connection rebuild without re-resolving secrets', async () => {
+    const loaded = await loadFixture((draft) => {
+      const provider = draft.providers.agent;
+      if (provider?.kind !== 'custom') {
+        throw new Error('Expected custom agent provider fixture');
+      }
+      provider.headers = { 'x-route': { jar: 'custom' } };
+    });
+    const secrets = new CountingSecrets(keyJarPath(loaded.configPath));
+    const registry = await buildModelRegistry(loaded.config, null, secrets);
+    const resolvedAtStartup = secrets.resolutions;
+    expect(resolvedAtStartup).toBeGreaterThan(0);
+
+    // Same alias, same connection: the provider's auth and resolved headers
+    // survive the rebuilt model list without resolving SecretRefs again.
+    const rebuilt = await buildModelRegistry(
+      loaded.config,
+      { file: loaded.fileConfig, models: registry.models },
+      secrets,
+    );
+    expect(secrets.resolutions).toBe(resolvedAtStartup);
+    const after = rebuilt.models.getProvider('agent');
+    expect(after?.auth).toBe(registry.models.getProvider('agent')?.auth);
+    expect(rebuilt.models.getModels('agent').map((model) => model.headers)).toEqual([{ 'x-route': 'custom-secret' }]);
   });
 });

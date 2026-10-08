@@ -103,7 +103,7 @@ pnpm test test/prompt-template.test.ts test/prompt-markdown.test.ts test/tui-con
 | `admin.test.ts` | Admin 首次设置、登录、登录锁定（不受 `X-Forwarded-For` 与用户名轮换影响、并发失败计数、过期后重新计数）、请求体按字节流式限长、HTTPS 下 Cookie 带 `Secure`、Session、只读审计 API（含 Conversation Context 列表/详情与写入尝试被拒）、静态托管 |
 | `admin-passkeys.test.ts` | 显式 public origin 开关、真实 P-256/CBOR WebAuthn 注册/登录、Origin/RP/UV/用户句柄与挑战绑定、过期/复用/伪造拒绝、多 key 与密码守卫、异步撤权与计数器竞态、恢复清理、旧 RP 安全、迁移保留用户/Session/外键 |
 | `admin-recovery.test.ts` | 内置 `admin-reset` 参数边界、非 TTY 拒绝、stdin 字节/超时/不泄露、运行中锁拒绝、未知用户不改写、无密码账号恢复/清 key/撤 Session、保留 API key、不重开 setup、锁释放；真实 CLI 子进程与临时数据库 |
-| `admin-providers.test.ts` | Provider/模型管理、SecretRef 只写不读、修订冲突、全局模型端点保留 Chat 覆盖、阻止删除 Chat 引用（含待重启移除的运行中 Chat）的 Provider/模型且不落盘 |
+| `admin-providers.test.ts` | Provider/模型管理、SecretRef 只写不读、修订冲突、全局模型端点保留 Chat 覆盖、阻止删除 Chat 引用（含待重启移除的运行中 Chat）的 Provider/模型且不落盘；模型健康检查的固定最小请求、真实本地 SSE、TTFB 与总耗时分离、无 hook 返回 null、响应分类与脱敏、权限/Origin/未应用配置拒绝、零重试、超时/取消/并发上限和诊断审计、不切换当前模型 |
 | `admin-chats.test.ts` | Chat 管理鉴权与 Origin、字符串 ID 与安全整数边界、Topic/模型严格校验、模型覆盖必须显式带 thinking、revision 先于 body 解析与并发写入保护、JSONC 注释及未管理字段保留、新增 Chat 热应用而删除/Topic 待重启与历史保留、模型热应用/恢复继承、迁移 ID、保存后应用失败的状态与脱敏审计 |
 | `model-switch.test.ts` | 可切换模型仅列 text 能力、当前模型取配置值、`option()` 只校验不应用（未知 provider/model 与 image-only 拒绝）、`current()` 跟随 `store.publish` 变化 |
 | `bot-commands.test.ts` | 命令解析与 mention 匹配、`setMyCommands` 注册一致性、`/pause` 中止与阻断、`/resume` 恢复、`/status` 用量与 Context 行口径、`/model` 分页与切换（写配置文件并 reload）、管理员鉴权与匿名拒绝、`/whoami` 回显发送者 ID 且不限管理员、`/allowlist` 仅管理员且在未允许 Chat 由 ingestion 放行并热应用、`/ignoreme` 与 `/unignoreme` 解析/身份校验且不越过 Chat/Topic 白名单、命令只审计不入库 |
@@ -201,6 +201,7 @@ node src/cli.ts serve --config dev-data/config.jsonc
 pnpm run admin:build        # 前置：E2E 驱动已构建的 dist（真实静态托管）
 pnpm --filter plasticwan-admin-next exec playwright install chromium   # 首次运行前安装 Chromium（Linux CI 用 --with-deps）
 pnpm run admin:test:e2e     # Playwright 套件（apps/admin-next/e2e/**/*.e2e.ts）
+pnpm run admin:test:e2e 00-auth 08-models 16-model-health  # 模型管理与健康检查回归
 ```
 
 Passkey 启用模式（PowerShell）：
@@ -249,6 +250,7 @@ Remove-Item Env:E2E_PASSKEYS
      Alarm 取消成功与 409 冲突路径（`alarm_not_pending` + 列表刷新到新状态）、
      Overview 的 Cancel ongoing 与睡眠态 Wake now；Models 页并发编辑（模型编辑输掉 revision 竞争后关闭而不覆盖、
      连接卡片的旧草稿不能删掉期间新增的 header、header 名可逐键输入不丢焦点）。
+     `16-model-health.e2e.ts` 通过本地 SSE 上游验证单项和跨 Provider 批量健康检查、检查中禁用重复操作、三项并发上限、先完成项与在途项同时可见、SPA 离页取消在途与排队检查、刷新清空页内结果、配置和当前模型不变、密钥不进页面及窄屏布局。
      Developer 页默认关闭、开关持久化、应用失败与恢复、取消/确认清除、清除前后其它审计不变，以及移动端暗色布局。
   6. 只读保证：浏览全部审计页面时记录网络请求，断言没有任何 POST/PUT/DELETE 打到
      `/api/**`。

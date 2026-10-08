@@ -73,6 +73,7 @@ import {
   parseUpdateMemoryBody,
   updateMemory,
 } from './memory-admin.ts';
+import { checkModelHealth, parseHealthCheckBody } from './model-health.ts';
 import { cancelOngoingSessions } from './operations.ts';
 import { AdminPasskeys } from './passkeys.ts';
 import {
@@ -247,6 +248,9 @@ export class AdminServer {
   readonly #readInvocationMedia: ReturnType<typeof createInvocationMediaReader> | undefined;
   readonly #staticDir: string;
   readonly #memoryWarningDays: number;
+  readonly #healthAbort = new AbortController();
+  readonly #healthSignal: AbortSignal;
+  readonly #healthChecks = new Set<Promise<unknown>>();
   #server: ServerType | undefined;
   #payloadClear: Promise<number> | undefined;
 
@@ -276,6 +280,10 @@ export class AdminServer {
     this.#configReloader = options.configReloader;
     this.#secrets = options.secrets;
     this.#requestRestart = options.requestRestart;
+    this.#healthSignal = AbortSignal.any([
+      this.#healthAbort.signal,
+      ...(options.shutdownSignal === undefined ? [] : [options.shutdownSignal]),
+    ]);
     this.#replayInvocation = options.replayInvocation;
     this.#replayPreflight = options.replayPreflight;
     this.#invocationPrompts = options.invocationPrompts;
@@ -337,6 +345,8 @@ export class AdminServer {
   async stop(): Promise<void> {
     const server = this.#server;
     this.#server = undefined;
+    this.#healthAbort.abort(new Error('Admin server is stopping'));
+    await Promise.allSettled(this.#healthChecks);
     await this.#payloadClear?.catch(() => undefined);
     if (server === undefined) {
       return;
@@ -954,6 +964,31 @@ export class AdminServer {
     const second = parts[1];
     const third = parts[2];
     const fourth = parts[3];
+    if (parts.length === 2 && second === 'health-check' && request.method !== 'PUT' && request.method !== 'DELETE') {
+      if (request.method !== 'POST') {
+        return json({ error: 'method_not_allowed', message: 'Use POST to check model health' }, 405);
+      }
+      const body = parseHealthCheckBody(await readJsonObject(request));
+      let context: ProviderWriteContext;
+      try {
+        context = await this.#providerContext(reloader);
+      } catch (error) {
+        return json({ error: 'config_invalid', message: this.#redact(error) }, 422);
+      }
+      if (this.#healthSignal.aborted) {
+        return json({ error: 'server_stopping', message: 'Admin server is stopping' }, 503);
+      }
+      if (this.#healthChecks.size >= 3) {
+        return json({ error: 'health_check_busy', message: 'Three model health checks are already running' }, 429);
+      }
+      const check = checkModelHealth(this.#store, context, body, AbortSignal.any([request.signal, this.#healthSignal]));
+      this.#healthChecks.add(check);
+      try {
+        return json(await check);
+      } finally {
+        this.#healthChecks.delete(check);
+      }
+    }
     // Checked before the body is parsed, so a missing revision is reported as
     // such even when the payload is malformed too. Discovery and metadata lookup
     // write nothing and therefore need no revision.

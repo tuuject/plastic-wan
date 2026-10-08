@@ -125,7 +125,7 @@ Invocation 重放不录制或读取模型请求副本：它从 `invocation_messa
 
 `side_effect_started` 和 `outcome_unknown` 用于阻止不可逆 Tool 的盲目重试。审计记录应保留稳定错误码；不要依赖解析自由文本错误。图片交付去重直接读这份发送台账：同一 Conversation 与 generation 下，只有 `success` 且带 `telegram_message_id` 的 `request_json.asset_ids` 算已交付；`pending`、`outcome_unknown` 按未决处理，已成功的旧发送若带 `asset_ids_unknown` 也不能证明具体交付集合，不能当作可重发。
 
-Reply 去重也复用 `telegram_sends`：以 `conversation_id` + `request_json.reply_to_message_id` 为键，`success`、`pending`、`outcome_unknown` 均阻止新的 Reply，明确 `error` 可再尝试。迁移 `032` 只为这三种状态建立非唯一表达式索引，不删除或改写既有重复发送；查重与 pending 占位在同一 IMMEDIATE 事务内完成，不新增独立台账。去重随发送审计的在线保留窗口清理，不受 Context GC/重建影响。`agent.allow_reply_message_multiple_times: true` 时整体跳过这一查重（不做查询、不拒绝，也不新增独立记录）；它只放开按消息的 Reply 去重，图片 generation/asset 交付去重与结果未知保护仍以 `request_json.asset_ids` / `asset_ids_unknown` 在 `telegram_sends` 上照常执行。
+Reply 去重也复用 `telegram_sends`：以 `conversation_id` + `request_json.reply_to_message_id` 为键，`success`、`pending`、`outcome_unknown` 均阻止新的 Reply，明确 `error` 可再尝试。迁移 `033` 只为这三种状态建立非唯一表达式索引，不删除或改写既有重复发送；查重与 pending 占位在同一 IMMEDIATE 事务内完成，不新增独立台账。去重随发送审计的在线保留窗口清理，不受 Context GC/重建影响。`agent.allow_reply_message_multiple_times: true` 时整体跳过这一查重（不做查询、不拒绝，也不新增独立记录）；它只放开按消息的 Reply 去重，图片 generation/asset 交付去重与结果未知保护仍以 `request_json.asset_ids` / `asset_ids_unknown` 在 `telegram_sends` 上照常执行。
 
 ### 媒体与 Sticker 缓存
 

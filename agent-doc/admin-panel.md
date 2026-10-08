@@ -116,7 +116,7 @@ Passkey 是可选登录方式，**显式配置 `admin.public_url` 才启用**（
 | `POST` / `DELETE /admins[/:id]` | 增删 `telegram.admins` 白名单并热应用；`:id` 是 Telegram 用户 ID 不是行 ID；添加幂等，删除不存在的 ID 返回 404 `not_found`；If-Match revision 规则同其它配置写端点 |
 | `PUT /model` | 切换全局 agent 模型：把 `agent.provider` / `agent.model` 写入 `config.jsonc`，同时把 `agent.thinking_level` 重置为新模型接受的最弱级别，然后重新加载，重启后仍然生效，只影响后续 Invocation。该端点仍是**全局**语义：只写 `agent.*`，不改动任何 `telegram.chats[]` 的按群覆盖（每群覆盖通过 Chats 页、配置文件或 Telegram `/model` 维护）。响应的 `current.thinking_level` 是重置后的级别。必须带 `If-Match`（revision 来自 `GET /providers`），缺失返回 400 `revision_required`，过期返回 409 `config_conflict`。未知 provider/model、模型无 text 能力或模型不可用返回 400（`unknown_provider`/`unknown_model`/`not_text_capable`/`model_unusable`），新增或连接字段变化的 Provider 无法解析 SecretRef 返回 422 `secret_unresolved`，其它失败（配置权限、文件校验、candidate 校验等）返回 409；body 为 `{ error, message }`，文件已写入但应用失败时 message 以 `config.jsonc was updated but not applied: ` 开头。`GET /model` 与 `DELETE /model` 已删除，落到 405 `method_not_allowed` |
 | `POST /chats` / `PUT /chats/:id` / `DELETE /chats/:id` | Chat/Topic 白名单与按 Chat 的模型/thinking 覆盖，见「Chats 页端点」；新增 Chat 热应用，删除与 Topic 范围等待重启，已有 active Chat 的模型覆盖热应用，删除不清除历史 |
-| `POST` / `PUT` / `DELETE /providers[...]` | Provider 与模型管理，见「Models 页写端点」 |
+| `POST` / `PUT` / `DELETE /providers[...]` | Provider 与模型管理及 `POST /providers/health-check` 模型诊断，见「Models 页写端点」 |
 | `PUT /thinking-level` | body `{ thinking_level }`，设置全局 `agent.thinking_level`，热应用，响应同「Models 页写端点」。只写全局默认并保留 Chat 覆盖：有 `thinking_level` 覆盖的 Chat 保持自己的值；没有覆盖的 Chat 继承新值，若与文件中该 Chat 选用的模型不兼容则在写入前返回 422 `config_invalid`。覆盖可经 Chats 页或配置文件调整，也可用 Telegram `/model default` 连同模型覆盖一起清除。取值不是 Pi 级别返回 400 `invalid_body`；文件里的 agent 模型不接受该级别返回 422 `unsupported_thinking_level`，message 列出可选级别（规则见 [configuration.md](configuration.md#模型-thinking-级别)）；`If-Match` 规则同其它写端点 |
 | `PUT /vision` | 切换 vision 模型。写入前预检：模型在文件的该 Provider 下存在、支持 image 输入、且 `vision.max_output_tokens ≤ 该模型的 max_tokens`，不满足返回 400（`unknown_provider`/`unknown_model`/`not_image_capable`/`max_output_tokens_exceeded`）。`vision.provider`、`vision.model` 与 `vision.max_output_tokens` 热应用：下一次 vision 分析就用新模型，旧模型写的 `media_analyses` 行不会被命中；`vision` 的其它字段仍是 restart 字段 |
 | `POST /image/prompts` / `PUT` / `DELETE /image/prompts/:id` | 生图 Prompt 素材管理（创建/更新/归档）；归档的素材读取返回 404 |
@@ -176,7 +176,7 @@ Prompts 管理两层可编辑 Prompt：全局人格（`agent.system_prompt_file`
 
 ## Models 页写端点
 
-所有写端点：路径在 `/api` 下；必须带 `If-Match: <revision>`（缺失返回 400 `revision_required`，过期返回 409 `config_conflict` 且文件不变）；在 `ConfigReloader` 的锁里「写文件 → 应用」；响应是 `GET /providers` 的完整视图加上 `apply: { applied, restart_required, outside_serve }`。模型 id 可能含 `/`，路径里必须 `encodeURIComponent` 编码：服务端先按 `/` 切分再逐段解码，未编码的 id 不会匹配到路由。
+配置写端点：路径在 `/api` 下；必须带 `If-Match: <revision>`（缺失返回 400 `revision_required`，过期返回 409 `config_conflict` 且文件不变）；在 `ConfigReloader` 的锁里「写文件 → 应用」；响应是 `GET /providers` 的完整视图加上 `apply: { applied, restart_required, outside_serve }`。模型 id 可能含 `/`，路径里必须 `encodeURIComponent` 编码：服务端先按 `/` 切分再逐段解码，未编码的 id 不会匹配到路由。
 
 前端的 `If-Match` 必须是编辑表单**起步时**那份数据的 revision，而不是最新查询结果的 revision，否则后台刷新之后，用旧快照填的表单也能通过并发检查，覆盖掉别人的修改。模型编辑对话框在打开时记下 revision，保存遇到 409 会关闭对话框，提示重新打开编辑最新版本。Provider 连接卡片记住草稿所基于的 provider 与 revision，比较（含「哪些已保存的 header 被删掉了」）和提交都用这份基线；服务端数据变化后，没有改动的草稿自动跟上，有改动的草稿禁用 Save 并显示 Reload，重新加载前不能再次提交。Header 行用稳定 id 作为 React key，不用可编辑的名字。
 
@@ -190,6 +190,9 @@ Prompts 管理两层可编辑 Prompt：全局人格（`agent.system_prompt_file`
 | `DELETE /providers/:alias/models/:id` | 删除模型。文件里的全局 agent、任一 Chat 覆盖或 vision 使用它，或待重启移除的运行中 Chat 仍使用它时，写入前返回 409 `model_in_use` |
 | `POST /providers/discover` | 拉取模型列表并解析元数据，同时充当连接自检（界面上的 “Test”）。两种模式二选一：`{ alias }` 用运行中快照的 baseUrl 与凭据（不重新解析文件里的 SecretRef，`env`/`command` 不会执行；文件里的连接字段与运行中的 active 配置不一致时返回 409 `connection_not_applied`，文件里有、运行中没有的 Provider 返回 409 `provider_not_registered`），或临时模式 `{ kind, provider \| base_url+api, api_key, headers? }` 用请求体里的完整连接。响应 `{ endpoint, models: [draft], metadata_source_error }`，每个 draft 带元数据、来源标记与 `configured`。上游错误经脱敏后以 502 `provider_discovery_failed` 返回 |
 | `POST /providers/lookup-metadata` | 给定手动输入的模型 id 列表（1–100）只做元数据解析，不访问供应商端点。响应 `{ models: [draft], metadata_source_error }` |
+| `POST /providers/health-check` | Session-only、可能产生费用的诊断操作，沿用写端点 Origin 校验但不要求 `If-Match`，不修改配置。body 只接受 `{ provider, model }`；只测试已配置、已应用且支持 text 的模型，复用 active registry 与凭据，不重新解析 SecretRef，也不接受临时 URL、key 或 Prompt。返回 `{ provider, model, status, ttfb_ms, duration_ms, response_text, error }`；上游失败以 HTTP 200 + `status: 'error'` 返回，参数/权限/配置错误走 4xx。全进程最多 3 项在途，超额 429 `health_check_busy` |
+
+Discovery、metadata lookup 与 health check 都不修改配置，因此无需 revision。健康检查只发送一条 user 消息 `reply with extract content: ok`，没有 system Prompt、上下文或工具；请求输出上限为 `min(128, model.maxTokens)`，不覆盖适配器默认 reasoning 行为，30 秒超时、零自动重试。`status` 为 `ok`（正常结束且 trim 后精确为 `ok`）、`unexpected_response`（正常非空但内容不同）或 `error`（空输出、非正常停止或异常）。TTFB 是从诊断开始到适配器报告 HTTP 响应头的时间，非首 Token 延迟；不支持该 hook 时返回 `null`，总耗时独立测量。响应文本与错误先由 `SecretStore` 脱敏，再各截断到 4096 字符。通过前置校验的检查写一条 `model_calls.role = doctor` 记录，记录终态、用量、耗时和错误码，不录原始报文；不改变 Agent/Vision 选择或 Conversation Context。请求取消和 Admin 关闭都会中止检查，关闭时等待审计落定。前端支持行内检查、跨 Provider 勾选和当前 Provider 全选，最多 3 并发并逐项显示结果；离开 Models 页面时停止派发排队项，并取消在途 HTTP 请求。结果仅存当前页面内存，刷新或离开后清空；取消不保证供应商已接收的调用免于计费。
 
 `metadata_source_error` 只在 models.dev 目录拉取失败时非空：目录只是元数据来源之一，列表本身仍然可用，拿不到的字段一律标成「缺失」并要求管理员确认，而不是让整个请求失败。
 

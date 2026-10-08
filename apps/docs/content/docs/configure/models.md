@@ -28,6 +28,28 @@ Plastic Wan 只使用配置 `providers.<alias>.models` 中显式列出的模型�
 
 Provider 定义、模型列表、Agent 模型和视觉模型可以热应用，下一次 Invocation/视觉分析使用新快照；运行中的 Invocation 不会中途换模型。用 Admin **Models** 页保存，或修改文件后点击 **Apply config file**；随后查看 `config_reloaded`。
 
+### 在模型页面做健康检查
+
+在 Admin **模型 / Models** 页选中 Provider，点击模型行中的 **健康检查 / Check health**。要测试多个模型，勾选行首复选框，再点击 **检查所选 / Check selected (N)**；可以全选当前 Provider，也可以切换 Provider 后继续选择。一次批量最多同时发出 3 个请求，每项独立显示结果。
+
+检查使用已经生效的 Provider 连接，唯一提示词为：
+
+```text
+reply with extract content: ok
+```
+
+这是实际模型调用，可能产生费用，但不切换当前 Agent 或 Vision 模型，也不附带聊天历史、人格 Prompt 或工具。每次检查最多等待 30 秒，不自动重试；Provider 或模型定义仍待应用时，需要先应用配置。
+
+结果含状态、TTFB 和总耗时；展开该行可查看响应文本或错误：
+
+- **OK**：正常结束，去掉首尾空白后的文本恰好是小写 `ok`。
+- **意外响应 / Unexpected response**：正常收到非空文本，但不是 `ok`，不等于连接失败。
+- **错误 / Error**：请求失败、超时、空响应或未正常完成（例如输出被截断）。
+
+TTFB 以适配器报告收到 **HTTP 响应头** 为准，不是首个生成 Token，也不是总耗时；无法观测时显示 **不可用 / unavailable**。结果只保留在当前页面，刷新或离开后清空。离开 Models 页面会停止尚未发出的检查，并取消在途请求，但供应商已接收的调用仍可能计费。调用用量作为 `doctor` 诊断记录进入审计；文本检查不验证工具调用、图片理解或实际群聊参与能力。
+
+### 完整依赖诊断
+
 在有真实凭据且允许消耗 Token 的环境运行：
 
 ```bash

@@ -18,10 +18,12 @@ export const E2E_SECRETS = {
   relayHeader: 'e2e-relay-header-secret',
   /** Key typed into the new-provider wizard, which the local upstream accepts. */
   wizard: 'e2e-wizard-secret',
+  /** Key of the health-check providers created by 16-model-health. */
+  health: 'e2e-health-secret',
 } as const;
 
-/** Keys the local listing endpoint accepts, so both providers can discover. */
-export const E2E_ACCEPTED_RELAY_KEYS: readonly string[] = [E2E_SECRETS.relay, E2E_SECRETS.wizard];
+/** Keys the local listing and chat endpoints accept, so every fixture provider can call them. */
+export const E2E_ACCEPTED_RELAY_KEYS: readonly string[] = [E2E_SECRETS.relay, E2E_SECRETS.wizard, E2E_SECRETS.health];
 
 /** Ids the local `/v1/models` upstream lists. */
 export const E2E_RELAY_DISCOVERED_MODELS = ['relay-model-a', 'relay-model-b'] as const;
@@ -31,6 +33,21 @@ export const E2E_RELAY_COMPLETE_MODEL = 'relay-model-a';
 export const E2E_RELAY_INCOMPLETE_MODEL = 'relay-model-b';
 /** Only reachable through `lookup-metadata` (the manual-add path). */
 export const E2E_RELAY_MANUAL_MODEL = 'relay-manual-model';
+
+/**
+ * Health-check fixture: providers 16-model-health creates through the API and
+ * the model ids whose upstream behavior is canned by id — `health-ok` and
+ * `health-ok-2` stream the expected reply, `health-unexpected` streams a
+ * different one, and `health-fail` answers HTTP 500.
+ */
+export const E2E_HEALTH_ALIAS_A = 'health-a';
+export const E2E_HEALTH_ALIAS_B = 'health-b';
+export const E2E_HEALTH_OK_MODEL = 'health-ok';
+export const E2E_HEALTH_OK_2_MODEL = 'health-ok-2';
+export const E2E_HEALTH_UNEXPECTED_MODEL = 'health-unexpected';
+export const E2E_HEALTH_FAIL_MODEL = 'health-fail';
+/** The fixed prompt the health check must send, verbatim, as its only message. */
+export const E2E_HEALTH_PROMPT = 'reply with extract content: ok';
 
 /** The models.dev catalog `GET /providers/discover` resolves metadata against. */
 export const E2E_MODELS_DEV_CATALOG = {

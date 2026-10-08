@@ -9,6 +9,9 @@ import { type LoadedConfig, loadConfig, type FileConfig, resolveAgentSettings } 
 import { SqliteStore } from '../src/store/database.ts';
 import { imageDeliveryState } from '../src/store/image-delivery.ts';
 import {
+  adminPasskeys,
+  adminSessions,
+  adminUsers,
   bucketMessages,
   buckets,
   chats,
@@ -164,14 +167,70 @@ test.each(['fresh', 'upgraded'])(
       }
       const before = store.orm.select().from(telegramSends).all();
       if (mode === 'upgraded') {
+        // 032 (admin passkeys) is already applied on this database with real
+        // rows; rolling back only the reply index records must re-apply 033
+        // without touching the passkeys schema or data.
+        store.orm
+          .insert(adminUsers)
+          .values({
+            id: 1n,
+            username: 'schema-test-admin',
+            passwordHash: null,
+            webauthnUserId: 'schema-test-webauthn-user',
+            createdAt: now,
+            updatedAt: now,
+            lastLoginAt: null,
+          })
+          .run();
+        store.orm
+          .insert(adminSessions)
+          .values({
+            id: 1n,
+            userId: 1n,
+            tokenHash: 'schema-test-token-hash',
+            createdAt: now,
+            expiresAt: now,
+            lastSeenAt: now,
+          })
+          .run();
+        store.orm
+          .insert(adminPasskeys)
+          .values({
+            id: 1n,
+            userId: 1n,
+            credentialId: 'schema-test-credential-id',
+            publicKey: 'schema-test-public-key',
+            counter: 3n,
+            rpId: 'localhost',
+            name: 'schema test passkey',
+            createdAt: now,
+            lastUsedAt: now,
+          })
+          .run();
+        const adminBefore = {
+          users: store.orm.select().from(adminUsers).all(),
+          sessions: store.orm.select().from(adminSessions).all(),
+          passkeys: store.orm.select().from(adminPasskeys).all(),
+        };
         store.db.exec(`
         DROP INDEX telegram_sends_reply_delivery_idx;
-        DELETE FROM schema_migrations WHERE version = 32;
+        DELETE FROM schema_migrations WHERE version = 33;
       `);
         store.close();
         store = await SqliteStore.open(fixture.loaded.config);
         store.close();
         store = await SqliteStore.open(fixture.loaded.config);
+        expect(store.orm.select().from(adminUsers).all()).toEqual(adminBefore.users);
+        expect(store.orm.select().from(adminSessions).all()).toEqual(adminBefore.sessions);
+        expect(store.orm.select().from(adminPasskeys).all()).toEqual(adminBefore.passkeys);
+        // The already-applied 032 row survives, and the rebased 033 records
+        // exactly one row each for both versions.
+        expect(store.db.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 32').get()).toEqual({
+          n: 1n,
+        });
+        expect(store.db.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 33').get()).toEqual({
+          n: 1n,
+        });
       }
       const plans: string[] = [];
       const orm = drizzle(store.db, {

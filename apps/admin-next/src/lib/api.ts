@@ -1142,6 +1142,33 @@ export function lookupModelMetadata(body: LookupMetadataRequest): Promise<Lookup
   });
 }
 
+export type HealthCheckStatus = 'ok' | 'unexpected_response' | 'error';
+
+export interface HealthCheckResult {
+  readonly provider: string;
+  readonly model: string;
+  readonly status: HealthCheckStatus;
+  /** Time until HTTP response headers, not a generated token; null without an adapter hook. */
+  readonly ttfb_ms: number | null;
+  readonly duration_ms: number;
+  readonly response_text: string;
+  readonly error: string | null;
+}
+
+/**
+ * One real model call with the fixed probe prompt; provider charges may apply.
+ * Read-only probe, so it needs no revision. Upstream failures come back as
+ * `status: 'error'` in a 200; validation and HTTP errors throw like any call.
+ */
+export function healthCheckProviderModel(request: ModelSwitchRequest, signal: AbortSignal): Promise<HealthCheckResult> {
+  return call<HealthCheckResult>('/providers/health-check', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(request),
+    signal,
+  });
+}
+
 /** Hot: the next invocation runs with the new level. */
 export function setAgentThinkingLevel(thinkingLevel: ThinkingLevel, revision: string): Promise<ProviderWriteResponse> {
   return call<ProviderWriteResponse>('/thinking-level', {

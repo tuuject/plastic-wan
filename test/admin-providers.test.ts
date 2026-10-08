@@ -1,18 +1,20 @@
-import { afterEach, beforeAll, expect, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
+import { afterEach, beforeAll, expect, test, vi } from 'vitest';
 import { AdminServer } from '../src/ingress/admin/server.ts';
 import { type FileConfig, type LoadedConfig, loadConfig, type ModelFileConfig } from '../src/platform/config.ts';
 import { ConfigReloader } from '../src/platform/config-reload.ts';
+import { keyJarPath } from '../src/platform/key-jar.ts';
 import { AgentModelSwitcher } from '../src/platform/model-switch.ts';
 import { loadModelsDevCatalog, resetModelsDevCatalogCache } from '../src/platform/models-dev.ts';
-import { keyJarPath } from '../src/platform/key-jar.ts';
 import { buildModelRegistry } from '../src/platform/providers.ts';
 import type { RuntimeConfigurationStore } from '../src/platform/runtime-config.ts';
 import { SecretStore } from '../src/platform/secrets.ts';
 import { SqliteStore } from '../src/store/database.ts';
+import { modelCalls } from '../src/store/schema.ts';
 import {
   startFixtureServer,
   stopFixtureServer,
@@ -993,6 +995,402 @@ test('answers a malformed model id with a request error, not a server error', as
     expect(response.status).toBe(400);
     expect(await readJson(response)).toMatchObject({ error: 'invalid_path' });
   } finally {
+    fixture.store.close();
+  }
+});
+
+const HEALTH_PATH = '/api/providers/health-check';
+const HEALTH_TARGET = { provider: 'agent', model: 'agent-model' };
+
+function healthMessage(text = 'ok', stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage {
+  return {
+    role: 'assistant',
+    api: 'openai-completions',
+    provider: 'agent',
+    model: 'agent-model',
+    content: [{ type: 'text', text }],
+    stopReason,
+    timestamp: Date.now(),
+    usage: {
+      input: 9,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 10,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  };
+}
+
+test('checks a real streaming provider with one fixed prompt and audits usage without changing configuration', async () => {
+  let requests = 0;
+  const finishBody = Promise.withResolvers<void>();
+  const receivedRequest = Promise.withResolvers<{ request: Request; body: Record<string, unknown> }>();
+  const upstream = await startFixtureServer(async (incoming) => {
+    requests += 1;
+    const body = (await incoming.json()) as Record<string, unknown>;
+    receivedRequest.resolve({ request: incoming, body });
+    return new Response(
+      new ReadableStream({
+        async start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(
+            encoder.encode(
+              'data: {"id":"health","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}\n\n',
+            ),
+          );
+          await finishBody.promise;
+          controller.enqueue(
+            encoder.encode(
+              'data: {"id":"health","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10}}\n\ndata: [DONE]\n\n',
+            ),
+          );
+          controller.close();
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  });
+  const fixture = await adminFixture({
+    transform: (config) => {
+      const provider = config.providers.agent!;
+      if (provider.kind === 'custom') {
+        provider.base_url = `http://127.0.0.1:${upstream.port}/v1`;
+        provider.api = 'openai-completions';
+        provider.models[0]!.reasoning = false;
+        provider.models[0]!.max_tokens = 64;
+        config.agent.thinking_level = 'off';
+        config.developer = { record_model_payloads: true };
+      }
+    },
+  });
+  const registry = fixture.configStore.current().models;
+  const original = registry.completeSimple.bind(registry);
+  const receivedHeaders = Promise.withResolvers<void>();
+  const probe = vi.spyOn(registry, 'completeSimple').mockImplementation((model, context, options) =>
+    original(model, context, {
+      ...options,
+      onResponse: (response, selected) => {
+        options?.onResponse?.(response, selected);
+        receivedHeaders.resolve();
+      },
+    }),
+  );
+  try {
+    const before = await fixture.read();
+    const pending = write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET);
+    await Promise.race([
+      receivedHeaders.promise,
+      pending.then(async (response) => {
+        throw new Error(
+          `Health check finished before response headers: ${JSON.stringify(await readJson(response.clone()))}`,
+        );
+      }),
+    ]);
+    // The header is observable before the stream finishes, never total latency.
+    expect(fixture.store.orm.select().from(modelCalls).get()?.state).toBe('pending');
+    finishBody.resolve();
+    const response = await pending;
+    expect(response.status).toBe(200);
+    const result = await readJson(response);
+    expect(result).toMatchObject({ ...HEALTH_TARGET, status: 'ok', response_text: 'ok', error: null });
+    expect(result.ttfb_ms).toBeGreaterThanOrEqual(0);
+    expect(result.duration_ms).toBeGreaterThanOrEqual(result.ttfb_ms);
+    expect(requests).toBe(1);
+    const received = await receivedRequest.promise;
+    expect(new URL(received.request.url).pathname).toBe('/v1/chat/completions');
+    expect(received.request.headers.get('authorization')).toBe('Bearer agent-secret');
+    expect(received.request.headers.get('x-route')).toBe('header-secret-value');
+    expect(received.body.model).toBe('agent-model');
+    expect(received.body.messages).toEqual([{ role: 'user', content: 'reply with extract content: ok' }]);
+    expect(received.body.tools).toBeUndefined();
+    expect(received.body.max_tokens ?? received.body.max_completion_tokens).toBe(64);
+    expect(await fixture.read()).toBe(before);
+    expect(fixture.configStore.current().generation).toBe(1);
+    expect(fixture.store.orm.select().from(modelCalls).get()).toMatchObject({
+      role: 'doctor',
+      state: 'success',
+      invocationId: null,
+      toolsJson: '[]',
+      totalTokens: 10n,
+      requestJson: null,
+      responseJson: null,
+      errorCode: null,
+    });
+  } finally {
+    finishBody.resolve();
+    await fixture.server.stop();
+    probe.mockRestore();
+    fixture.store.close();
+    await stopFixtureServer(upstream.server);
+  }
+});
+
+test('reports mismatched, empty, truncated and redacted failures independently, and leaves absent TTFB null', async () => {
+  let requests = 0;
+  const upstream = await startFixtureServer(() => {
+    requests += 1;
+    return Response.json({ error: { message: 'bad credentials agent-secret header-secret-value' } }, { status: 503 });
+  });
+  const fixture = await adminFixture({
+    transform: (config) => {
+      const provider = config.providers.agent!;
+      if (provider.kind === 'custom') {
+        provider.base_url = `http://127.0.0.1:${upstream.port}/v1`;
+        provider.api = 'openai-completions';
+      }
+    },
+  });
+  const registry = fixture.configStore.current().models;
+  try {
+    const failed = await readJson(await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET));
+    expect(failed.status).toBe('error');
+    expect(failed.error).toContain('[REDACTED]');
+    expect(JSON.stringify(failed)).not.toMatch(/agent-secret|header-secret-value/);
+    expect(requests).toBe(1);
+    const probe = vi.spyOn(registry, 'completeSimple');
+    try {
+      for (const [text, stopReason, status] of [
+        [' OK ', 'stop', 'unexpected_response'],
+        ['  ', 'stop', 'error'],
+        ['ok', 'length', 'error'],
+        ['agent-secret', 'stop', 'unexpected_response'],
+        [' ok\n', 'stop', 'ok'],
+      ] as const) {
+        probe.mockResolvedValueOnce(healthMessage(text, stopReason));
+        const result = await readJson(await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET));
+        expect(result.status).toBe(status);
+        expect(result.ttfb_ms).toBeNull();
+        expect(result.response_text).not.toContain('agent-secret');
+      }
+    } finally {
+      probe.mockRestore();
+    }
+    const audit = fixture.store.orm.select().from(modelCalls).all();
+    expect(audit.map((row) => row.state)).toEqual(['error', 'error', 'error', 'error', 'error', 'success']);
+    expect(audit.every((row) => row.finishedAt !== null)).toBe(true);
+    expect(JSON.stringify(audit, (_key, value) => (typeof value === 'bigint' ? String(value) : value))).not.toMatch(
+      /agent-secret|header-secret-value/,
+    );
+  } finally {
+    fixture.store.close();
+    await stopFixtureServer(upstream.server);
+  }
+});
+
+test('the health-check route does not shadow edits to a provider with that alias', async () => {
+  const fixture = await adminFixture({
+    transform: (config) => {
+      config.providers['health-check'] = structuredClone(config.providers.vision!);
+    },
+  });
+  try {
+    const updated = await write(
+      fixture,
+      HEALTH_PATH,
+      'PUT',
+      { api_key: 'replacement-fixture-key' },
+      await revisionOf(fixture),
+    );
+    expect(updated.status).toBe(200);
+    expect(fixture.secret(fixture.file().providers['health-check']?.api_key)).toBe('replacement-fixture-key');
+    const deleted = await call(fixture, HEALTH_PATH, {
+      method: 'DELETE',
+      headers: { 'if-match': await revisionOf(fixture) },
+    });
+    expect(deleted.status).toBe(200);
+    expect(fixture.file().providers['health-check']).toBeUndefined();
+    expect(fixture.store.orm.select().from(modelCalls).all()).toHaveLength(0);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test('health checks reject unauthorized, invalid and unapplied targets before calling a model', async () => {
+  const fixture = await adminFixture();
+  const probe = vi.spyOn(fixture.configStore.current().models, 'completeSimple');
+  try {
+    const init = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(HEALTH_TARGET),
+    };
+    expect((await fixture.server.handle(request(HEALTH_PATH, init))).status).toBe(401);
+    expect(
+      (await call(fixture, HEALTH_PATH, { ...init, headers: { ...init.headers, origin: 'https://evil.example' } }))
+        .status,
+    ).toBe(403);
+    const key = await readJson(await write(fixture, '/api/api-keys', 'POST', { name: 'health-test' }));
+    expect(
+      (await call(fixture, HEALTH_PATH, { ...init, headers: { ...init.headers, authorization: `Bearer ${key.key}` } }))
+        .status,
+    ).toBe(403);
+    for (const body of [
+      {},
+      { ...HEALTH_TARGET, prompt: 'different' },
+      { ...HEALTH_TARGET, base_url: 'http://evil.example' },
+    ]) {
+      expect((await write(fixture, HEALTH_PATH, 'POST', body)).status).toBe(400);
+    }
+    expect((await call(fixture, HEALTH_PATH)).status).toBe(405);
+    expect((await write(fixture, HEALTH_PATH, 'POST', { ...HEALTH_TARGET, model: 'missing' })).status).toBe(404);
+    await rewriteFile(fixture, (config) => {
+      config.providers.agent!.models[0]!.max_tokens -= 1;
+    });
+    expect(await readJson(await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET))).toMatchObject({
+      error: 'model_not_applied',
+    });
+    await rewriteFile(fixture, (config) => {
+      const provider = config.providers.agent!;
+      if (provider.kind === 'custom') {
+        provider.base_url = 'https://evil.example/v1';
+      }
+    });
+    expect(await readJson(await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET))).toMatchObject({
+      error: 'connection_not_applied',
+    });
+    expect(probe).not.toHaveBeenCalled();
+    expect(fixture.store.orm.select().from(modelCalls).all()).toHaveLength(0);
+  } finally {
+    probe.mockRestore();
+    fixture.store.close();
+  }
+});
+
+test('rejects image-only health targets and broken saved configuration without an upstream request', async () => {
+  const fixture = await adminFixture({
+    transform: (config) => {
+      config.providers.vision!.models[0]!.input = ['image'];
+    },
+  });
+  const probe = vi.spyOn(fixture.configStore.current().models, 'completeSimple');
+  try {
+    const response = await write(fixture, HEALTH_PATH, 'POST', { provider: 'vision', model: 'vision-model' });
+    expect(response.status).toBe(422);
+    expect(await readJson(response)).toMatchObject({ error: 'not_text_capable' });
+    await writeFile(fixture.configPath, 'not json');
+    expect((await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET)).status).toBe(422);
+    expect(probe).not.toHaveBeenCalled();
+    expect(fixture.store.orm.select().from(modelCalls).all()).toHaveLength(0);
+  } finally {
+    probe.mockRestore();
+    fixture.store.close();
+  }
+});
+
+test('health checks cancel on request abort, release their slot, and bound redacted output', async () => {
+  const fixture = await adminFixture();
+  const started = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  let adapterSignal: AbortSignal | undefined;
+  const probe = vi
+    .spyOn(fixture.configStore.current().models, 'completeSimple')
+    .mockImplementationOnce((_model, _context, options) => {
+      adapterSignal = options?.signal;
+      started.resolve();
+      return new Promise(() => {});
+    });
+  try {
+    const pending = call(fixture, HEALTH_PATH, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(HEALTH_TARGET),
+    });
+    await started.promise;
+    controller.abort(new Error('Client left agent-secret'));
+    expect(await readJson(await pending)).toMatchObject({ status: 'error', error: 'Client left [REDACTED]' });
+    expect(adapterSignal?.aborted).toBe(true);
+    probe.mockResolvedValueOnce(healthMessage(`header-secret-value${'a'.repeat(5000)}`));
+    const long = await readJson(await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET));
+    expect(long.response_text).toHaveLength(4096);
+    expect(long.response_text).toMatch(/^\[REDACTED\]/);
+    probe.mockResolvedValueOnce({
+      ...healthMessage(),
+      content: [{ type: 'toolCall', id: 'bad-call', name: 'send', arguments: {} }],
+      stopReason: 'toolUse',
+    });
+    expect(await readJson(await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET))).toMatchObject({ status: 'error' });
+    expect(
+      fixture.store.orm
+        .select()
+        .from(modelCalls)
+        .all()
+        .every((row) => row.state === 'error' && row.finishedAt !== null),
+    ).toBe(true);
+  } finally {
+    await fixture.server.stop();
+    probe.mockRestore();
+    fixture.store.close();
+  }
+});
+
+test('health checks time out and audit completion even if an adapter ignores cancellation', async () => {
+  const fixture = await adminFixture();
+  const started = Promise.withResolvers<void>();
+  let signal: AbortSignal | undefined;
+  const probe = vi
+    .spyOn(fixture.configStore.current().models, 'completeSimple')
+    .mockImplementation((_model, _context, options) => {
+      signal = options?.signal;
+      expect(options).toMatchObject({ maxTokens: 128, maxRetries: 0, timeoutMs: 30_000 });
+      started.resolve();
+      return new Promise(() => {});
+    });
+  try {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET);
+    await started.promise;
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await readJson(await pending);
+    expect(result).toMatchObject({ status: 'error', ttfb_ms: null, response_text: '' });
+    expect(result.error).toContain('timed out');
+    expect(signal?.aborted).toBe(true);
+    expect(fixture.store.orm.select().from(modelCalls).get()).toMatchObject({
+      state: 'error',
+      errorCode: 'model_health_error',
+    });
+  } finally {
+    vi.useRealTimers();
+    probe.mockRestore();
+    fixture.store.close();
+  }
+});
+
+test('limits simultaneous health checks and cancels and drains them before Admin shutdown', async () => {
+  const fixture = await adminFixture();
+  const signals: AbortSignal[] = [];
+  const started = Promise.withResolvers<void>();
+  const probe = vi
+    .spyOn(fixture.configStore.current().models, 'completeSimple')
+    .mockImplementation((_model, _context, options) => {
+      signals.push(options!.signal!);
+      if (signals.length === 3) {
+        started.resolve();
+      }
+      return new Promise(() => {});
+    });
+  try {
+    const pending = Array.from({ length: 3 }, () => write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET));
+    await started.promise;
+    expect((await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET)).status).toBe(429);
+    await fixture.server.stop();
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect((await write(fixture, HEALTH_PATH, 'POST', HEALTH_TARGET)).status).toBe(503);
+    expect(probe).toHaveBeenCalledTimes(3);
+    for (const response of await Promise.all(pending)) {
+      expect(await readJson(response)).toMatchObject({ status: 'error', error: 'Admin server is stopping' });
+    }
+    expect(
+      fixture.store.orm
+        .select()
+        .from(modelCalls)
+        .all()
+        .map((row) => row.state),
+    ).toEqual(['error', 'error', 'error']);
+  } finally {
+    await fixture.server.stop();
+    probe.mockRestore();
     fixture.store.close();
   }
 });
