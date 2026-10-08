@@ -2,13 +2,6 @@ import { Buffer } from 'node:buffer';
 import { CliError, usageError } from './errors.ts';
 
 /**
- * Upper bound for any JSON response body. The API pages and invocation details
- * are far smaller; an oversized body (a proxy page, a runaway payload) is
- * refused instead of being buffered without limit.
- */
-export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
-
-/**
  * Validates an endpoint. Plaintext http is only accepted on loopback: the API
  * key travels in a header and must not cross the network unencrypted. URL
  * credentials are rejected so the key can never be smuggled through a URL.
@@ -182,17 +175,14 @@ function translateFetchError(error: unknown, timeoutMs: number): CliError {
 }
 
 async function readJsonResponse(response: Response): Promise<unknown> {
-  const bodyText = await readBodyText(response, MAX_RESPONSE_BYTES);
+  const bodyText = await response.text();
   if (!response.ok) {
     throw responseErrorFromBody(response, bodyText);
   }
-  if (bodyText.truncated) {
-    throw new CliError('response_too_large', `response exceeded ${MAX_RESPONSE_BYTES} bytes`);
-  }
-  if (bodyText.text.length === 0) {
+  if (bodyText.length === 0) {
     throw new CliError('invalid_response', 'server returned an empty response');
   }
-  const parsed = tryParseJson(bodyText.text);
+  const parsed = tryParseJson(bodyText);
   if (parsed === undefined) {
     throw new CliError('invalid_response', 'server response was not valid JSON');
   }
@@ -200,15 +190,12 @@ async function readJsonResponse(response: Response): Promise<unknown> {
 }
 
 async function responseError(response: Response): Promise<CliError> {
-  return responseErrorFromBody(response, await readBodyText(response, MAX_RESPONSE_BYTES));
+  return responseErrorFromBody(response, await response.text());
 }
 
 /** A JSON error body survives as the error code/message; anything else is http_error. */
-function responseErrorFromBody(response: Response, bodyText: BodyText): CliError {
-  if (bodyText.truncated) {
-    return new CliError('http_error', `server responded with HTTP ${response.status} and an oversized body`);
-  }
-  const parsed = tryParseJson(bodyText.text);
+function responseErrorFromBody(response: Response, bodyText: string): CliError {
+  const parsed = tryParseJson(bodyText);
   if (isRecord(parsed) && typeof parsed.error === 'string' && parsed.error.length > 0) {
     const message = typeof parsed.message === 'string' && parsed.message.length > 0 ? parsed.message : parsed.error;
     return new CliError(parsed.error, message);
@@ -224,19 +211,9 @@ function normalizeContentType(raw: string | null): string | null {
   return type.length === 0 ? null : type;
 }
 
-interface BodyText {
-  readonly text: string;
-  readonly truncated: boolean;
-}
-
 interface BodyBytes {
   readonly bytes: Buffer;
   readonly truncated: boolean;
-}
-
-async function readBodyText(response: Response, maxBytes: number): Promise<BodyText> {
-  const body = await readBodyBytes(response, maxBytes);
-  return { text: body.truncated ? '' : body.bytes.toString('utf8'), truncated: body.truncated };
 }
 
 async function readBodyBytes(response: Response, maxBytes: number): Promise<BodyBytes> {

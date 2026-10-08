@@ -91,7 +91,6 @@ plasticwan-utils invocation replay 12345 --before-send 678 --confirm-paid --json
 | `replay_prompt_empty` / `replay_prompt_invalid` / `replay_prompt_too_large` | 服务端拒绝模板；修正并核对授权，不绕过校验或自动重试 |
 | `replay_chat_unconfigured` / `replay_topic_unconfigured` / `replay_model_unavailable` / `replay_unavailable` | 请操作员核对当前 allowlist、模型或服务装配，不擅改配置 |
 | `timeout` / `network_error` / `redirect_not_allowed` | 核对地址与服务，不降级 HTTPS、不自动重放；结果与费用可能不确定 |
-| `response_too_large` | 超过客户端 4 MiB 上限；报告不可读取，不绕过限制或假装无记录 |
 | `body_too_large` | 超过服务端 1 MiB JSON body 上限；缩短内容并核对授权，不绕过限制 |
 
 结束时交代目标 ID、实际执行次数、实际使用的模型（含临时覆盖与 `fidelity.model_selection`）、prompt 来源与覆盖、关键证据、保真限制及未验证事项。只保存用户需要且已脱敏的最小结果，不自动落盘完整对话或 trace。
