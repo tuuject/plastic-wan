@@ -51,6 +51,8 @@ Telegram 官方 FAQ 指引开发者通过 [@BotFather](https://t.me/BotFather) �
 
 模型决定接话且需要搜索等耗时处理时，可以显示“正在输入”。快回复直接发送，保持沉默时不显示。状态每 4 秒刷新，同一 Chat 和 Topic 的请求不重叠；每轮最长约 60 秒，本轮结束、空闲等待或中断时停止刷新，客户端已有状态可能再保留最多 5 秒。输入状态不保证最终一定有回复。
 
+有人在群里 @ Bot 时，Bot 会立刻显示“正在输入”，不必等聚合窗口结束或模型读完上下文。状态在 Bot 发出消息、本轮结束或约 55 秒后停止；如果模型随后选择沉默，状态会持续到本轮结束，属于预期行为。只有 @ 会触发，回复 Bot 或命中关键词不会；暂停、休眠，以及被 [参与方式](../guides/participation.md) 挡在时段外的消息也不会显示。不需要时在 `telegram` 下设置 `"mention_typing_enabled": false` 并重启。
+
 ## 管理员命令与验证
 
 `telegram.admins` 中的 Telegram 用户可以使用 `/pause`、`/resume`、`/model`、`/cut_topic`、`/allowlist`。名单由 `config.jsonc` 的 `telegram.admins` 字段管理，修改后可热应用，无需重启。先在目标 Chat 发送一条测试消息，检查 `serve_started` 后的审计记录；“Bot 在线”不等于消息被允许，也不等于模型一定发言。

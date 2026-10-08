@@ -90,6 +90,8 @@ deadline 不看「前一次运行是否仍在 queued/running」，但**运行中
 
 `typing` 是 `execute` 注册表中的可选能力（`execute.call`，`tool: "typing"`，`input: {}`）。模型只有在决定接话且接下来需要耗时处理时才调用；快速回复直接 `send`，静默不调用。runtime 每 4 秒刷新，Telegram 适配器按 Chat + Topic 节流且不重叠请求，单次平台请求最多等 3.5 秒。重复调用不重置本轮上限，55 秒后停止刷新并取消在途请求，为 Telegram 最多 5 秒的状态尾部留余量；`freeAgent` 与运行清理停止状态，空闲后下一轮可以再次调用。typing 仅为临时状态，不发布 assistant 文本，不计入 send 配额，也不把 Telegram 状态请求失败传给模型。
 
+被 @ 时 runtime 会自动显示 typing，不经过模型：`TelegramIngestion.ingest()` 在实时（非 catch-up）、非编辑、真人（`eligibleHuman`）消息以 `mention` 或 `text_mention` 指向本 Bot（文本与 caption 均算）、且该消息已进入 Bucket（因此未暂停且通过 participation 闸门）时，在 `IngestResult.mention` 返回 Chat 与 Topic。`application.ts` 据此调用 `MentionTyping.start`（`src/capabilities/mention-typing.ts`），休眠期间不启动。它复用与模型 `typing` 相同的 `startTypingLoop`（4 秒刷新、55 秒上限）和同一个 `grammySendApi` 实例的节流，所以两者同时存在不会重复请求。每个 Chat + Topic 至多一个循环，重复 @ 不重置上限。循环在以下任一时刻停止：Agent 向该 Chat + Topic 成功发送文本、Sticker 或生成图片（发送失败不停止）；`freeAgent` 与运行清理；进程关闭；55 秒上限。仅回复 Bot 或命中关键词不触发。`telegram.mention_typing_enabled` 设为 `false` 可关闭；模型随后选择沉默时，状态会持续到本轮结束。
+
 `agent.context.idle_grace_seconds` 大于 0 时，Invocation 变成一个运行窗口：它可以跨多个 Bucket，在运行期间接收新注入的消息。
 
 ```text

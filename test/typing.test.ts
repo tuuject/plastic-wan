@@ -1,5 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest';
 import { Api } from 'grammy';
+import { MentionTyping } from '../src/capabilities/mention-typing.ts';
+import type { TelegramSendApi } from '../src/capabilities/send-tool.ts';
 import { createTyping } from '../src/capabilities/typing.ts';
 import { grammySendApi } from '../src/capabilities/telegram-send-api.ts';
 
@@ -101,4 +103,106 @@ test('platform failures stay cosmetic and later refreshes still run', async () =
   await vi.advanceTimersByTimeAsync(8_000);
   expect(f.action).toHaveBeenCalledTimes(3);
   f.typing.stop();
+});
+
+function mentionFixture() {
+  vi.useFakeTimers();
+  const api = new Api('test-token');
+  const action = vi.spyOn(api, 'sendChatAction').mockResolvedValue(true);
+  const sendMessage = vi.spyOn(api, 'sendMessage').mockResolvedValue({
+    message_id: 1,
+    date: 1,
+    chat: { id: -100123, type: 'supergroup', title: 'Group' },
+    text: 'hi',
+  });
+  const transport = grammySendApi(api);
+  const mention = new MentionTyping(transport);
+  return { action, sendMessage, transport, mention, wrapped: mention.wrap(transport) };
+}
+
+test('a mention shows typing immediately, refreshes, and a repeat neither duplicates nor resets the cap', async () => {
+  const f = mentionFixture();
+  f.mention.start('-100123', 42n);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.action).toHaveBeenCalledTimes(1);
+  expect(f.action).toHaveBeenCalledWith('-100123', 'typing', { message_thread_id: 42 }, expect.any(AbortSignal));
+  await vi.advanceTimersByTimeAsync(40_000);
+  f.mention.start('-100123', 42n);
+  await vi.advanceTimersByTimeAsync(20_000);
+  // One request at t=0 and one every 4s until the 55s cap: 14 in total, none from the repeat.
+  expect(f.action).toHaveBeenCalledTimes(14);
+  f.mention.stopAll();
+});
+
+test('a mention after the previous loop hit its cap starts a fresh one', async () => {
+  const f = mentionFixture();
+  f.mention.start('-100123', 0n);
+  await vi.advanceTimersByTimeAsync(60_000);
+  const before = f.action.mock.calls.length;
+  f.mention.start('-100123', 0n);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.action).toHaveBeenCalledTimes(before + 1);
+  expect(f.action.mock.calls.at(-1)![2]).toEqual({});
+  f.mention.stopAll();
+});
+
+test('stop ends the loop and chats and topics are independent', async () => {
+  const f = mentionFixture();
+  f.mention.start('-100123', 42n);
+  f.mention.start('-100123', 43n);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.action).toHaveBeenCalledTimes(2);
+  f.mention.stop('-100123', 42n);
+  await vi.advanceTimersByTimeAsync(8_000);
+  // Only the 43 topic keeps refreshing.
+  expect(
+    f.action.mock.calls.filter((call) => (call[2] as { message_thread_id?: number }).message_thread_id === 42),
+  ).toHaveLength(1);
+  expect(
+    f.action.mock.calls.filter((call) => (call[2] as { message_thread_id?: number }).message_thread_id === 43).length,
+  ).toBeGreaterThan(1);
+  f.mention.stopAll();
+  const settled = f.action.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(8_000);
+  expect(f.action).toHaveBeenCalledTimes(settled);
+});
+
+test('publishing into the chat and topic ends its mention status, other topics keep theirs', async () => {
+  const f = mentionFixture();
+  f.mention.start('-100123', 42n);
+  f.mention.start('-100123', 43n);
+  await vi.advanceTimersByTimeAsync(0);
+  await f.wrapped.sendMessage('-100123', 'hi', { message_thread_id: 42 });
+  expect(f.sendMessage).toHaveBeenCalledTimes(1);
+  const afterSend = f.action.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(8_000);
+  const later = f.action.mock.calls.slice(afterSend);
+  expect(later.length).toBeGreaterThan(0);
+  expect(later.every((call) => (call[2] as { message_thread_id?: number }).message_thread_id === 43)).toBe(true);
+  f.mention.stopAll();
+});
+
+test('a failed send keeps the status, and platform failures stay cosmetic', async () => {
+  const f = mentionFixture();
+  f.action.mockRejectedValue(new Error('Telegram unavailable'));
+  f.sendMessage.mockRejectedValueOnce(new Error('send failed'));
+  f.mention.start('-100123', 0n);
+  await vi.advanceTimersByTimeAsync(8_000);
+  await expect(f.wrapped.sendMessage('-100123', 'hi', {})).rejects.toThrow('send failed');
+  const before = f.action.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(4_000);
+  expect(f.action.mock.calls.length).toBeGreaterThan(before);
+  f.mention.stopAll();
+});
+
+test('hosts without chat actions get no loop and the wrapper keeps optional methods absent', async () => {
+  vi.useFakeTimers();
+  const send = vi.fn();
+  const bare = { sendMessage: send, sendSticker: send } as unknown as TelegramSendApi;
+  const mention = new MentionTyping(bare);
+  mention.start('-100123', 0n);
+  await vi.advanceTimersByTimeAsync(8_000);
+  const wrapped = mention.wrap(bare);
+  expect(wrapped.sendGeneratedPhoto).toBeUndefined();
+  expect(wrapped.sendGeneratedPhotoGroup).toBeUndefined();
 });

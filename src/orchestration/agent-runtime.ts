@@ -13,6 +13,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm';
 import { capability, createExecuteTool, type ExecutableCapability } from '../capabilities/execute-tool.ts';
 import { createReadTool } from '../capabilities/read-tool.ts';
 import { createSendTool, type TelegramSendApi } from '../capabilities/send-tool.ts';
+import type { MentionTyping } from '../capabilities/mention-typing.ts';
 import { createTyping } from '../capabilities/typing.ts';
 import { ContextBuilder, type ContextIdentity, type Injection, type StablePrompt } from '../context/context-builder.ts';
 import { encodeContextMessage, estimateMessageTokens } from '../context/context-codec.ts';
@@ -83,6 +84,8 @@ export interface AgentRuntimeOptions {
   readonly configStore: RuntimeConfigurationStore;
   readonly secrets: SecretStore;
   readonly telegramApi: TelegramSendApi;
+  /** Status started at ingestion for @-mentions; the runtime ends it when a round ends. */
+  readonly mentionTyping?: MentionTyping;
   readonly bot: { readonly id: bigint; readonly displayName: string; readonly username: string | null };
   /** The bundled system:/// resource tree: read primitive backend plus skill index. */
   readonly systemResources: SystemResources;
@@ -151,6 +154,7 @@ export class AgentRuntime {
   readonly #configStore: RuntimeConfigurationStore;
   readonly #secrets: SecretStore;
   readonly #telegramApi: TelegramSendApi;
+  readonly #mentionTyping: MentionTyping | undefined;
   readonly #bot: AgentRuntimeOptions['bot'];
   readonly #systemResources: SystemResources;
   readonly #capabilityTools: CapabilityToolFactory | undefined;
@@ -178,6 +182,7 @@ export class AgentRuntime {
     this.#secrets = options.secrets;
     this.#configStore = options.configStore;
     this.#telegramApi = options.telegramApi;
+    this.#mentionTyping = options.mentionTyping;
     this.#bot = options.bot;
     this.#systemResources = options.systemResources;
     this.#capabilityTools = options.capabilityTools;
@@ -630,6 +635,7 @@ export class AgentRuntime {
      */
     const freeAgent = (): void => {
       typing.stop();
+      this.#mentionTyping?.stop(identity.chatId.toString(), identity.threadId);
       runtime.endRound(conversationId);
       state.barrierSpent = false;
       this.#deferCollectingBucket(config, conversationId, Date.now());
@@ -982,6 +988,7 @@ export class AgentRuntime {
       }
     } finally {
       typing.stop();
+      this.#mentionTyping?.stop(identity.chatId.toString(), identity.threadId);
       signal.removeEventListener('abort', abortAgent);
       unsubscribe();
       // The cached agent keeps its transcript on purpose: the next invocation

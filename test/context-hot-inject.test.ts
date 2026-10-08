@@ -15,6 +15,7 @@ import { InvocationQueueService } from '../src/orchestration/invocation-queue.ts
 import { SecretStore } from '../src/platform/secrets.ts';
 import { SystemResources } from '../src/platform/system-resources.ts';
 import { TelegramIngestion } from '../src/ingress/telegram-ingestion.ts';
+import { MentionTyping } from '../src/capabilities/mention-typing.ts';
 import { SEND_BARRIER_TEXT, type TelegramSendApi } from '../src/capabilities/send-tool.ts';
 import { fauxRegistry, sleep, testConfigJsonc, testConfigStore, writeTestConfig } from './helpers.ts';
 
@@ -37,6 +38,7 @@ interface Fixture {
   readonly ingestion: TelegramIngestion;
   readonly sendApi: TelegramSendApi;
   readonly typingSignals: AbortSignal[];
+  readonly mentionTyping: MentionTyping;
   /** Builds a runtime over a fresh faux provider, mirroring the composition root. */
   runtimeWith(
     faux: ReturnType<typeof fauxProvider>,
@@ -82,6 +84,7 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
     sendMessage: async () => ({ message_id: nextMessageId++, date: 1_700_000_100, chat: { id: CHAT_ID } }),
     sendSticker: async () => ({ message_id: nextMessageId++, date: 1_700_000_100, chat: { id: CHAT_ID } }),
   };
+  const mentionTyping = new MentionTyping(sendApi);
   const conversationRuntime = new ConversationRuntime({
     agentCacheSize: loaded.config.agent.context.agent_cache_size,
   });
@@ -101,6 +104,7 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
       configStore: runtimeConfigStore,
       secrets: new SecretStore(),
       telegramApi: sendApi,
+      mentionTyping,
       bot: { id: 999n, displayName: 'Plastic Wan', username: 'plasticwan' },
       systemResources: SystemResources.empty(),
       conversationRuntime,
@@ -116,6 +120,7 @@ async function fixture(transform?: (config: FileConfig) => void): Promise<Fixtur
     ingestion: new TelegramIngestion(store, configStore, { id: 999 }),
     sendApi,
     typingSignals,
+    mentionTyping,
     runtimeWith: async (faux, overrides = {}) => (await build(faux, overrides)).runtime,
     runtimeAndSnapshot: (faux, overrides = {}) => build(faux, overrides),
   };
@@ -178,6 +183,28 @@ describe('long-lived invocation', () => {
       expect((await runtime.run(id!, snapshot, new AbortController().signal)).state).toBe('completed');
       expect(f.typingSignals).toHaveLength(0);
     } finally {
+      f.store.close();
+    }
+  });
+
+  test('a mention status started at ingestion ends with the round, even when the model stays silent', async () => {
+    const f = await fixture((config) => {
+      config.agent.context.idle_grace_seconds = 0;
+    });
+    const faux = fauxAgent();
+    faux.setResponses([fauxAssistantMessage(''), fauxAssistantMessage('')]);
+    const { runtime, snapshot } = await f.runtimeAndSnapshot(faux);
+    const service = new InvocationQueueService(f.store, f.configStore, f.conversationRuntime);
+    try {
+      f.ingestion.ingest(update(1, 10, 'hello'), new Date());
+      f.mentionTyping.start(String(CHAT_ID), 0n);
+      await until(() => f.typingSignals.length === 1, 'mention status shown at ingestion');
+      expect(f.typingSignals[0]!.aborted).toBe(false);
+      const [id] = service.processDue(new Date());
+      expect((await runtime.run(id!, snapshot, new AbortController().signal)).state).toBe('completed');
+      expect(f.typingSignals[0]!.aborted).toBe(true);
+    } finally {
+      f.mentionTyping.stopAll();
       f.store.close();
     }
   });

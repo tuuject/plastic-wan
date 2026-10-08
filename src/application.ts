@@ -5,6 +5,7 @@ import { McpManager } from './capabilities/mcp.ts';
 import { MediaService } from './capabilities/media/media.ts';
 import { TelegramMediaClient } from './capabilities/media/media-download.ts';
 import { StickerService } from './capabilities/stickers.ts';
+import { MentionTyping } from './capabilities/mention-typing.ts';
 import { grammySendApi } from './capabilities/telegram-send-api.ts';
 import { createMemoryTools, MemoryStore } from './context/memory.ts';
 import { createImageBridge, type ImageBridge } from './image/bridge.ts';
@@ -38,6 +39,7 @@ import { loadPlugins } from './plugins/plugin.ts';
 import { runStartupCatchUp } from './startup-catch-up.ts';
 import { ServeLock, SqliteStore, stopRunningInstance, watchStopRequests } from './store/database.ts';
 import { LongTaskService } from './store/long-tasks.ts';
+import { activeSleepUntil } from './store/sleep.ts';
 import { recordPromptVersionsFromConfig } from './store/prompt-versions.ts';
 import { appState } from './store/schema.ts';
 
@@ -63,6 +65,7 @@ export async function serve(configPath: string, takeover = false): Promise<void>
   let scheduler: BucketScheduler | undefined;
   let stickers: StickerService | undefined;
   let mcp: McpManager | undefined;
+  let mentionTyping: MentionTyping | undefined;
   let admin: AdminServer | undefined;
   let startupCatchUpController: AbortController | undefined;
   const replayShutdown = new AbortController();
@@ -217,11 +220,17 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     ];
     // Directly exposed non-primitive tools: allowlisted MCP tools only.
     const additionalTools: ToolFactory = (context, deadline) => [...mcpManager.createTools(context, deadline)];
+    // One transport for both: its per-chat throttle is what keeps the mention
+    // status and the model's own `typing` call from doubling up requests.
+    const sendApi = grammySendApi(bot.api);
+    const mentionStatus = new MentionTyping(sendApi);
+    mentionTyping = mentionStatus;
     const runtime = new AgentRuntime({
       store,
       configStore,
       secrets,
-      telegramApi: grammySendApi(bot.api),
+      telegramApi: mentionStatus.wrap(sendApi),
+      mentionTyping: mentionStatus,
       ...(imageBridge === undefined
         ? {}
         : {
@@ -386,6 +395,10 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     }
     bot.use(async (context) => {
       const result = ingestion.ingest(context.update);
+      // A sleeping bot skips queued invocations, so a status would promise a reply that never comes.
+      if (result.mention !== undefined && activeSleepUntil(openedStore.orm) === null) {
+        mentionStatus.start(result.mention.chatId.toString(), result.mention.threadId);
+      }
       if (result.command !== undefined) {
         await replyToCommand(context, commands, result.command);
       }
@@ -403,6 +416,7 @@ export async function serve(configPath: string, takeover = false): Promise<void>
     stopWatcher?.();
     await admin?.stop();
     await scheduler?.stop(30_000);
+    mentionTyping?.stopAll();
     // The image worker borrows the SQLite connection; it must settle (marking
     // late results interrupted if the shutdown budget expires) before the
     // store closes underneath it.
