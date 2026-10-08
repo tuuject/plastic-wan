@@ -127,6 +127,85 @@ test.each(['fresh', 'upgraded'])('invocation audit uses indexed calls in %s data
   }
 });
 
+test.each(['fresh', 'upgraded'])(
+  'reply delivery lookup preserves audit and uses its index in %s databases',
+  async (mode) => {
+    const fixture = await openStore();
+    let store = fixture.store;
+    try {
+      const seed = seedAdminFixture(store);
+      const now = new Date().toISOString();
+      // Historical duplicates must not prevent an upgrade or rewrite past sends.
+      for (const [index, state] of ['success', 'success', 'pending', 'outcome_unknown', 'error'].entries()) {
+        const tool = store.orm
+          .insert(toolCalls)
+          .values({
+            invocationId: seed.invocationA,
+            toolCallId: `reply-index-${index}`,
+            toolName: 'send',
+            argumentsJson: '{}',
+            state,
+            sideEffect: true,
+            createdAt: now,
+          })
+          .returning({ id: toolCalls.id })
+          .get()!;
+        store.orm
+          .insert(telegramSends)
+          .values({
+            toolCallId: tool.id,
+            conversationId: seed.conversationId,
+            kind: 'text',
+            requestJson: JSON.stringify({ reply_to_message_id: '900' }),
+            state,
+            createdAt: now,
+          })
+          .run();
+      }
+      const before = store.orm.select().from(telegramSends).all();
+      if (mode === 'upgraded') {
+        store.db.exec(`
+        DROP INDEX telegram_sends_reply_delivery_idx;
+        DELETE FROM schema_migrations WHERE version = 32;
+      `);
+        store.close();
+        store = await SqliteStore.open(fixture.loaded.config);
+        store.close();
+        store = await SqliteStore.open(fixture.loaded.config);
+      }
+      const plans: string[] = [];
+      const orm = drizzle(store.db, {
+        schema,
+        logger: {
+          logQuery(query, params) {
+            plans.push(
+              ...store.db
+                .prepare<unknown[], { detail: string }>(`EXPLAIN QUERY PLAN ${query}`)
+                .all(...params)
+                .map((row) => row.detail),
+            );
+          },
+        },
+      });
+      const previous = orm
+        .select({ state: telegramSends.state })
+        .from(telegramSends)
+        .where(sql`${telegramSends.conversationId} = ${seed.conversationId}
+        AND json_extract(${telegramSends.requestJson}, '$.reply_to_message_id') = ${'900'}
+        AND ${telegramSends.state} IN ('success', 'pending', 'outcome_unknown')`)
+        .orderBy(sql`${telegramSends.state} = 'success'`)
+        .limit(1)
+        .get();
+      expect(previous?.state).toBe('pending');
+      expect(plans.some((detail) => detail.includes('USING INDEX telegram_sends_reply_delivery_idx'))).toBe(true);
+      expect(store.orm.select().from(telegramSends).all()).toEqual(before);
+      expect(store.db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  },
+);
+
 // --- Migration 027: image delivery ledger upgrade ---
 
 type ImageSendState = 'success' | 'pending' | 'outcome_unknown' | 'error';

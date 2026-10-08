@@ -66,6 +66,35 @@ describe('configuration', () => {
     }
   });
 
+  test('allow_reply_message_multiple_times is optional and boolean-only', async () => {
+    const { directory, configPath } = await fixture();
+    // Omitted: accepted, and the resolved configuration keeps it absent — no
+    // default mechanism turns it into an explicit false.
+    const omitted = await loadConfig(configPath);
+    expect(omitted.config.agent.allow_reply_message_multiple_times).toBeUndefined();
+    expect(omitted.fileConfig.agent.allow_reply_message_multiple_times).toBeUndefined();
+    // Both explicit values are accepted and preserved.
+    for (const value of [false, true]) {
+      await writeFile(
+        configPath,
+        testConfigJsonc(directory, (config) => {
+          config.agent.allow_reply_message_multiple_times = value;
+        }),
+      );
+      const loaded = await loadConfig(configPath);
+      expect(loaded.config.agent.allow_reply_message_multiple_times).toBe(value);
+      expect(loaded.fileConfig.agent.allow_reply_message_multiple_times).toBe(value);
+    }
+    // Anything that is not a boolean is rejected by the schema.
+    await writeFile(
+      configPath,
+      testConfigJsonc(directory, (config) => {
+        Object.assign(config.agent, { allow_reply_message_multiple_times: 'yes' });
+      }),
+    );
+    await expect(loadConfig(configPath)).rejects.toThrow('Invalid config');
+  });
+
   test('enforces the Conversation Context invariants', async () => {
     const { directory, configPath } = await fixture();
     const reload = async (transform: Parameters<typeof testConfigJsonc>[1]): Promise<unknown> => {

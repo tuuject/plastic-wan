@@ -24,7 +24,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
+async function fixture(allowReplyMessageMultipleTimes?: boolean) {
   const directory = await mkdtemp(join(tmpdir(), 'plasticwan-admin-inspection-'));
   const configPath = join(directory, 'config.jsonc');
   const secret = 'inspection-secret-must-not-be-output';
@@ -34,6 +34,9 @@ async function fixture() {
     testConfigJsonc(directory, (config) => {
       config.admin = { enabled: true, host: '127.0.0.1', port: 8899, session_ttl_hours: 12 };
       config.telegram.chats[0]!.id = -100123456789;
+      if (allowReplyMessageMultipleTimes !== undefined) {
+        config.agent.allow_reply_message_multiple_times = allowReplyMessageMultipleTimes;
+      }
       const agent = config.providers.agent;
       if (agent?.kind === 'custom') {
         agent.headers = { 'x-private': { env: 'PLASTICWAN_TEST_HEADER_SECRET' } };
@@ -247,6 +250,23 @@ test('configuration and prompts are explicit read projections for both keys and 
   expect(await readFile(f.configPath, 'utf8')).toBe(before);
   expect(f.modelCalls()).toBe(0);
 });
+
+test.each([undefined, false, true])(
+  'config projection preserves allow_reply_message_multiple_times=%s',
+  async (value) => {
+    const f = await fixture(value);
+    for (const source of ['active', 'file']) {
+      const response = await f.server.handle(request(`/api/config/view?source=${source}`, { headers: auth(f.key) }));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      if (value === undefined) {
+        expect(body).not.toHaveProperty('config.agent.allow_reply_message_multiple_times');
+      } else {
+        expect(body).toHaveProperty('config.agent.allow_reply_message_multiple_times', value);
+      }
+    }
+  },
+);
 
 test('file and active prompt reads never silently substitute for each other', async () => {
   const f = await fixture();

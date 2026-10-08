@@ -174,6 +174,7 @@ export interface SendToolEnvironment {
   readonly sendRateLimit: { readonly sendsPerWindow: number; readonly windowSeconds: number };
   readonly maxTextLength: number | undefined;
   readonly disallowBlankLines: boolean;
+  readonly allowReplyMessageMultipleTimes?: boolean;
   readonly deadline: number;
   readonly bot: { readonly id: bigint; readonly displayName: string; readonly username: string | null };
   /**
@@ -224,6 +225,10 @@ export function createSendTool(
   environment: SendToolEnvironment,
 ): AgentTool<typeof SendInputSchema, { telegramMessageId: string; replayed?: boolean }> {
   const mentionedTasks = new Set<bigint>();
+  const replyPolicy =
+    environment.allowReplyMessageMultipleTimes === true
+      ? 'Current configuration permits multiple replies to the same message; each send must still be warranted.'
+      : 'Each message may receive at most one reply across text, stickers, and images, even across later invocations; changing the content or setting resend:true does not permit another reply. A pending or unknown earlier reply also blocks a new one. Do not omit or change reply_to_message_id to bypass a rejected duplicate.';
   const textConstraints = [
     environment.maxTextLength === undefined
       ? 'Text must fit the schema limit.'
@@ -235,7 +240,7 @@ export function createSendTool(
   return {
     name: 'send',
     label: 'Send to Telegram',
-    description: `Publish exactly one warranted user-visible Telegram message or sticker. Use this only after deciding the new messages or a current task completion require a reply, clarification, or confirmation; do not use it merely because the tool is available, to answer history-only content, or to publish private reasoning. Keep the message concise and self-contained. For text, kind may be omitted; omit parse_mode for plain text, or set parse_mode to MarkdownV2 only when the text is correctly escaped. ${textConstraints} For generated images, use kind:image with image_generation_id from this conversation. Already delivered outputs are not sent again; a replayed result reports the earlier delivery, not a new message. Set resend:true only when a new user message explicitly asks to resend those pictures, never just to handle a completion receipt or retry an unknown outcome. For a sticker, kind must be sticker and sticker_ref must be a stk_ value returned by the search_stickers capability (via execute); img_ refs cannot be sent. Set reply_to_message_id only to a message visible in this conversation, preferring the relevant new message; when several separate discussions are active, set it on every message so each reply is visibly attached to the one it answers. Success means Telegram accepted the send; if the tool fails or reports an unknown outcome, do not claim it was sent and do not blindly retry. One batch of new messages may hold several separate discussions among different people: keep one message to one discussion, calling send once per discussion you choose to answer rather than merging unrelated discussions into a single message, and leave a discussion unanswered when you have nothing to add to it. Still do not split one answer across several messages; repeated sends are rate limited per chat.`,
+    description: `Publish exactly one warranted user-visible Telegram message or sticker. Use this only after deciding the new messages or a current task completion require a reply, clarification, or confirmation; do not use it merely because the tool is available, to answer history-only content, or to publish private reasoning. Keep the message concise and self-contained. For text, kind may be omitted; omit parse_mode for plain text, or set parse_mode to MarkdownV2 only when the text is correctly escaped. ${textConstraints} For generated images, use kind:image with image_generation_id from this conversation. Already delivered outputs are not sent again; a replayed result reports the earlier delivery, not a new message. Set resend:true only when a new user message explicitly asks to resend those pictures, never just to handle a completion receipt or retry an unknown outcome. For a sticker, kind must be sticker and sticker_ref must be a stk_ value returned by the search_stickers capability (via execute); img_ refs cannot be sent. Set reply_to_message_id only to a message visible in this conversation, preferring the relevant new message; when several separate discussions are active, set it on every message so each reply is visibly attached to the one it answers. ${replyPolicy} Success means Telegram accepted the send; if the tool fails or reports an unknown outcome, do not claim it was sent and do not blindly retry. One batch of new messages may hold several separate discussions among different people: keep one message to one discussion, calling send once per discussion you choose to answer rather than merging unrelated discussions into a single message, and leave a discussion unanswered when you have nothing to add to it. Still do not split one answer across several messages; repeated sends are rate limited per chat.`,
     parameters: SendInputSchema,
     executionMode: 'sequential',
     execute: async (toolCallId, input, signal) => {
@@ -368,13 +373,53 @@ export function createSendTool(
           }
         }
       }
-      // Checked last, so only a send that would otherwise go out is held back:
-      // an invalid one keeps its own error and the barrier stays unspent.
+      const rejectDuplicateReply = (): { error: string } | undefined => {
+        if (environment.allowReplyMessageMultipleTimes !== true && send.reply_to_message_id !== undefined) {
+          const previous = environment.store.orm
+            .select({ state: telegramSends.state })
+            .from(telegramSends)
+            .where(
+              and(
+                eq(telegramSends.conversationId, targetConversationId),
+                sql`json_extract(${telegramSends.requestJson}, '$.reply_to_message_id') = ${send.reply_to_message_id}`,
+                sql`${telegramSends.state} IN ('success', 'pending', 'outcome_unknown')`,
+              ),
+            )
+            // A success does not resolve another pending or uncertain attempt.
+            .orderBy(sql`${telegramSends.state} = 'success'`)
+            .limit(1)
+            .get();
+          if (previous !== undefined) {
+            const errorCode = previous.state === 'success' ? 'reply_already_sent' : 'reply_delivery_unknown';
+            recordRejectedSend(environment, toolCallId, input, errorCode);
+            return {
+              error:
+                previous.state === 'success'
+                  ? 'Not sent: reply_already_sent. This message has already been replied to. Do not send another reply or bypass this by omitting or changing reply_to_message_id.'
+                  : 'Not sent: reply_delivery_unknown. An earlier reply to this message is pending or has an unknown outcome. Do not retry or bypass this by omitting or changing reply_to_message_id.',
+            };
+          }
+        }
+        return undefined;
+      };
+      // Reject known duplicates before spending the barrier. The barrier commits
+      // bucket attachments before queueing them in memory, so it must run outside
+      // the send transaction: a later audit failure must not undo those attachments.
+      const duplicate = rejectDuplicateReply();
+      if (duplicate !== undefined) {
+        throw new Error(duplicate.error);
+      }
       if (environment.holdForNewMessages?.() === true) {
         recordRejectedSend(environment, toolCallId, input, 'send_barrier');
         throw new Error(SEND_BARRIER_TEXT);
       }
       const pending = environment.store.transaction(() => {
+        // Recheck under the write lock and claim with the pending send atomically.
+        // The retained audit survives context resets and restarts.
+        const duplicate = rejectDuplicateReply();
+        if (duplicate !== undefined) {
+          return duplicate;
+        }
         const now = new Date().toISOString();
         const createdToolCall = environment.store.orm
           .insert(toolCalls)
@@ -399,7 +444,9 @@ export function createSendTool(
             .set({ state: 'error', errorCode: 'send_rate_limited', finishedAt: now })
             .where(eq(toolCalls.id, toolId))
             .run();
-          return { toolId, sendId: null };
+          return {
+            error: `send rate limit of ${environment.sendRateLimit.sendsPerWindow} per ${environment.sendRateLimit.windowSeconds}s window reached`,
+          };
         }
         // Audit counters, not a limit: the sliding window above is the brake.
         // `side_effect_started` marks the invocation from the moment a send is
@@ -437,10 +484,8 @@ export function createSendTool(
         }
         return { toolId, sendId: createdSend.id };
       });
-      if (pending.sendId === null) {
-        throw new Error(
-          `send rate limit of ${environment.sendRateLimit.sendsPerWindow} per ${environment.sendRateLimit.windowSeconds}s window reached`,
-        );
+      if ('error' in pending) {
+        throw new Error(pending.error);
       }
       const sendId = pending.sendId;
       const options = {

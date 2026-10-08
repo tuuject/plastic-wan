@@ -112,6 +112,7 @@ export function configurationView(config: RawConfig) {
       memory_ttl_warning_days: config.agent.memory_ttl_warning_days,
       send_nudge_enabled: config.agent.send_nudge_enabled,
       send_barrier_enabled: config.agent.send_barrier_enabled,
+      allow_reply_message_multiple_times: config.agent.allow_reply_message_multiple_times,
       context: config.agent.context,
       rate_limits: config.agent.rate_limits,
     },

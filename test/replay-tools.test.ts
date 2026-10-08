@@ -137,6 +137,43 @@ test('send synthesizes text, image, and sticker messages and preserves arguments
   expect(replay.outputs).toHaveLength(4);
 });
 
+test('send rejects repeated reply targets within the scene without recording another output', async () => {
+  const registry = replayInput({ tools: [definition('send', SendInputSchema)] });
+  const replay = createReplayTools(registry, SystemResources.empty(), { replyMessageIds: new Set(['42', '43']) });
+  const send = toolOf(replay.tools, 'send');
+  await send.execute('first', { text: 'first answer', reply_to_message_id: '42' });
+  await expect(send.execute('duplicate-text', { text: 'different answer', reply_to_message_id: '42' })).rejects.toThrow(
+    'reply_already_sent',
+  );
+  await expect(
+    send.execute('duplicate-sticker', { kind: 'sticker', sticker_ref: 'stk_test', reply_to_message_id: '42' }),
+  ).rejects.toThrow('reply_already_sent');
+  await send.execute('other', { text: 'another discussion', reply_to_message_id: '43' });
+  await send.execute('no-reply', { text: 'independent completion' });
+  expect(replay.outputs.map((output) => output.reply_to_message_id)).toEqual(['42', '43', null]);
+  expect(replay.dispatches).toHaveLength(5);
+  // A replay is an isolated experiment, not a new read of production delivery state.
+  const separate = createReplayTools(registry, SystemResources.empty());
+  await toolOf(separate.tools, 'send').execute('fresh', { text: 'new scene', reply_to_message_id: '42' });
+  expect(separate.outputs).toHaveLength(1);
+});
+
+test('send allows repeated reply targets when configured without bypassing scene visibility', async () => {
+  const replay = createReplayTools(
+    replayInput({ tools: [definition('send', SendInputSchema)] }),
+    SystemResources.empty(),
+    { allowReplyMessageMultipleTimes: true, replyMessageIds: new Set(['42']) },
+  );
+  const send = toolOf(replay.tools, 'send');
+  await send.execute('first', { text: 'first answer', reply_to_message_id: '42' });
+  await send.execute('second', { kind: 'sticker', sticker_ref: 'stk_test', reply_to_message_id: '42' });
+  await expect(send.execute('invisible', { text: 'not visible', reply_to_message_id: '43' })).rejects.toThrow(
+    'reply_to_message_id is not visible',
+  );
+  expect(replay.outputs.map((output) => output.reply_to_message_id)).toEqual(['42', '42']);
+  expect(replay.dispatches).toHaveLength(2);
+});
+
 test('memory capabilities use an in-memory map without a store', async () => {
   const replay = createReplayTools(
     replayInput({

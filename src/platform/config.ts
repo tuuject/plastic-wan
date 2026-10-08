@@ -319,6 +319,7 @@ export const ConfigSchema = Type.Object(
         memory_ttl_warning_days: Type.Optional(PositiveInteger),
         send_nudge_enabled: Type.Optional(Type.Boolean()),
         send_barrier_enabled: Type.Optional(Type.Boolean()),
+        allow_reply_message_multiple_times: Type.Optional(Type.Boolean({ default: false })),
         context: Type.Object(
           {
             retained_sends_target: Type.Integer({ minimum: 1 }),

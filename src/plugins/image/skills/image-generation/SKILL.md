@@ -21,7 +21,7 @@ How to generate and deliver images in this conversation. The runtime-internal ca
 6. `input_image_refs`: only for image-to-image or edits. Each value must be an `img_…` reference that appeared in **this** conversation. Never invent or reuse ids from other chats, and never paste file ids or URLs — they will be rejected.
 7. `extended_data` is a provider-specific escape hatch; leave it out unless the user explicitly asked for a provider-specific option.
 
-The call returns immediately with a `generation_id`. Generation takes seconds to minutes. Tell the user the request is running; do not claim a picture exists before the receipt arrives.
+The call returns immediately with a `generation_id`. Generation takes seconds to minutes. Do not claim a picture exists before the receipt arrives. If the final pictures should reply to the user's message, prefer holding that message's reply for the finished result instead of first sending an acknowledgement reply; the `send` tool description states the reply limit currently in force for one message (it may permit more than one reply when configured that way). Use `typing` for temporary status if needed.
 
 ## Receiving the result
 
@@ -29,7 +29,7 @@ When the generation settles, a task completion receipt is injected into the conv
 
 - On success or partial success: check `image_delivery` on the receipt. Its `delivered_asset_ids` were already sent; `pending_asset_ids` are not yet delivered; `unknown_asset_ids` have an uncertain earlier delivery. This status is captured when the receipt enters the conversation, which can be after a successful send in the preceding tool chain. A completion receipt is not a request to send the same pictures again.
 - To deliver remaining outputs, use one `send` call — `kind:"image"`, `image_generation_id` set to the receipt's generation id. All not-yet-delivered outputs are sent together as one album. Add a short caption in `text` if it helps. When everything was already delivered, the tool returns `replayed:true` and lists the earlier Telegram delivery message ids without posting again; do not describe this as a new send.
-- Only when a new user message explicitly requests the same pictures again, set `resend:true` on that image send. It is rejected in a completion-receipt round and never bypasses authorization, rate limits, or an uncertain earlier delivery. Do not use it just to retry a duplicate or unknown outcome.
+- Only when a new user message explicitly requests the same pictures again, set `resend:true` on that image send. It is rejected in a completion-receipt round and never bypasses authorization, rate limits, an uncertain earlier delivery, or the per-message reply limit that the `send` tool description states as currently in force. Reply to the new resend request, not an already-answered message. Do not use it just to retry a duplicate or unknown outcome.
 - On failure: explain briefly in your own words what failed; do not resend the same request unprompted, and do not retry more than once if the user clearly wants the picture.
 - Never send a `generation_id` you did not receive from this conversation (a tool result or a receipt here).
 

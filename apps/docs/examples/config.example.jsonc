@@ -43,6 +43,8 @@
     "max_concurrency": 4,
     "context_stop_ratio": 0.7,
     "history_messages": 20,
+    // 可选，默认 false：同一消息默认只回复一次（文字/贴纸/图片共享）；true 允许对同一消息多次回复，但不绕过授权、预算、限流与图片交付去重。热更新，下一次 Invocation 生效。
+    "allow_reply_message_multiple_times": false,
     "context": {
       "retained_sends_target": 2,
       "retained_sends_max": 3,

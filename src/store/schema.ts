@@ -414,6 +414,9 @@ export const telegramSends = sqliteTable(
     finishedAt: text('finished_at'),
   },
   (table) => [
+    index('telegram_sends_reply_delivery_idx')
+      .on(table.conversationId, sql`json_extract(${table.requestJson}, '$.reply_to_message_id')`)
+      .where(sql`${table.state} IN ('success', 'pending', 'outcome_unknown')`),
     index('telegram_sends_image_delivery_idx')
       .on(table.conversationId, sql`json_extract(${table.requestJson}, '$.generation_id')`)
       .where(sql`${table.kind} = 'image'`),

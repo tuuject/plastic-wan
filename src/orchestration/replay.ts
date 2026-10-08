@@ -318,6 +318,7 @@ export class ReplayRunner {
       imageModels: publicImageModels(config),
       ...(config.agent.send_max_text_length === undefined ? {} : { maxTextLength: config.agent.send_max_text_length }),
       disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+      allowReplyMessageMultipleTimes: config.agent.allow_reply_message_multiple_times === true,
       replyMessageIds: new Set(scene.replyMessageIds),
       ...(imageLoader === undefined || !model.input.includes('image')
         ? {}
@@ -659,6 +660,7 @@ export class ReplayRunner {
       sendRateLimit: { sendsPerWindow: 1, windowSeconds: 1 },
       maxTextLength: config.agent.send_max_text_length,
       disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+      allowReplyMessageMultipleTimes: config.agent.allow_reply_message_multiple_times === true,
       deadline: Number.MAX_SAFE_INTEGER,
       bot: { id: 0n, displayName: '', username: null },
     });

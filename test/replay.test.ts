@@ -469,6 +469,39 @@ test('a scene replay runs the historical public chat under the current config wi
   expect(f.rows()).toEqual(before);
 });
 
+test.each([undefined, false, true])(
+  'replay uses the current reply policy (%s) in both descriptions and execution',
+  async (allow) => {
+    const f = await fixture({
+      defaultRegistry: true,
+      change: (config) => {
+        if (allow !== undefined) {
+          config.agent.allow_reply_message_multiple_times = allow;
+        }
+      },
+    });
+    f.faux.setResponses([
+      (context) => {
+        const send = context.tools?.find((tool) => tool.name === 'send');
+        expect(send?.description.includes('at most one reply')).toBe(allow !== true);
+        return fauxAssistantMessage(fauxToolCall('send', { text: 'first', reply_to_message_id: '901' }), {
+          stopReason: 'toolUse',
+        });
+      },
+      fauxAssistantMessage(fauxToolCall('send', { text: 'second', reply_to_message_id: '901' }), {
+        stopReason: 'toolUse',
+      }),
+      fauxAssistantMessage('done'),
+    ]);
+    const before = f.rows();
+    const result = await f.run();
+    expect(result.error).toBeNull();
+    expect(result.send_count).toBe(allow === true ? 2 : 1);
+    expect(result.tool_calls.map((call) => call.is_error)).toEqual([false, allow !== true]);
+    expect(f.rows()).toEqual(before);
+  },
+);
+
 test.each([false, true])(
   'list_image_models replays validated config without credentials (invalid=%s)',
   async (invalid) => {

@@ -171,6 +171,29 @@ test.each([
   expect(diff.candidate.raw.telegram.chats[0]?.ignored_user_ids).toEqual(after);
 });
 
+test.each([
+  { before: undefined, after: true },
+  { before: true, after: false },
+  { before: true, after: undefined },
+])('hot-applies allow_reply_message_multiple_times from $before to $after', async ({ before, after }) => {
+  const setField = (config: FileConfig, value: boolean | undefined) => {
+    if (value === undefined) {
+      delete config.agent.allow_reply_message_multiple_times;
+    } else {
+      config.agent.allow_reply_message_multiple_times = value;
+    }
+  };
+  const { active, file } = await loadBoth(
+    (config) => setField(config, before),
+    (config) => setField(config, after),
+  );
+  const diff = diffConfig({ file: active.fileConfig, raw: active.config }, { file: file.fileConfig, raw: file.config });
+  expect(paths(diff.changes, 'hot')).toEqual(['agent.allow_reply_message_multiple_times']);
+  expect(paths(diff.changes, 'restart')).toEqual([]);
+  expect(diff.candidate.file.agent.allow_reply_message_multiple_times).toEqual(after);
+  expect(diff.candidate.raw.agent.allow_reply_message_multiple_times).toEqual(after);
+});
+
 test('treats a chat field other than instructions as restart-only', async () => {
   const { active, file } = await loadBoth(undefined, (config) => {
     config.telegram.chats[0]!.timezone = 'Asia/Tokyo';

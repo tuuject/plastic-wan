@@ -47,6 +47,7 @@ export interface ReplayToolOptions {
   readonly imageModels?: readonly PublicModel[];
   readonly maxTextLength?: number;
   readonly disallowBlankLines?: boolean;
+  readonly allowReplyMessageMultipleTimes?: boolean;
   readonly replyMessageIds?: ReadonlySet<string>;
 }
 
@@ -272,6 +273,13 @@ function replaySendTool(definition: ReplayToolDefinition, state: ReplayState): A
         throw new Error('reply_to_message_id is not visible in this scene');
       }
       state.dispatches.push({ tool_call_id: toolCallId, tool_name: 'send', mode: 'synthetic' });
+      if (
+        state.options.allowReplyMessageMultipleTimes !== true &&
+        typeof input.reply_to_message_id === 'string' &&
+        state.outputs.some((output) => output.reply_to_message_id === input.reply_to_message_id)
+      ) {
+        throw new Error('Not sent: reply_already_sent. This message has already been replied to in this scene.');
+      }
       state.sends += 1;
       const messageId = String(state.sends);
       state.outputs.push({

@@ -279,8 +279,10 @@ Alarm 是第一个 `plugin_id = "alarm"` 的 consumer，通过 `execute.call` �
 - 文本默认按纯文本发送；显式设置 `parse_mode: "MarkdownV2"` 时由 Telegram 按 MarkdownV2 解析。只提供 `text`（以及可选的 `reply_to_message_id`）时，`kind` 默认为 `text`。
 - 配置允许且当前 Conversation Context 授权的 Sticker（`stk_` 引用）。
 - 可选 Reply：模型传 `reply_to_message_id`，目标必须命中当前 Conversation Context 里仍在保留段内且未过期的 `reply:<telegram_message_id>` 引用。
+- **同一消息只回复一次**（默认行为，`agent.allow_reply_message_multiple_times` 缺省为 `false`）：按目标 Conversation + `reply_to_message_id` 查询保留的 `telegram_sends`，文字、贴纸、图片共用一次回复机会，不按内容或 Invocation 区分。已有 `success` 时拒绝为 `reply_already_sent`；已有 `pending` / `outcome_unknown` 时保守拒绝为 `reply_delivery_unknown`（未决优先），只有明确 `error` 不占回复机会。先在 send 屏障前预检，再在写入 pending 的同一个 IMMEDIATE 事务内复检，覆盖并发、跨 Invocation、Context 重建与重启。屏障自身的 Bucket 挂载事务必须独立提交，不能被后续发送审计失败回滚成「内存已排队、数据库未挂载」；旧审计同样生效，超出在线保留窗口不承诺去重。显式设为 `true` 时整段守卫跳过，允许对同一显式目标多次发送；它不绕过授权、预算、发送限流与 send 屏障，也不关闭图片 generation/asset 交付去重或结果未知保护（见 [Image 生成](#image-生成)）。`send` 的 Tool 描述随该配置切换，描述与拒绝结果都只在该守卫生效时禁止删掉或改换目标绕过限制。
+- 该守卫开启时（默认），重复 Reply 只新增 `tool_calls` 错误审计，不调用 Telegram、不写新的 `telegram_sends`、不计发送额度，也不触发 send 屏障。`resend:true` 不绕过限制；已交付图片的 `replayed:true` 是无发送的成功重放，不算第二次回复。Tool 描述与拒绝结果明确禁止模型删掉或改换目标绕过限制；不带 Reply 的独立发送仍可用，runtime 不推断其语义归属，也不做文本相似度去重。关闭守卫（`allow_reply_message_multiple_times: true`）后以上拒绝路径全部不触发，模型仍须为自己的每次发送提供依据。
 
-发送前写 pending 审计并标记副作用边界。明确失败可按策略处理；网络中断后无法确认 Telegram 是否接收时记录 `outcome_unknown`，不能盲目重发。
+发送前写 pending 审计并标记副作用边界。明确失败可按策略处理；网络中断后无法确认 Telegram 是否接收时记录 `outcome_unknown`，不能盲目重发。进程若在 pending 落盘后、结果落盘前崩溃，重启恢复只结算 Invocation，不会把发送行按年龄改成 `error`；默认去重策略下，遗留 pending 在审计保留期内继续阻止 Reply，不能靠超时推断未送达。
 
 - 运行已被 abort（`/pause`、`/cut_topic`、Admin 取消）或已过 Invocation deadline 时，`send` 在写 pending 审计之前直接拒绝：Tool Call 记为 `error`，错误码 `aborted` / `deadline_exceeded`，不写 `telegram_sends`、不调用 Telegram。
 - Telegram 返回 429 时按 `retry_after` 等待后重试，等待超过 deadline 则不重试；等待期间 abort 记为 `error`/`aborted`。开启 send 屏障时，等待结束后会再判断一次屏障，命中则不重试，记为 `error`/`send_barrier`（此时已有 `telegram_sends` 行）。
@@ -290,13 +292,15 @@ Alarm 是第一个 `plugin_id = "alarm"` 的 consumer，通过 `execute.call` �
 
 `agent.send_disallow_blank_lines` 开启（默认关闭）时，包含任何空行的文本同样在发送前被拒绝，错误码 `send_blank_lines`。
 
+`agent.allow_reply_message_multiple_times`（可选，默认 `false`）是上述「同一消息只回复一次」守卫的总开关，与 `send_*` 同级、全局生效、无 per-Chat 覆盖：`false`/省略时守卫启用，`true` 时跳过查重并允许对同一显式目标多次发送，但图片 generation/asset 交付去重与结果未知保护不受影响。它属于热更新白名单：显式应用配置后**下一次** Invocation 与重放读取新值，运行中的 Invocation 继续用启动时的快照；Tool 描述在每次运行时按该快照生成，因此同一进程里新旧运行可能看到不同的 `send` 描述。
+
 `agent.rate_limits.sends_per_window` / `window_seconds` 限制同一 Chat 在滑动窗口内的 `telegram_sends` 行数，不区分状态（失败的尝试同样消耗额度，否则失败重试的循环就没有刹车）；超出时 Tool Call 记为 `error`/`send_rate_limited`，不写 `telegram_sends`。这是长活 Invocation 取代 per-Invocation `max_sends` 的刹车。
 
 ### 一条消息对应一个话题
 
 `send` 的 Tool 描述要求「一条消息对应一个话题」：同一批新消息里有多拨人在聊不相关的事情时，模型为每个它选择参与的话题各调用一次 `send`，并分别带上指向该话题内消息的 `reply_to_message_id`，而不是把不相关的内容合进一条消息。没话要说的话题可以不回；单个回答仍然不拆成多条。
 
-这只是 Tool 描述层面的倾向，runtime 不做任何分线判断，也不强制 `reply_to_message_id`——话题归属完全由模型从消息头的 `re:N`、`uid:N` 与时间顺序自行推断，Forum Topic 隔离在这里不起作用（同一个 Topic 内部的多话题属于同一个 Conversation）。描述里原先有一句「repeated sends are rate limited per chat, so say what matters in one message instead of splitting it」，它反过来鼓励了合并，是群聊回复「串味」的成因之一，已经删掉：`sends_per_window` 本身足够宽松，不需要用它压制正常的分条回复。机制侧不需要改动，一轮内多次 `send` 本来就各自独立审计、独立计数、独立失败。
+话题分线仍只是 Tool 描述层面的倾向，runtime 不推断话题，也不强制 `reply_to_message_id`；但默认配置（`allow_reply_message_multiple_times` 为 `false`/省略）下，显式指向同一消息的重复 Reply 会被上述守卫硬性拒绝，显式开启 `true` 后同一目标可以多次回复。模型从消息头的 `re:N`、`uid:N` 与时间顺序自行推断话题归属；同一个 Forum Topic 内部的多话题仍属于同一个 Conversation。不同回复目标的多次 `send` 各自独立审计、独立计数、独立失败，不能因「一个回答不拆多条」而把不相关的话题合并。
 
 代价是群里会更容易连发若干条，从而更容易撞上 Telegram 自己的群聊发送速率限制；那只是多走一次既有的 429 `retry_after` 重试，不丢消息。
 
@@ -348,7 +352,7 @@ Tool 只返回文本、JSON、XML 或 JavaScript 响应，拒绝压缩和二进�
 - **输入授权**：`input_image_refs` 只接受本 Conversation Context 授权的 `img_` 引用（经 `resolveMedia` 解析为真实 Media ID），任意 file ID、URL 或其它会话的引用在提交前就被拒绝并审计（`image_input_ref_unauthorized`）。
 - **提交与幂等**：bridge 以 actor `agent:<conversationId>` 向 image core 提交生成意图（idempotency key 绑定 Conversation），同一 Conversation 内同内容重复提交返回既有 generation（`replayed: true`），不重复计费；每个 Invocation 最多 3 次提交。工具立即返回 `generation_id`，图片此时还不存在。
 - **回执**：生成落定（成功、部分成功、失败、重启后由 `reconcile` 对账）时，bridge 经 long task 完成对应任务，Scheduler 把任务完成回执作为消息注入原 Conversation——回执是**不可信数据**（`generation_id`、status、输出清单），与 Alarm 回执同一通道。进程重启不影响未完成生成：启动时 reconcile 重建 core 状态，晚到的结果照常投递，不会重复回执。
-- **交付**：模型用 `send kind:"image"` + `image_generation_id` 交付。运行时按「该 generation 的 actor 是否就是本 Conversation」解析输出（`sendableOutputs`，跨 Conversation 引用拒绝），声明输出的文件读取失败时直接以 `image_generation_unavailable` 拒绝并审计，不静默缩小相册、不发图也不占发送预算。随后按目标 Conversation、generation 与 asset ID 查询 `telegram_sends`，只把尚未成功交付的成品一起发送（单图 sendPhoto，2 张以上 sendMediaGroup）。发送请求审计记录 `asset_ids`；全部已送时返回成功的 `replayed:true`，Tool 结果文本列出相关投递批次的旧 Telegram message ID，只增加 `tool_calls` 和 canonical toolResult，不新建发送行、不增加 `sends_used`、限流用量或 Context 的 `send_count_total`/`send_seq`。生成后来增加的成品不会被旧交付误拦。去重随在线发送审计保留，跨 Invocation 与进程重启有效，不承诺超出保留窗口的幂等。
+- **交付**：模型用 `send kind:"image"` + `image_generation_id` 交付。运行时按「该 generation 的 actor 是否就是本 Conversation」解析输出（`sendableOutputs`，跨 Conversation 引用拒绝），声明输出的文件读取失败时直接以 `image_generation_unavailable` 拒绝并审计，不静默缩小相册、不发图也不占发送预算。随后按目标 Conversation、generation 与 asset ID 查询 `telegram_sends`，只把尚未成功交付的成品一起发送（单图 sendPhoto，2 张以上 sendMediaGroup）。发送请求审计记录 `asset_ids`；全部已送时返回成功的 `replayed:true`，Tool 结果文本列出相关投递批次的旧 Telegram message ID，只增加 `tool_calls` 和 canonical toolResult，不新建发送行、不增加 `sends_used`、限流用量或 Context 的 `send_count_total`/`send_seq`。生成后来增加的成品不被旧资产交付误拦；默认配置下显式 Reply 仍受同一消息只回复一次的限制（`allow_reply_message_multiple_times: true` 时放开，见 [send Tool](#send-tool)）。去重随在线发送审计保留，跨 Invocation 与进程重启有效，不承诺超出保留窗口的幂等。
 - **延迟回执与重发**：图片回执在实际注入时附带 `image_delivery`，由互斥的 `delivered_asset_ids`、`pending_asset_ids`、`unknown_asset_ids` 三类列表组成且结果未知优先（同一 asset 的成功不抵消任何未决尝试，整代资产集合不可证明时全部归入未知），而不是沿用任务刚完成时的交付快照；因此工具链中已发送的图会被标为已送。用户明确要求重新发送时，只有普通用户消息轮（有 caller）可用 `resend:true`；完成回执轮不能绕过去重。任一待送资产存在 pending 或 `outcome_unknown` 的未决尝试、或旧发送带 `asset_ids_unknown` 时，都会阻止本次盲重试，即使显式 resend 也不绕过。真正发图仍审计 bot 消息与 `media`，并保留既有授权、引用 TTL、限流与发送屏障。
 - **失败语义**：失败/中断的轮次同样完成任务（回执带失败状态）；模型用自己的话解释失败，重试是新的 `image_generate` 提交，未送达的输出没有隐藏重发路径。
 

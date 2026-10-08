@@ -436,8 +436,13 @@ describe('send tool', () => {
     expired.store.close();
   });
 
-  test('a 429 retry is held back when new messages arrived during the wait', async () => {
+  test('a 429 retry is held back without blocking a later reply to the same target', async () => {
+    let attempts = 0;
     const api = countingApi(async () => {
+      attempts += 1;
+      if (attempts > 1) {
+        return { message_id: 501 };
+      }
       throw new GrammyError(
         'Too Many Requests',
         { ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 0 } },
@@ -452,14 +457,28 @@ describe('send tool', () => {
       api,
       holdForNewMessages: () => {
         holdChecks += 1;
-        return holdChecks > 1;
+        return holdChecks === 2;
       },
     });
-    await expect(fixture.tool.execute('held-1', { kind: 'text', text: 'stale' })).rejects.toThrow(SEND_BARRIER_TEXT);
+    await expect(
+      fixture.tool.execute('held-1', { kind: 'text', text: 'stale', reply_to_message_id: '10' }),
+    ).rejects.toThrow(SEND_BARRIER_TEXT);
     expect(api.calls).toBe(1);
     expect(fixture.audit()).toEqual({
       toolCalls: [{ state: 'error', error_code: 'send_barrier' }],
       sends: [{ state: 'error', error_code: 'send_barrier', telegram_message_id: null }],
+    });
+    await fixture.tool.execute('held-2', { kind: 'text', text: 'updated answer', reply_to_message_id: '10' });
+    expect(api.calls).toBe(2);
+    expect(fixture.audit()).toEqual({
+      toolCalls: [
+        { state: 'error', error_code: 'send_barrier' },
+        { state: 'success', error_code: null },
+      ],
+      sends: [
+        { state: 'error', error_code: 'send_barrier', telegram_message_id: null },
+        { state: 'success', error_code: null, telegram_message_id: 501n },
+      ],
     });
     fixture.store.close();
   });

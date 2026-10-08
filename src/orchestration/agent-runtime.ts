@@ -214,6 +214,7 @@ export class AgentRuntime {
       sendRateLimit: this.#sendRateLimit(config),
       maxTextLength: config.agent.send_max_text_length,
       disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+      allowReplyMessageMultipleTimes: config.agent.allow_reply_message_multiple_times === true,
       deadline: Number.MAX_SAFE_INTEGER,
       bot: this.#bot,
     });
@@ -284,6 +285,7 @@ export class AgentRuntime {
         sendRateLimit: this.#sendRateLimit(config),
         maxTextLength: config.agent.send_max_text_length,
         disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+        allowReplyMessageMultipleTimes: config.agent.allow_reply_message_multiple_times === true,
         deadline,
         bot: this.#bot,
         ...(holdForNewMessages === undefined ? {} : { holdForNewMessages }),
