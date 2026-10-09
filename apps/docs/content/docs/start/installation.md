@@ -25,20 +25,36 @@ docker build -t plasticwan:local .
 - FFmpeg、FFprobe、Python 与 `lottie_convert.py` 位于服务的 `PATH`；
 - 可写的数据目录、Telegram Token、Provider API key。
 
-安装依赖并验证配置：
+拉取源码，安装依赖并构建图片核心包与管理面板，再复制配置示例：
 
 ```bash
-pnpm install
-node src/cli.ts check-config --config /absolute/path/config.jsonc
+git clone https://github.com/tuuject/plastic-wan.git
+cd plastic-wan
+pnpm install --frozen-lockfile
+pnpm --filter @plasticwan/image-service build
+pnpm run admin:build
+mkdir -p config data
+cp apps/docs/examples/config.example.jsonc config/config.jsonc
+cp apps/docs/examples/system-prompt.example.md config/system-prompt.md
 ```
 
-确认后运行：
+示例配置使用容器路径，需要改为本机路径：`data_dir` 设为 `./data`，`paths.database`、`paths.media_cache`、`paths.backups` 分别设为 `./data/plasticwan.sqlite`、`./data/media-cache`、`./data/backups`。Prompt 路径相对于配置文件目录，不用改。只在本机访问管理面板时，把 `admin.host` 改为 `127.0.0.1`。
+
+在当前终端设置 `TELEGRAM_BOT_TOKEN` 和 `PLASTICWAN_API_KEY`。非 Windows 主机要求配置文件为 `0600`、其父目录为 `0700`：
 
 ```bash
-node src/cli.ts serve --config /absolute/path/config.jsonc
+chmod 700 config data
+chmod 600 config/config.jsonc
 ```
 
-生产环境应由 supervisor、容器平台或 systemd 等外部机制负责重启；仓库不提供服务单元。非 Windows 主机还要求配置文件为 `0600`、其父目录为 `0700`。
+验证配置后运行：
+
+```bash
+node src/cli.ts check-config --config config/config.jsonc
+node src/cli.ts serve --config config/config.jsonc
+```
+
+生产环境应由 supervisor、容器平台或 systemd 等外部机制负责重启；仓库不提供服务单元。
 
 ## 生效与停止
 

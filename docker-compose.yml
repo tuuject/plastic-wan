@@ -30,6 +30,11 @@ services:
       # drop it together with `restart:`, or the panel offers a button that
       # stops the bot until someone starts it by hand.
       PLASTICWAN_SUPERVISED: "1"
+      # Secrets referenced by the example config. Uncomment and export them in
+      # the shell (or inject them from your deploy system); never paste the
+      # real values here. Skip these if you use key.json instead.
+      # TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN outside this file}
+      # PLASTICWAN_API_KEY: ${PLASTICWAN_API_KEY:?set PLASTICWAN_API_KEY outside this file}
       # Optional: match host UID/GID to avoid permission issues with bind mounts
       # PUID: "1000"
       # PGID: "1000"
