@@ -127,9 +127,9 @@ Conversation Context 是运行时自己写下的历史，但它由模型输出�
 
 - Chat/Topic allowlist 在入库边界校验。
 - Reply Message ID、媒体引用（`img_`）、Sticker 引用（`stk_`）必须来自**当前 Conversation Context** 的 capability 且未过期：引用按 context 隔离，永不跨 Conversation 解析，被 GC 淘汰的消息携带的引用立即失效。
-- 普通 Assistant 文本不会发往 Telegram；模型驱动的 Telegram 输出只能经过 `send`。确定性的 Bot 命令回复直接调用 Bot API，不经过模型，见 [Bot Commands](telegram-agent-flow.md#bot-commands)。
+- 普通 Assistant 文本不会发往 Telegram；模型驱动的 Telegram 输出只能经过 `send`（`send_reply` 把一次回复的每一条都交给同一条 `send` 管线依次发出）。确定性的 Bot 命令回复直接调用 Bot API，不经过模型，见 [Bot Commands](telegram-agent-flow.md#bot-commands)。
 - `read` 只能读取 `system:///` 树内的 Markdown 文档：URI 段校验拒绝 `..`、反斜杠、百分号转义与非 Markdown 资源；Skill 内容是 runtime 文档，不是授权来源。
-- `execute` 只 dispatch 组合根注册的内部能力；`read`/`send`/`execute`/`zzz` 四个原语与 MCP Tool 不在注册表内，无法被间接调用。`execute.call` 返回 `{text, refs}` 封套：文本截断到 32 KiB，引用只能是以 Context 级 token 形式返回的 capability 引用（如 `sticker_ref`），由 `send` 在边界处校验后消费。
+- `execute` 只 dispatch 组合根注册的内部能力；`read`/`send`/`send_reply`/`execute`/`zzz` 原语与 MCP Tool 不在注册表内，无法被间接调用。`execute.call` 返回 `{text, refs}` 封套：文本截断到 32 KiB，引用只能是以 Context 级 token 形式返回的 capability 引用（如 `sticker_ref`），由 `send` 在边界处校验后消费。
 - MCP Tool 必须通过配置 allowlist、策略、超时和大小限制。
 - `web_fetch` 只允许默认端口的公网 HTTP(S) GET；每次 DNS 与跳转目标都重新校验，连接固定到已校验地址，且不发送 Cookie 或认证信息。
 - 模型不能取得 Bash、任意进程、任意文件或原始 Telegram file ID 能力；模型也永远不能创建、修改或删除 Skill。
