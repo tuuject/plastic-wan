@@ -23,7 +23,7 @@ Markdown、`llms.txt`、`llms-full.txt` 只有生产构建能完整验证，不�
 ## 内容与生成边界
 
 - 用户正文：`content/docs/`，按任务拆页，写 `title`、`description` 与一个 H1；页面间用相对 `.md` 链接，公开下载用 `__DOCS_BASE__/文件名`。Rspress `replaceRules` 为后者加部署 base，确保 HTML、单页 Markdown 与合并的 `llms-full.txt` 都可用；新增下载须列入精确 dead-link 例外，由 `docs:verify` 检查真实产物。导航由 `_nav.json` / `_meta.json` 维护。
-- 安全下载示例唯一源：`examples/`。完整配置与正文 JSONC 片段由真实 `loadConfig` 做离线校验，不解析 SecretRef 或使用真实密钥。
+- 安全下载示例唯一源：`examples/`；Compose 模板例外，直接发布仓库根目录的 `docker-compose.yml`，与 README 共用一份。完整配置与正文 JSONC 片段由真实 `loadConfig` 做离线校验，不解析 SecretRef 或使用真实密钥。
 - `scripts/docs-prepare.ts` 从当前 `ConfigSchema` 生成 `reference/fields.md` 和 `public/config.schema.json`，复制白名单示例，并生成 `public/build-info.json`。这些文件被 Git 忽略，不手改、不另存第二份 Schema。生成页关闭编辑链接与 Git 更新时间：2.0.22 的默认组件不识别这些 frontmatter 开关，主题以两个小包装落实，`docs:verify` 验证生成页隐藏且手写页仍有编辑链接。
 - Schema 字段表只描述类型与显式约束，不推导运行时默认值。字段、权限、热更新、迁移、用户可见行为改变时，同一变更更新相关手写指南和测试。
 - 页面与 llms 共享完整 Git SHA；未提交修改明确标为本地预览。更新时间不是适用版本，SHA 也不自动等于 `latest` 镜像。

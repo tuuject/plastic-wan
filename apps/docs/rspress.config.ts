@@ -77,6 +77,7 @@ export default defineConfig({
           'config.schema.json',
           'examples/config.example.jsonc',
           'examples/system-prompt.example.md',
+          'examples/docker-compose.yml',
         ].map((path) => `${buildInfo.base}${path}`),
       },
       checkAnchors: true,

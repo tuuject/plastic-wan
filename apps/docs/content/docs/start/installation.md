@@ -5,15 +5,17 @@ description: 选择 Docker 或宿主机运行塑料碗，并准备运行环境�
 
 # 部署方式与环境要求
 
-## 推荐：从源码构建 Docker 镜像
+## 推荐：Docker 镜像
 
-Dockerfile 已包含 FFmpeg、FFprobe、Python 与 Lottie 转换依赖。检出所需提交后，在仓库根目录构建：
+CI 把镜像发布到 `ghcr.io/tuuject/plastic-wan`，已包含 FFmpeg、FFprobe、Python 与 Lottie 转换依赖。部署步骤见 [快速开始](quick-start.md)，标签选择见 [升级](../operations/upgrade.md#镜像标签)。
+
+需要运行未发布的提交或自行审计镜像时，可以在检出的仓库根目录构建，再把 `docker-compose.yml` 的 `image` 改为 `plasticwan:local`，其余步骤相同：
 
 ```bash
 docker build -t plasticwan:local .
 ```
 
-再使用 [快速开始](quick-start.md) 的 Compose 文件。Compose 会把 `./config` 映射到 `/config`、`./data` 映射到 `/data`；配置中必须使用容器内绝对路径。Admin 端口应仅发布到 `127.0.0.1`，再通过受控反向代理提供远程访问。
+Compose 会把 `./config` 映射到 `/config`、`./data` 映射到 `/data`；配置中必须使用容器内绝对路径。Admin 端口应仅发布到 `127.0.0.1`，再通过受控反向代理提供远程访问。
 
 容器以非特权用户运行，并会整理挂载目录权限。不要同时对相同 `/data` 启动第二个 `serve`；同一数据目录只能有一个轮询实例。
 
