@@ -5,7 +5,7 @@ import type { PublicModel } from '@plasticwan/image-service';
 import Type, { type TSchema } from 'typebox';
 import Compile from 'typebox/compile';
 import { capability, createExecuteTool, type ExecutableCapability } from '../capabilities/execute-tool.ts';
-import { SendInputSchema } from '../capabilities/send-tool.ts';
+import { SEND_REPLY_MAX_PARTS, SendInputSchema, SendReplyInputSchema } from '../capabilities/send-tool.ts';
 import {
   AddMemoryInputSchema,
   DEFAULT_MEMORY_TTL_SECONDS,
@@ -103,6 +103,7 @@ interface ReplayState {
 
 /** Current-schema guards: model-facing schemas come from the active tool registry. */
 const SendInputValidator = Compile(SendInputSchema);
+const SendReplyInputValidator = Compile(SendReplyInputSchema);
 const AddMemoryInputValidator = Compile(AddMemoryInputSchema);
 const DeleteMemoryInputValidator = Compile(DeleteMemoryInputSchema);
 const AlarmInputValidator = Compile(AlarmInputSchema);
@@ -193,6 +194,9 @@ function replayTool(
   if (definition.name === 'send') {
     return replaySendTool(definition, state);
   }
+  if (definition.name === 'send_reply') {
+    return replaySendReplyTool(definition, state);
+  }
   if (definition.name === 'execute') {
     return replayExecuteTool(definition, execute, state, registeredCapabilities);
   }
@@ -254,46 +258,94 @@ function replaySendTool(definition: ReplayToolDefinition, state: ReplayState): A
         throw new Error('send input does not match the tool schema');
       }
       const input = params as Record<string, unknown>;
-      if (!sendKindResolvable(input)) {
-        throw new Error('send input fields do not match its kind');
-      }
-      if (typeof input.text === 'string') {
-        if (input.text.length > (state.options.maxTextLength ?? 4_096)) {
-          throw new Error('send text exceeds the current configured length limit');
-        }
-        if (state.options.disallowBlankLines === true && /\n\s*\n/.test(input.text)) {
-          throw new Error('send text contains blank lines disallowed by current configuration');
-        }
-      }
-      if (
-        typeof input.reply_to_message_id === 'string' &&
-        state.options.replyMessageIds !== undefined &&
-        !state.options.replyMessageIds.has(input.reply_to_message_id)
-      ) {
-        throw new Error('reply_to_message_id is not visible in this scene');
-      }
+      checkReplaySend(input, state, 'send');
       state.dispatches.push({ tool_call_id: toolCallId, tool_name: 'send', mode: 'synthetic' });
-      if (
-        state.options.allowReplyMessageMultipleTimes !== true &&
-        typeof input.reply_to_message_id === 'string' &&
-        state.outputs.some((output) => output.reply_to_message_id === input.reply_to_message_id)
-      ) {
-        throw new Error('Not sent: reply_already_sent. This message has already been replied to in this scene.');
-      }
-      state.sends += 1;
-      const messageId = String(state.sends);
-      state.outputs.push({
-        tool_call_id: toolCallId,
-        tool_name: 'send',
-        arguments: { ...input },
-        reply_to_message_id: typeof input.reply_to_message_id === 'string' ? input.reply_to_message_id : null,
-      });
+      checkReplayReplyUnused(input, state);
+      const messageId = recordReplaySend(toolCallId, input, state);
       return {
         content: [{ type: 'text' as const, text: `Sent Telegram message ${messageId}` }],
         details: { telegramMessageId: messageId },
       };
     },
   };
+}
+
+/** Every part is checked first, then each becomes one synthesized `send` output (`<id>:<n>`). */
+function replaySendReplyTool(definition: ReplayToolDefinition, state: ReplayState): AgentTool {
+  return {
+    ...replayToolBase(definition),
+    execute: async (toolCallId, params, signal) => {
+      signal?.throwIfAborted();
+      if (!SendReplyInputValidator.Check(params)) {
+        throw new Error(`send_reply input does not match the tool schema (2 to ${SEND_REPLY_MAX_PARTS} parts)`);
+      }
+      const replyTo = typeof params.reply_to_message_id === 'string' ? params.reply_to_message_id : undefined;
+      const parts = params.parts.map(
+        (part, index): Record<string, unknown> =>
+          index === 0 && replyTo !== undefined ? { ...part, reply_to_message_id: replyTo } : { ...part },
+      );
+      for (const [index, part] of parts.entries()) {
+        checkReplaySend(part, state, `send_reply part ${index + 1}`);
+      }
+      state.dispatches.push({ tool_call_id: toolCallId, tool_name: 'send_reply', mode: 'synthetic' });
+      if (parts[0] !== undefined) {
+        checkReplayReplyUnused(parts[0], state);
+      }
+      const messageIds = parts.map((part, index) => recordReplaySend(`${toolCallId}:${index + 1}`, part, state));
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Sent ${messageIds.length} Telegram messages in order: ${messageIds.join(', ')}`,
+          },
+        ],
+        details: { telegramMessageIds: messageIds },
+      };
+    },
+  };
+}
+
+/** The current configuration's text and reply-target rules for one synthesized message. */
+function checkReplaySend(input: Record<string, unknown>, state: ReplayState, label: string): void {
+  if (!sendKindResolvable(input)) {
+    throw new Error(`${label} input fields do not match its kind`);
+  }
+  if (typeof input.text === 'string') {
+    if (input.text.length > (state.options.maxTextLength ?? 4_096)) {
+      throw new Error(`${label} text exceeds the current configured length limit`);
+    }
+    if (state.options.disallowBlankLines === true && /\n\s*\n/.test(input.text)) {
+      throw new Error(`${label} text contains blank lines disallowed by current configuration`);
+    }
+  }
+  if (
+    typeof input.reply_to_message_id === 'string' &&
+    state.options.replyMessageIds !== undefined &&
+    !state.options.replyMessageIds.has(input.reply_to_message_id)
+  ) {
+    throw new Error('reply_to_message_id is not visible in this scene');
+  }
+}
+
+function checkReplayReplyUnused(input: Record<string, unknown>, state: ReplayState): void {
+  if (
+    state.options.allowReplyMessageMultipleTimes !== true &&
+    typeof input.reply_to_message_id === 'string' &&
+    state.outputs.some((output) => output.reply_to_message_id === input.reply_to_message_id)
+  ) {
+    throw new Error('Not sent: reply_already_sent. This message has already been replied to in this scene.');
+  }
+}
+
+function recordReplaySend(toolCallId: string, input: Record<string, unknown>, state: ReplayState): string {
+  state.sends += 1;
+  state.outputs.push({
+    tool_call_id: toolCallId,
+    tool_name: 'send',
+    arguments: { ...input },
+    reply_to_message_id: typeof input.reply_to_message_id === 'string' ? input.reply_to_message_id : null,
+  });
+  return String(state.sends);
 }
 
 function replayZzzTool(definition: ReplayToolDefinition, dispatches: ReplayDispatch[]): AgentTool {

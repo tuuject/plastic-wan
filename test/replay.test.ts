@@ -736,7 +736,7 @@ test('a scene replays with recording off, without any model call, after develope
   expect(f.rows()).toEqual(before);
 });
 
-test('the default registry is the current read, send, and execute definitions', async () => {
+test('the default registry is the current read, send, send_reply, and execute definitions', async () => {
   const resources = await SystemResources.load(BUNDLED_SYSTEM_RESOURCES_DIR);
   const skill = resources.skills[0];
   if (skill === undefined) {
@@ -748,7 +748,7 @@ test('the default registry is the current read, send, and execute definitions', 
     (context) => {
       // No toolDefinitions hook: read/send/execute are the basic current set,
       // and no capability is registered.
-      expect(context.tools?.map((tool) => tool.name).sort()).toEqual(['execute', 'read', 'send']);
+      expect(context.tools?.map((tool) => tool.name).sort()).toEqual(['execute', 'read', 'send', 'send_reply']);
       return fauxAssistantMessage(
         [
           fauxToolCall('read', { uri: skill.uri }),

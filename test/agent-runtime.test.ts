@@ -87,7 +87,7 @@ test.each([undefined, false, true])(
         // object schema; the top-level union `execute` used to carry failed every
         // gpt-4o invocation with 400 invalid_function_parameters.
         const tools = context.tools ?? [];
-        expect(tools.map((tool) => tool.name)).toEqual(['read', 'send', 'execute']);
+        expect(tools.map((tool) => tool.name)).toEqual(['read', 'send', 'send_reply', 'execute']);
         for (const tool of tools) {
           expect(tool.parameters).toMatchObject({ type: 'object' });
         }
@@ -144,7 +144,7 @@ test.each([undefined, false, true])(
         "SELECT tools_json FROM model_calls WHERE role = 'agent' ORDER BY id LIMIT 1",
       )
       .get();
-    expect(presented?.tools_json).toBe(JSON.stringify(['read', 'send', 'execute']));
+    expect(presented?.tools_json).toBe(JSON.stringify(['read', 'send', 'send_reply', 'execute']));
     const snapshot = store.db
       .prepare<[], { request_json: string | null; response_json: string | null }>(
         "SELECT request_json, response_json FROM model_calls WHERE role = 'agent' ORDER BY id LIMIT 1",
@@ -841,7 +841,7 @@ test('lets a text-only agent read a Telegram photo through read_image', async ()
     )
     .get();
   const toolsJson = presented?.tools_json ?? null;
-  expect(toolsJson === null ? null : JSON.parse(toolsJson)).toEqual(['read', 'send', 'execute']);
+  expect(toolsJson === null ? null : JSON.parse(toolsJson)).toEqual(['read', 'send', 'send_reply', 'execute']);
   store.close();
 });
 
@@ -1056,7 +1056,7 @@ test('a model that declares minimal tool-schema keywords is sent reduced tool de
 
   // What the provider was handed: the shape of every call survives, the
   // validation-only annotations a grammar endpoint rejects are gone.
-  expect(presented.map((tool) => tool.name)).toEqual(['read', 'send', 'execute']);
+  expect(presented.map((tool) => tool.name)).toEqual(['read', 'send', 'send_reply', 'execute']);
   expect(JSON.stringify(presented)).not.toContain('minLength');
   expect(JSON.stringify(presented)).not.toContain('maxLength');
   expect(JSON.stringify(presented)).not.toContain('patternProperties');
@@ -1176,3 +1176,96 @@ test.each([true, false])(
     store.close();
   },
 );
+
+test('send_reply publishes its parts in order and counts as one send in the canonical history', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'plasticwan-agent-'));
+  directories.push(directory);
+  const configPath = join(directory, 'config.jsonc');
+  await writeTestConfig(
+    directory,
+    configPath,
+    testConfigJsonc(directory, (config) => {
+      config.agent.send_nudge_enabled = true;
+    }),
+  );
+  const loaded = await loadConfig(configPath);
+  const faux = fauxProvider({
+    provider: 'agent',
+    models: [{ id: 'agent-model', input: ['text'], contextWindow: 200_000, maxTokens: 32_768 }],
+  });
+  const configStore = await testConfigStore(loaded, fauxRegistry(faux));
+  const store = await SqliteStore.open(loaded.config);
+  const ingestion = new TelegramIngestion(store, configStore, { id: 999 });
+  const received = new Date('2026-08-15T00:00:00.000Z');
+  ingestion.ingest(
+    {
+      update_id: 1,
+      message: {
+        message_id: 10,
+        date: 1_700_000_000,
+        chat: { id: 123456789, type: 'private', first_name: 'Owner' },
+        from: { id: 42, is_bot: false, first_name: 'Alice' },
+        text: 'how does it work?',
+      },
+    },
+    received,
+  );
+  const scheduler = new BucketScheduler(store, configStore, async () => ({ state: 'completed', reason: 'done' }));
+  const [invocationId] = scheduler.processDue(new Date(received.getTime() + 15_000));
+  if (invocationId === undefined) {
+    throw new Error('Expected a due invocation');
+  }
+  faux.setResponses([
+    fauxAssistantMessage(
+      fauxToolCall('send_reply', {
+        reply_to_message_id: '10',
+        parts: [{ text: 'Short version first.' }, { text: 'Then the detail.' }],
+      }),
+      { stopReason: 'toolUse' },
+    ),
+    // Private wrap-up text: the send nudge must not fire after a send_reply.
+    fauxAssistantMessage('done'),
+  ]);
+  const sent: { text: string; replyTo: number | undefined }[] = [];
+  const api: TelegramSendApi = {
+    sendMessage: async (_chatId, text, options) => {
+      sent.push({ text, replyTo: options.reply_parameters?.message_id });
+      return { message_id: 500 + sent.length, date: 1_700_000_100, chat: { id: 123456789 } };
+    },
+    sendSticker: async () => ({ message_id: 600, date: 1_700_000_100, chat: { id: 123456789 } }),
+  };
+  const runtime = new AgentRuntime({
+    store,
+    configStore,
+    secrets: new SecretStore(),
+    telegramApi: api,
+    bot: { id: 999n, displayName: 'Plastic Wan', username: 'plasticwan' },
+    systemResources: SystemResources.empty(),
+  });
+  try {
+    expect(await runtime.run(invocationId, configStore.beginInvocation(), new AbortController().signal)).toEqual({
+      state: 'completed',
+      reason: 'completed',
+    });
+    expect(sent).toEqual([
+      { text: 'Short version first.', replyTo: 10 },
+      { text: 'Then the detail.', replyTo: undefined },
+    ]);
+    expect(
+      store.db.prepare<[], { count: bigint }>("SELECT COUNT(*) AS count FROM model_calls WHERE role = 'agent'").get()
+        ?.count,
+    ).toBe(2n);
+    const context = store.db
+      .prepare<[], { send_count_total: bigint }>('SELECT send_count_total FROM conversation_contexts')
+      .get();
+    expect(context?.send_count_total).toBe(1n);
+    const counted = store.db
+      .prepare<[], { role: string; send_seq: bigint | null }>(
+        'SELECT role, send_seq FROM context_messages WHERE send_seq IS NOT NULL ORDER BY seq',
+      )
+      .all();
+    expect(counted).toEqual([{ role: 'toolResult', send_seq: 1n }]);
+  } finally {
+    store.close();
+  }
+});

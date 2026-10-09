@@ -191,7 +191,7 @@ test('the skill index reaches the system prompt and primitives stay directly cal
       expect(context.systemPrompt).toContain('read_image capability (called via execute)');
       expect(context.systemPrompt).toContain('add_memory capability (called via execute)');
       expect(context.systemPrompt).not.toContain('# Web fetch');
-      expect(context.tools?.map((tool) => tool.name)).toEqual(['read', 'send', 'execute']);
+      expect(context.tools?.map((tool) => tool.name)).toEqual(['read', 'send', 'send_reply', 'execute']);
       return fauxAssistantMessage(fauxToolCall('execute', { action: 'help', tool: 'web_fetch' }), {
         stopReason: 'toolUse',
       });
