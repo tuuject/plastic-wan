@@ -12,8 +12,8 @@ description: 用 GHCR 镜像和 Docker Compose 部署，配置 Telegram 和模�
 创建部署目录：
 
 ```bash
-mkdir -p plastic-wan/config plastic-wan/data
-cd plastic-wan
+mkdir -p surowan/config surowan/data
+cd surowan
 ```
 
 下载下面三个文件，按表中的位置保存：
@@ -24,7 +24,7 @@ cd plastic-wan
 | [配置示例](__DOCS_BASE__/examples/config.example.jsonc) | `config/config.jsonc` |
 | [人格 Prompt 示例](__DOCS_BASE__/examples/system-prompt.example.md) | `config/system-prompt.md` |
 
-Compose 模板使用 `ghcr.io/tuuject/plastic-wan:latest`，它只跟随稳定版本。本站描述的是构建时的源码提交，如果与稳定版不一致，把 `image` 改为对应的版本标签，标签说明见 [升级](../operations/upgrade.md#镜像标签)。
+Compose 模板使用 `ghcr.io/tuuject/surowan:latest`，它只跟随稳定版本。本站描述的是构建时的源码提交，如果与稳定版不一致，把 `image` 改为对应的版本标签，标签说明见 [升级](../operations/upgrade.md#镜像标签)。
 
 编辑 `config/config.jsonc`：
 

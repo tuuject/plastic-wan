@@ -5,7 +5,7 @@ export function VersionNotice() {
     <p className="version-notice">
       文档对应源码提交：{' '}
       <a
-        href={`https://github.com/tuuject/plastic-wan/commit/${buildInfo.commit}`}
+        href={`https://github.com/tuuject/surowan/commit/${buildInfo.commit}`}
         target="_blank"
         rel="noopener noreferrer"
       >

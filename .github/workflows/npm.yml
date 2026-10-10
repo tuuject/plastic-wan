@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'tuuject/plastic-wan'
+    if: github.repository == 'tuuject/surowan'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

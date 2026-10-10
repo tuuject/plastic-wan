@@ -18,7 +18,7 @@ jobs:
           - name: root
             base: /
           - name: subpath
-            base: /plastic-wan/
+            base: /surowan/
     env:
       # Verification artifacts are not a public deployment.
       DOCS_SITE_ORIGIN: https://docs.example.com

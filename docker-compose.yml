@@ -22,7 +22,7 @@ services:
   plasticwan:
     # Stable release. For development builds from main, use `main` (rolling) or a
     # pinned `0.0.0-next-<timestamp>` tag from the GitHub pre-releases.
-    image: ghcr.io/tuuject/plastic-wan:latest
+    image: ghcr.io/tuuject/surowan:latest
     restart: unless-stopped
     environment:
       # Declares that something restarts the process, which is what the restart

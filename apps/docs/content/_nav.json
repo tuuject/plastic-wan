@@ -1,5 +1,5 @@
 [
   { "text": "快速开始", "link": "/docs/start/quick-start" },
   { "text": "文档", "link": "/docs/", "activeMatch": "/docs/" },
-  { "text": "GitHub", "link": "https://github.com/tuuject/plastic-wan", "position": "right" }
+  { "text": "GitHub", "link": "https://github.com/tuuject/surowan", "position": "right" }
 ]

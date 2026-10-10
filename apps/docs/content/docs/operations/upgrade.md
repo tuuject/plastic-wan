@@ -9,7 +9,7 @@ description: 安全升级 Plastic Wan，并区分代码、配置和数据库变�
 
 ## 镜像标签
 
-CI 在每次 push 时自动发布镜像到 `ghcr.io/tuuject/plastic-wan`，标签按来源区分：
+CI 在每次 push 时自动发布镜像到 `ghcr.io/tuuject/surowan`，标签按来源区分：
 
 | 标签 | 何时更新 |
 | --- | --- |
@@ -22,7 +22,7 @@ CI 在每次 push 时自动发布镜像到 `ghcr.io/tuuject/plastic-wan`，标�
 `latest` 只跟随 `v*` 稳定 tag，不跟随 `main`；正式版本对应 GitHub Releases 中的非 pre-release 条目。本地镜像的实际版本可查：
 
 ```bash
-docker image inspect ghcr.io/tuuject/plastic-wan:latest \
+docker image inspect ghcr.io/tuuject/surowan:latest \
   --format '{{ index .Config.Labels "org.opencontainers.image.version" }}'
 ```
 

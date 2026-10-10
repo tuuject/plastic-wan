@@ -14,6 +14,6 @@ hero:
       link: /docs/index.html
       theme: alt
     - text: GitHub
-      link: https://github.com/tuuject/plastic-wan
+      link: https://github.com/tuuject/surowan
       theme: alt
 ---

@@ -66,7 +66,7 @@ pnpm --filter @tuuject/plasticwan-utils pack --pack-destination "$PWD/dist/npm"
 npm install -g ./dist/npm/tuuject-plasticwan-utils-0.1.0.tgz   # 文件名以实际打包输出为准
 ```
 
-不想全局安装时，也可以直接运行构建产物：`node packages/cli/dist/bin.js …`。维护者的自动化发布、首次发布 bootstrap 与 trusted publisher 配置见仓库的 [packages/cli/README.md](https://github.com/tuuject/plastic-wan/blob/main/packages/cli/README.md)。
+不想全局安装时，也可以直接运行构建产物：`node packages/cli/dist/bin.js …`。维护者的自动化发布、首次发布 bootstrap 与 trusted publisher 配置见仓库的 [packages/cli/README.md](https://github.com/tuuject/surowan/blob/main/packages/cli/README.md)。
 
 客户端用 API key 认证；密钥在面板的 **Manage → API keys**（`/api-keys`）页面创建、查看与撤销，明文只在创建弹窗出现一次，关闭后不可再取回，见[使用管理面板](../configure/admin.md#api-密钥)。密钥的能力面是只读检查（配置与 prompt 视图、可用模型列表、场景所用的当前 prompt、重放预检、媒体导出）与 Invocation 读/重放；不要把真实 key 写进命令参数、聊天或 Skill 文件，也不要手动 `export` 明文 key（会进入 shell 历史）。
 
@@ -187,7 +187,7 @@ plasticwan-utils invocation replay 12345 --provider openrouter --model deepseek/
    ```bash
    test ! -e .agents/skills/plasticwan-utils &&
      mkdir -p .agents/skills &&
-     cp -R /path/to/plastic-wan/.agents/skills/plasticwan-utils .agents/skills/
+     cp -R /path/to/surowan/.agents/skills/plasticwan-utils .agents/skills/
    ```
 3. 由操作员准备凭据：向 Agent 的命令执行环境安全注入 `PLASTICWAN_ENDPOINT` 与 `PLASTICWAN_API_KEY`，或由操作员在本机运行 `plasticwan-utils login` 保存到凭据文件。不要让 Agent 索取聊天中的明文 key，也不要让它读取或修改凭据。
 4. 在 Agent 的 Skill 列表中确认 `plasticwan-utils`；未发现时重新打开会话。然后发出只读任务：

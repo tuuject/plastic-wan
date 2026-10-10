@@ -7,7 +7,7 @@ description: 选择 Docker 或宿主机运行塑料碗，并准备运行环境�
 
 ## 推荐：Docker 镜像
 
-CI 把镜像发布到 `ghcr.io/tuuject/plastic-wan`，已包含 FFmpeg、FFprobe、Python 与 Lottie 转换依赖。部署步骤见 [快速开始](quick-start.md)，标签选择见 [升级](../operations/upgrade.md#镜像标签)。
+CI 把镜像发布到 `ghcr.io/tuuject/surowan`，已包含 FFmpeg、FFprobe、Python 与 Lottie 转换依赖。部署步骤见 [快速开始](quick-start.md)，标签选择见 [升级](../operations/upgrade.md#镜像标签)。
 
 需要运行未发布的提交或自行审计镜像时，可以在检出的仓库根目录构建，再把 `docker-compose.yml` 的 `image` 改为 `plasticwan:local`，其余步骤相同：
 
@@ -30,8 +30,8 @@ Compose 会把 `./config` 映射到 `/config`、`./data` 映射到 `/data`；配
 拉取源码，安装依赖并构建图片核心包与管理面板，再复制配置示例：
 
 ```bash
-git clone https://github.com/tuuject/plastic-wan.git
-cd plastic-wan
+git clone https://github.com/tuuject/surowan.git
+cd surowan
 pnpm install --frozen-lockfile
 pnpm --filter @plasticwan/image-service build
 pnpm run admin:build

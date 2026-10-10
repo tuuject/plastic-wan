@@ -167,7 +167,7 @@ printf '%s' "$SECRET_KEY" | plasticwan-utils login --endpoint "$PLASTICWAN_ENDPO
 - 版本只在 CI 的一次性 checkout 内改写（在 `packages/cli` 执行 `npm version --no-git-tag-version`），不回写、不提交源码；稳定 tag 是稳定版本的唯一来源。
 - `pnpm --filter @tuuject/plasticwan-utils pack` 之后，dry-run 与实际发布使用同一个 tarball：先 `npm publish <tgz> --dry-run --access public --tag <dist-tag> --ignore-scripts` 检查内容，再发布同一文件。
 - 认证使用 GitHub OIDC（job 持有 `id-token: write`）：不使用 `NPM_TOKEN`，不依赖 GitHub Environment。跑在 Node 24 上，发布前安装 npm 11.16.0（trusted publishing 要求 npm CLI ≥ 11.5.1、Node ≥ 22.14.0）。
-- 只有 `tuuject/plastic-wan` 的 push 能进入发布 job；版本 guard（`scripts/npm-release.ts`）再次校验事件、仓库与 ref，不支持的输入会被拒绝。
+- 只有 `tuuject/surowan` 的 push 能进入发布 job；版本 guard（`scripts/npm-release.ts`）再次校验事件、仓库与 ref，不支持的输入会被拒绝。
 - 发布串行且不取消正在运行的任务；`queue: max` 最多保留 100 个等待任务，避免后续 main push 顶掉等待中的稳定发布。队满时 GitHub 会取消新增任务，须人工检查并重跑。
 
 稳定发布由维护者手动打 tag 触发（以下仅为示例，不在本仓库自动执行）：
@@ -235,7 +235,7 @@ trusted publisher 只能配置到 npm 上已存在的包，因此第一次发布
 
 1. 首次手工发布成功后，在 npm 打开该包的 Settings → Trusted publishing → GitHub Actions，填写：
    - Organization or user：`tuuject`
-   - Repository：`plastic-wan`
+   - Repository：`surowan`
    - Workflow filename：`npm.yml`（只填文件名，不能带 `.github/workflows/` 路径，必须带 `.yml`）
    - Environment：留空
 2. Allowed actions 中必须开启 **Allow npm publish**。npm 新配置默认只允许 stage publish，不显式开启直接发布时 CI 会被拒绝。官方将直接发布与 `npm dist-tag` 管理列为独立权限；本 workflow 用 `npm publish --tag <dist-tag>`，没有单独的 `npm dist-tag` 步骤。不要以 dry-run 推断权限已经满足，须在首次真实发布后核对目标 dist-tag。

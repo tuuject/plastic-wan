@@ -10,14 +10,14 @@
     <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%E2%89%A5%2024-417e38?logo=nodedotjs&logoColor=white" alt="Node.js ≥ 24" /></a>
     <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-ESM-3178c6?logo=typescript&logoColor=white" alt="TypeScript ESM" /></a>
     <a href="https://core.telegram.org/bots"><img src="https://img.shields.io/badge/Telegram-Agent%20Bot-26a5e4?logo=telegram&logoColor=white" alt="Telegram Agent Bot" /></a>
-    <a href="https://github.com/tuuject/plastic-wan/pkgs/container/plastic-wan"><img src="https://img.shields.io/badge/Docker-GHCR-2496ed?logo=docker&logoColor=white" alt="Docker image on GHCR" /></a>
+    <a href="https://github.com/tuuject/surowan/pkgs/container/surowan"><img src="https://img.shields.io/badge/Docker-GHCR-2496ed?logo=docker&logoColor=white" alt="Docker image on GHCR" /></a>
   </p>
 
   <p>
     <a href="#使用前须知">使用前须知</a> |
     <a href="#快速开始">快速开始</a> |
     <a href="apps/docs/content/docs/index.md">使用文档</a> |
-    <a href="https://github.com/tuuject/plastic-wan/issues">反馈问题</a>
+    <a href="https://github.com/tuuject/surowan/issues">反馈问题</a>
   </p>
 
   <img src="assets/readme/cover.jpg" width="900" alt="塑料碗主题插画：紫色调的角色、工作台与聊天屏幕" />
@@ -149,8 +149,8 @@ Telegram 消息
 创建部署目录：
 
 ```bash
-mkdir -p plastic-wan/config plastic-wan/data
-cd plastic-wan
+mkdir -p surowan/config surowan/data
+cd surowan
 ```
 
 从仓库下载下面三个文件，按表中的位置保存：
@@ -161,7 +161,7 @@ cd plastic-wan
 | [配置示例](apps/docs/examples/config.example.jsonc) | `config/config.jsonc` |
 | [人格 Prompt 示例](apps/docs/examples/system-prompt.example.md) | `config/system-prompt.md` |
 
-Compose 模板默认使用 `ghcr.io/tuuject/plastic-wan:latest`。如果要固定版本，把 `image` 改成对应的发布标签，并使用同一版本的配置示例。
+Compose 模板默认使用 `ghcr.io/tuuject/surowan:latest`。如果要固定版本，把 `image` 改成对应的发布标签，并使用同一版本的配置示例。
 
 然后编辑 `config/config.jsonc`：
 

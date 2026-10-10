@@ -33,7 +33,7 @@ Markdown、`llms.txt`、`llms-full.txt` 只有生产构建能完整验证，不�
 
 ## 静态部署
 
-`.github/workflows/docs.yml` 验证根路径与 `/plastic-wan/`，仅上传静态检查 artifact；还会构建 Bot 镜像验证站点依赖隔离。**没有公开发布 job**，不绑定域名。检查 artifact 中的 `docs.example.com` 是测试域名，不能直接当生产部署。
+`.github/workflows/docs.yml` 验证根路径与 `/surowan/`，仅上传静态检查 artifact；还会构建 Bot 镜像验证站点依赖隔离。**没有公开发布 job**，不绑定域名。检查 artifact 中的 `docs.example.com` 是测试域名，不能直接当生产部署。
 
 选择实际托管平台后，用干净、已提交的 checkout 显式设置：
 

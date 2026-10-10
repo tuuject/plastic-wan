@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tuuject/plastic-wan.git",
+    "url": "git+https://github.com/tuuject/surowan.git",
     "directory": "packages/cli"
   },
   "publishConfig": {
