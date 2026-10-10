@@ -458,7 +458,7 @@ describe('alarm tool', () => {
         "SELECT tools_json FROM model_calls WHERE role = 'agent' ORDER BY id LIMIT 1",
       )
       .get();
-    expect(presented?.tools_json).toBe(JSON.stringify(['read', 'send', 'execute']));
+    expect(presented?.tools_json).toBe(JSON.stringify(['read', 'send', 'send_reply', 'execute']));
     const auditPayload = store.db
       .prepare<[], { request_json: string | null }>(
         "SELECT request_json FROM model_calls WHERE role = 'agent' AND request_json IS NOT NULL ORDER BY id LIMIT 1",
@@ -467,7 +467,7 @@ describe('alarm tool', () => {
     const payload = JSON.parse(auditPayload?.request_json ?? 'null') as { tools?: Array<Record<string, unknown>> };
     // The model-facing registry carries only the runtime primitives; the
     // list_alarm schema was served by the execute help action above.
-    expect(payload.tools?.map((entry) => entry.name)).toEqual(['read', 'send', 'execute']);
+    expect(payload.tools?.map((entry) => entry.name)).toEqual(['read', 'send', 'send_reply', 'execute']);
     // The faux tool call id is generated; match by tool name instead.
     const listAudit = store.db
       .prepare<[], { arguments_json: string; state: string }>(

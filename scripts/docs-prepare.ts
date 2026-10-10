@@ -6,7 +6,13 @@ import { ConfigSchema } from '../src/platform/config.ts';
 
 export const repositoryRoot = resolve(import.meta.dirname, '..');
 export const docsRoot = resolve(repositoryRoot, 'apps/docs');
-export const exampleNames = ['config.example.jsonc', 'system-prompt.example.md', 'compose.yml'] as const;
+export const exampleNames = ['config.example.jsonc', 'system-prompt.example.md', 'docker-compose.yml'] as const;
+
+// The Compose template lives at the repository root so README and the docs site
+// share a single deployment file; every other example lives in apps/docs/examples.
+export function exampleSource(name: (typeof exampleNames)[number]): string {
+  return name === 'docker-compose.yml' ? resolve(repositoryRoot, name) : resolve(docsRoot, 'examples', name);
+}
 
 interface SchemaNode {
   type?: string;
@@ -134,7 +140,7 @@ export async function prepareDocs(): Promise<void> {
   await writeFile(resolve(publicRoot, 'config.schema.json'), `${JSON.stringify(ConfigSchema, null, 2)}\n`);
   await writeFile(resolve(fieldsPath, 'fields.md'), renderConfigFields());
   for (const name of exampleNames) {
-    await copyFile(resolve(docsRoot, 'examples', name), resolve(publicRoot, 'examples', name));
+    await copyFile(exampleSource(name), resolve(publicRoot, 'examples', name));
   }
 }
 

@@ -3,21 +3,21 @@
 
   <h1>塑料碗（Plastic Wan）</h1>
 
-  <p>让你的赛博 OC 出门玩</p>
+  <p>让你的赛博 OC 出门玩！</p>
   <p>可以自行部署、使用自己的 API Key 的 Telegram Agent Bot。<br />为私聊、群组与 Forum Topic 配置人格、记忆和参与边界。</p>
 
   <p>
     <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%E2%89%A5%2024-417e38?logo=nodedotjs&logoColor=white" alt="Node.js ≥ 24" /></a>
     <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-ESM-3178c6?logo=typescript&logoColor=white" alt="TypeScript ESM" /></a>
     <a href="https://core.telegram.org/bots"><img src="https://img.shields.io/badge/Telegram-Agent%20Bot-26a5e4?logo=telegram&logoColor=white" alt="Telegram Agent Bot" /></a>
-    <a href="https://github.com/tuuject/plastic-wan/pkgs/container/plastic-wan"><img src="https://img.shields.io/badge/Docker-GHCR-2496ed?logo=docker&logoColor=white" alt="Docker image on GHCR" /></a>
+    <a href="https://github.com/tuuject/surowan/pkgs/container/surowan"><img src="https://img.shields.io/badge/Docker-GHCR-2496ed?logo=docker&logoColor=white" alt="Docker image on GHCR" /></a>
   </p>
 
   <p>
-    <a href="#快速开始">快速开始</a>
-    <a href="apps/docs/content/docs/index.md">使用文档</a>
-    <a href="#关于-byok成本与-coding-plan">作者的话</a>
-    <a href="https://github.com/tuuject/plastic-wan/issues">反馈问题</a>
+    <a href="#使用前须知">使用前须知</a> |
+    <a href="#快速开始">快速开始</a> |
+    <a href="apps/docs/content/docs/index.md">使用文档</a> |
+    <a href="https://github.com/tuuject/surowan/issues">反馈问题</a>
   </p>
 
   <img src="assets/readme/cover.jpg" width="900" alt="塑料碗主题插画：紫色调的角色、工作台与聊天屏幕" />
@@ -30,128 +30,85 @@
 
 塑料碗是一个运行在 Telegram 日常对话里的 Agent Bot，可以根据对话内容自主决定是否参与互动。
 
-它会把配置允许的会话中短时间内收到的消息放在一起，再由模型结合连续上下文决定是否参与。人格和表达方式通过 Prompt 配置；模型要把内容发到 Telegram 时，必须调用 `send` 工具，普通模型文本不会自动发布。
+它不是「一问一答」的机器人：Bot 会把短时间内的几条消息攒成一批，连同之前的聊天上下文交给模型，由模型判断要不要接话、怎么接。人格和说话方式写在 Prompt 里。
 
-塑料碗采用 BYOK（Bring Your Own Key）的方式，需要你提供模型服务的 API Key，自行部署 Bot、选择模型并承担 API 费用（项目不提供 SaaS 服务或模型额度）。
+塑料碗采用 BYOK（Bring Your Own Key）方式：你需要自行部署 Bot、选择模型并承担 API 费用。项目不提供 SaaS 服务或模型额度。
+
+## 用起来是什么样
+
+把 Bot 拉进群、加入白名单以后，大家照常聊天就行。下面是一段真实群聊记录（群友已匿名；Bot 的口吻来自它的人格 Prompt）：
+
+```text
+> 群友 A 🐺:
+大碗深夜还在Approve
+顺便暴露了我也没睡
+
+> 塑料碗:
+凌晨两点半了诶，谁都别说谁捏……快去睡啦喵🥺
+
+> 群友 B:
+🐺大晚上不睡觉
+
+> 群友 C:
+gpt 这玩意真喜欢过度设计过度防御
+
+> 群友 D:
+gpt 是这样的
+（⬆️ 这一批消息模型认为不用接，保持沉默）
+
+> tcdw (aka. 碗):
+其实我感觉 GPT 的性格有点像我（悲
+
+> tcdw (aka. 碗):
+虽然我现在开始感觉我的一些性格不一定是好东西了
+（⬆️ 聚合窗口结束，这两条一起交给模型）
+
+> 塑料碗:
+咱也说不出什么大道理，就……在这儿陪你待一会儿吧喵🥺
+```
+
+所以 **Bot 没回复不一定是故障**，可能只是模型选择了沉默。整个流程是这样的：
+
+```text
+Telegram 消息
+  → Chat / Topic 白名单与参与规则
+  → 消息入库与时间窗口聚合
+  → 会话上下文 + 人格 Prompt + 受限工具
+  → 模型决定参与或沉默
+  → 模型调用 send 工具（普通模型文本不会自动发出）
+  → Telegram
+```
+
+群里还可以用这些命令：
+
+| 命令 | 谁能用 | 作用 |
+| --- | --- | --- |
+| `/status` | 所有人 | 查看当前模型、thinking effort 和今日 token 用量 |
+| `/ignoreme`、`/unignoreme` | 所有人 | 让 Bot 忽略或恢复接收自己在本 Chat 的消息 |
+| `/whoami` | 所有人 | 查看自己的 Telegram 数字 ID |
+| `/pause`、`/resume` | Bot 管理员 | 暂停或恢复本群互动 |
+| `/model` | Bot 管理员 | 查看或切换模型 |
+
+完整命令与管理员配置见 [Telegram 接入](apps/docs/content/docs/configure/telegram.md#管理员命令与验证)。
 
 ## 能做什么
 
 | 能力 | 说明 |
 | --- | --- |
-| 私聊与群聊 | 支持私聊、群组、Supergroup 和 Forum Topic；通过 Chat/Topic 白名单限定范围，按时间窗口聚合消息。 |
-| 人格配置 | 用人格 Prompt 定义说话方式；可为不同 Chat 配置指令、模型与 thinking level。 |
-| 群聊参与 | 可配置活跃时段、触发关键词和注意力窗口；时段外也可由直接 @ 或回复 Bot 唤醒。 |
-| 连续上下文与记忆 | 会话上下文跨运行窗口持久化；短期记忆按会话隔离并支持 TTL，长期知识通过人工审核后的 `agents.md` 提供。 |
-| 图片与 Sticker | 图片理解、Sticker 视觉索引；可选图片生成与编辑能力，生成结果可发送到当前会话。 |
-| 工具与扩展 | 只读 System Skills、网页获取、Alarm 插件与受限 MCP 工具；不向模型暴露任意 Shell 或代码执行。 |
-| 本地管理面板 | 审计消息、模型调用、工具执行、上下文与预算，管理记忆、模型及图片任务；部分配置支持热应用。 |
-| 数据与运维 | SQLite 持久化，在线数据保留、备份与恢复流程，配置检查和真实依赖诊断。 |
+| 私聊与群聊 | 支持私聊、群组和带话题（Topic）的论坛群；只在你允许的 Chat 和话题里工作。 |
+| 人格配置 | 用 Prompt 定义说话方式；不同 Chat 可以用不同的指令和模型。 |
+| 群聊参与 | 可设置活跃时段、触发关键词；时段外也能被 @ 或回复唤醒。 |
+| 连续上下文与记忆 | 会话上下文跨重启保留；Bot 能自己记下短期记忆，到期自动遗忘；长期知识由你审核后写入。 |
+| 图片与 Sticker | 看懂图片和 Sticker；可选接入图片生成与编辑。 |
+| 工具与扩展 | 网页读取、定时提醒，以及受限的 MCP 工具；不向模型开放 Shell 或任意代码执行。 |
+| 本地管理面板 | 查看消息、模型调用、工具执行与用量，管理记忆和模型；部分配置可以不重启直接生效。 |
+| 数据与运维 | SQLite 存储；`backup` 命令按保留期清理旧数据并生成备份；提供配置检查和依赖诊断。 |
 
 使用指南：[人格](apps/docs/content/docs/guides/personality.md)、[群聊参与](apps/docs/content/docs/guides/participation.md)、[记忆](apps/docs/content/docs/guides/memory.md)、[图片能力](apps/docs/content/docs/guides/images.md)、[扩展](apps/docs/content/docs/guides/extensions.md)
 
-## 快速开始
+## 使用前须知
 
-推荐使用 GHCR 上的 Docker 镜像部署。镜像已经包含 Node.js、媒体转换依赖和管理面板，所以本机准备好 Docker Compose 就可以了。仓库提供了 [docker-compose.yml](docker-compose.yml)，默认使用 `ghcr.io/tuuject/plastic-wan:latest`；如果需要固定版本，可以把其中的 `image` 改为对应的发布版本标签，并使用同一版本的配置示例。
-
-还需要一个 Telegram Bot 和模型服务的 API Key。Bot 可以通过 [@BotFather](https://t.me/BotFather) 创建，群聊中要确认它能收到目标消息（见 [Telegram 接入](apps/docs/content/docs/configure/telegram.md)）。
-
-### Docker Compose（推荐）
-
-#### 1. 准备配置
-
-首先创建部署目录：
-
-```bash
-mkdir -p plastic-wan/config plastic-wan/data
-cd plastic-wan
-```
-
-从仓库下载下面三个文件，按表中的位置保存：
-
-| 文件 | 保存位置 |
-| --- | --- |
-| [Compose 模板](docker-compose.yml) | `docker-compose.yml` |
-| [配置示例](apps/docs/examples/config.example.jsonc) | `config/config.jsonc` |
-| [人格 Prompt 示例](apps/docs/examples/system-prompt.example.md) | `config/system-prompt.md` |
-
-然后编辑 `config/config.jsonc`：
-
-- 把 `telegram.chats[0].id` 改为允许的 Chat ID；私聊通常为正数，群/Supergroup 通常为负数。
-- 填入 Provider 的 `base_url`、`api` 和模型信息，并同步修改 `agent.model`、`vision.model`。示例中的模型 ID 和地址是占位符，需要换成服务商实际提供的值。
-- 保留容器内的 `/data` 路径；人格写在 `config/system-prompt.md` 中。
-- **首次不使用图片生成时，删除整个可选的 `image` 段。** 图片理解与图片生成是不同能力；需要生成图片时，再按[图片指南](apps/docs/content/docs/guides/images.md)配置模型、凭据和容器环境变量。
-
-如果需要在浏览器中访问管理面板，取消 `docker-compose.yml` 中 `ports` 段的注释，并确认 `config/config.jsonc` 的 `admin.host` 为 `0.0.0.0`。模板将端口发布到本机的 `127.0.0.1:8787`。
-
-#### 2. 提供密钥
-
-配置示例通过环境变量引用密钥，所以需要在 Compose 的 `services.plasticwan.environment` 中加入两个变量（保留已有的 `PLASTICWAN_SUPERVISED`）：
-
-```yaml
-    environment:
-      PLASTICWAN_SUPERVISED: "1"
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN outside this file}
-      PLASTICWAN_API_KEY: ${PLASTICWAN_API_KEY:?set PLASTICWAN_API_KEY outside this file}
-```
-
-在运行 Compose 的终端中设置它们，或由部署系统注入：
-
-```bash
-export TELEGRAM_BOT_TOKEN='替换为自己的 Bot Token'
-export PLASTICWAN_API_KEY='替换为自己的模型 API Key'
-```
-
-真实密钥不要写进 Compose 或 `config.jsonc`，也不要提交到仓库或发到聊天里。也可以使用配置同目录的 `key.json` 和 SecretRef，详见[配置文件与密钥](apps/docs/content/docs/configure/config-file.md)。
-
-#### 3. 拉取镜像并启动
-
-```bash
-docker compose pull
-docker compose run --rm plasticwan check-config --config /config/config.jsonc
-docker compose up -d
-docker compose logs -f plasticwan
-```
-
-`check-config` 成功以后再启动。它只校验配置；如果需要检查实际依赖和外部连接，可以运行 `docker compose run --rm plasticwan doctor --config /config/config.jsonc`（会调用模型并消耗少量 Token）。
-
-日志出现 **`serve_started`** 后，向允许的 Chat 发消息，等待配置的消息聚合窗口。**没有回复不一定是故障**，模型可以主动选择沉默，排查方法见[故障处理](apps/docs/content/docs/operations/troubleshooting.md)。
-
-启用端口发布后，可以访问 [http://127.0.0.1:8787](http://127.0.0.1:8787)，首次访问创建管理员账号。远程访问可以使用 SSH 隧道或配置好 TLS 与访问控制的反向代理。
-
-### 在本机使用 Node.js 运行
-
-如果希望直接在本机运行，需要 Node.js 24+、pnpm、FFmpeg、FFprobe、Python 和 `lottie_convert.py`（安装方法见[环境要求](apps/docs/content/docs/start/installation.md)）。先拉取源码并准备依赖、管理面板和配置：
-
-```bash
-git clone https://github.com/tuuject/plastic-wan.git
-cd plastic-wan
-pnpm install --frozen-lockfile
-pnpm --filter @plasticwan/image-service build
-pnpm run admin:build
-mkdir -p config data
-cp apps/docs/examples/config.example.jsonc config/config.jsonc
-cp apps/docs/examples/system-prompt.example.md config/system-prompt.md
-```
-
-按上面的要求填写 Chat、模型和密钥，并将容器路径改为本机路径：`data_dir` 设为 `./data`，`paths.database`、`paths.media_cache`、`paths.backups` 分别设为 `./data/plasticwan.sqlite`、`./data/media-cache`、`./data/backups`。Prompt 路径仍相对于配置文件目录；只在本机访问面板时，把 `admin.host` 改为 `127.0.0.1`。
-
-在当前终端设置同样的 `TELEGRAM_BOT_TOKEN` 和 `PLASTICWAN_API_KEY`。Linux/macOS 还需要设置目录和配置文件权限：
-
-```bash
-chmod 700 config data
-chmod 600 config/config.jsonc
-```
-
-然后检查配置并启动：
-
-```bash
-node src/cli.ts check-config --config config/config.jsonc
-node src/cli.ts serve --config config/config.jsonc
-```
-
-同样以 `serve_started` 日志确认启动完成。前台运行时使用 `Ctrl+C` 停止；长期运行需要自行配置 systemd、supervisor 等进程监督器。
-
-## 关于 BYOK、成本与 Coding Plan
+### 费用：BYOK 与 Coding Plan
 
 模型费用是塑料碗最大的使用门槛之一。即使选择单价较低的模型，持续运行的费用也可能超过一些人的承受范围。
 
@@ -170,62 +127,95 @@ node src/cli.ts serve --config config/config.jsonc
 
 </details>
 
-## 工作方式与安全边界
+### 数据与安全边界
 
-```text
-Telegram 消息
-  → Chat / Topic 白名单与参与规则
-  → 消息入库与时间窗口聚合
-  → 会话上下文 + 人格 Prompt + 受限工具
-  → 模型决定参与或沉默
-  → 显式 send 工具
-  → Telegram
+- 即使自行部署，消息、上下文和图片仍会按配置发送给你选择的模型和外部工具服务。**接入群聊前，请告知参与者并核对服务商的数据政策。**
+- 在线数据按 `retention.online_days` 保留，过期数据在运行 `backup` 时清理（见 [备份与恢复](apps/docs/content/docs/operations/backup-restore.md)）；备份文件和模型服务商那边保存的数据需要你分别管理。
+- 模型没有任意文件系统或 Shell 权限；图片等媒体只能在所属会话内引用，并会过期；MCP 工具受配置与运行时策略约束。
+
+管理面板的访问边界见 [管理面板指南](apps/docs/content/docs/configure/admin.md)。
+
+## 快速开始
+
+推荐使用 GHCR 上的 Docker 镜像部署。镜像已经包含 Node.js、媒体转换依赖和管理面板，本机只需要 Docker Compose。想直接用 Node.js 在本机运行，见 [部署方式与环境要求](apps/docs/content/docs/start/installation.md#宿主机运行)。
+
+开始前还需要：
+
+- 一个 Telegram Bot：通过 [@BotFather](https://t.me/BotFather) 创建；群聊中要确认它能收到目标消息（见 [Telegram 接入](apps/docs/content/docs/configure/telegram.md)）。
+- 一个模型服务的 API Key。
+
+### 1. 准备配置
+
+创建部署目录：
+
+```bash
+mkdir -p surowan/config surowan/data
+cd surowan
 ```
 
-- 模型没有任意文件系统或 Shell 权限；媒体引用按会话授权并会过期，MCP 工具受配置与运行时策略约束。
-- 即使自行部署，消息、上下文或图片仍会按配置发送给所选模型与外部工具服务，所以接入前需要告知参与者并核对数据政策。
-- 在线数据按 `retention.online_days` 保留；备份和模型服务商保存的数据需要由部署者分别管理。
-- **同一个数据目录只能有一个 `serve` 实例**，不要绕过锁或让多个进程争用 Telegram long polling。
+从仓库下载下面三个文件，按表中的位置保存：
 
-架构细节见 [architecture.md](agent-doc/architecture.md)，管理面板边界见[管理面板指南](apps/docs/content/docs/configure/admin.md)。
+| 文件 | 保存位置 |
+| --- | --- |
+| [Compose 模板](docker-compose.yml) | `docker-compose.yml` |
+| [配置示例](apps/docs/examples/config.example.jsonc) | `config/config.jsonc` |
+| [人格 Prompt 示例](apps/docs/examples/system-prompt.example.md) | `config/system-prompt.md` |
 
-## 文档与参与
+Compose 模板默认使用 `ghcr.io/tuuject/surowan:latest`。如果要固定版本，把 `image` 改成对应的发布标签，并使用同一版本的配置示例。
+
+然后编辑 `config/config.jsonc`：
+
+- 把 `telegram.chats[0].id` 改为允许的 Chat ID；私聊通常为正数，群/Supergroup 通常为负数。
+- 填入 Provider 的 `base_url`、`api` 和模型信息，并同步修改 `agent.model`、`vision.model`。示例中的模型 ID 和地址是占位符，需要换成服务商实际提供的值。
+- 保留容器内的 `/data` 路径；人格写在 `config/system-prompt.md` 中。
+- **首次不使用图片生成时，删除整个可选的 `image` 段。** 图片理解与图片生成是不同能力；需要生成图片时，再按[图片指南](apps/docs/content/docs/guides/images.md)配置。
+
+如果需要在浏览器中访问管理面板，取消 `docker-compose.yml` 中 `ports` 段的注释；配置示例里的 `admin.host` 已经是容器所需的 `0.0.0.0`。端口只会发布到本机的 `127.0.0.1:8787`。
+
+### 2. 提供密钥
+
+配置示例通过环境变量读取密钥。取消 `docker-compose.yml` 中 `TELEGRAM_BOT_TOKEN` 和 `PLASTICWAN_API_KEY` 两行的注释，然后在运行 Compose 的终端中设置它们，或由部署系统注入：
+
+```bash
+export TELEGRAM_BOT_TOKEN='替换为自己的 Bot Token'
+export PLASTICWAN_API_KEY='替换为自己的模型 API Key'
+```
+
+真实密钥不要写进 Compose 或 `config.jsonc`，也不要提交到仓库或发到聊天里。也可以改用配置同目录的 `key.json`，详见 [配置文件与密钥](apps/docs/content/docs/configure/config-file.md)。
+
+### 3. 检查配置并启动
+
+```bash
+docker compose pull
+docker compose run --rm plasticwan check-config --config /config/config.jsonc
+docker compose up -d
+docker compose logs -f plasticwan
+```
+
+`check-config` 只校验配置，成功以后再启动。如果需要检查实际依赖和外部连接，可以运行 `docker compose run --rm plasticwan doctor --config /config/config.jsonc`（会调用模型，消耗少量 Token）。
+
+日志出现 **`serve_started`** 后，向允许的 Chat 发消息，等待消息聚合窗口（示例配置为 15 秒）。没有回复时，排查方法见 [故障处理](apps/docs/content/docs/operations/troubleshooting.md)。
+
+启用端口发布后，访问 [http://127.0.0.1:8787](http://127.0.0.1:8787)，首次访问时创建管理员账号。远程访问可以使用 SSH 隧道，或配置好 TLS 与访问控制的反向代理。
+
+> [!WARNING]
+> **同一个数据目录只能运行一个实例。** 不要绕过 `serve.lock`，也不要让多个进程同时轮询同一个 Bot。
+
+## 文档
 
 | 想做什么 | 从这里开始 |
 | --- | --- |
-| 部署自己的碗 | [快速开始](#快速开始) |
 | 选择模型、配置不同会话 | [模型配置](apps/docs/content/docs/configure/models.md)、[按 Chat 配置](apps/docs/content/docs/guides/per-chat.md) |
 | 调整人格、参与时机与预算 | [人格](apps/docs/content/docs/guides/personality.md)、[参与规则](apps/docs/content/docs/guides/participation.md)、[预算](apps/docs/content/docs/guides/budgets.md) |
 | 升级、备份与恢复 | [升级](apps/docs/content/docs/operations/upgrade.md)、[备份与恢复](apps/docs/content/docs/operations/backup-restore.md) |
-| 理解实现或贡献代码 | [维护者文档](agent-doc/README.md)、[仓库约定](AGENTS.md) |
-| 本地浏览完整文档站 | [文档站开发说明](apps/docs/README.md) |
+| 浏览完整文档 | [使用文档首页](apps/docs/content/docs/index.md) |
+
+## 参与贡献
 
 欢迎提交 Issue 或 Pull Request。报告问题时请提供源码提交或镜像版本、复现步骤、期望与实际行为，以及脱敏日志；**不要附上 Bot Token、API Key、真实 `key.json`、数据库或私聊记录**。
 
-项目采用 [Apache License 2.0](LICENSE)。管理面板的独立许可证为 [MIT License](apps/admin-next/LICENSE)。本页使用的 Logo、主题插画与心得截图均由我提供。
+修改代码前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有开发环境、检查命令和仓库结构。
 
-## 开发
+## 许可证
 
-如果需要修改源码，先按上面的本机运行步骤准备环境。项目使用 TypeScript ESM，Node.js 直接执行 `.ts`；修改后可以运行下面的检查和测试，并启动需要的前端开发服务：
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run check
-pnpm test
-
-# 两个独立的前端开发入口
-pnpm run admin:dev
-pnpm run docs:dev
-```
-
-Admin 开发服务默认监听 `127.0.0.1:5273`，需配合运行中的 Bot/Admin 后端；文档开发服务监听 `127.0.0.1:5274`。生产管理面板通过 `pnpm run admin:build` 构建，由 Bot 服务托管。
-
-```text
-src/                    Bot 运行时、调度、上下文、工具与 SQLite
-apps/admin-next/        React 管理面板
-apps/docs/              中文使用文档与安全配置示例
-packages/image-service/ 图片生成核心包
-agent-doc/              架构、配置、运维与维护者文档
-scripts/                维护及验证脚本
-test/                   行为测试
-```
+项目采用 [Apache License 2.0](LICENSE)，管理面板单独采用 [MIT License](apps/admin-next/LICENSE)。本页使用的 Logo、主题插画与心得截图均由我提供。

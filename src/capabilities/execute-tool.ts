@@ -38,8 +38,8 @@ type ExecuteRequest =
   | { readonly action: 'call'; readonly tool: string; readonly input: Record<string, unknown> };
 
 /** Runtime primitives are registered by the runtime itself and never callable through execute. */
-export const EXECUTE_PRIMITIVES: ReadonlySet<string> = new Set(['read', 'send', 'execute', 'zzz']);
-const SIDE_EFFECTING_PRIMITIVES: ReadonlySet<string> = new Set(['send', 'zzz']);
+export const EXECUTE_PRIMITIVES: ReadonlySet<string> = new Set(['read', 'send', 'send_reply', 'execute', 'zzz']);
+const SIDE_EFFECTING_PRIMITIVES: ReadonlySet<string> = new Set(['send', 'send_reply', 'zzz']);
 
 export interface CapabilityToolDetails {
   readonly refs?: Readonly<Record<string, readonly string[]>>;
@@ -76,7 +76,7 @@ interface RegisteredCapability {
  * The `execute` runtime primitive: a controlled dispatch interface between
  * the model and runtime-internal capabilities. It does discovery, help,
  * validation, dispatch, and auditing — never reasoning on the model's behalf,
- * and never exposing the read/send/execute/zzz primitives or MCP tools.
+ * and never exposing the read/send/send_reply/execute/zzz primitives or MCP tools.
  */
 export function createExecuteTool(
   options: ExecuteToolOptions,
@@ -95,7 +95,7 @@ export function createExecuteTool(
     name: 'execute',
     label: 'Call a runtime capability',
     description:
-      'Controlled gateway to runtime-internal capabilities (web fetching, sticker search, image analysis, memory notes, alarms). Actions: search finds capabilities for a need, e.g. query "fetch a web page", and returns [{name, summary}]; help returns one capability\'s full description and parameters; call invokes one capability with a JSON object input. After deciding to reply, optionally call typing with input:{} before slow work such as search; quick replies go directly to send, and silence needs no typing. The runtime refreshes and clears typing automatically. Prefer the system skill index and skill documents for how to use a capability; use search only when no skill covers the need, and check help when unsure about the input contract. call returns an envelope {text, refs}: text is bounded evidence or structured data, refs holds conversation-scoped reference tokens (such as sticker_ref) that only their named consumer tool accepts after validation. A ref stays valid in this conversation for a limited time, so one returned earlier in the retained history may be reused while it still resolves instead of repeating the call — never guess or fabricate them. The directly exposed tools (read, send, execute, zzz) and MCP tools are never callable through execute. On failure, do not invent results and do not blindly retry side effects.',
+      'Controlled gateway to runtime-internal capabilities (web fetching, sticker search, image analysis, memory notes, alarms). Actions: search finds capabilities for a need, e.g. query "fetch a web page", and returns [{name, summary}]; help returns one capability\'s full description and parameters; call invokes one capability with a JSON object input. After deciding to reply, optionally call typing with input:{} before slow work such as search; quick replies go directly to send, and silence needs no typing. The runtime refreshes and clears typing automatically. Prefer the system skill index and skill documents for how to use a capability; use search only when no skill covers the need, and check help when unsure about the input contract. call returns an envelope {text, refs}: text is bounded evidence or structured data, refs holds conversation-scoped reference tokens (such as sticker_ref) that only their named consumer tool accepts after validation. A ref stays valid in this conversation for a limited time, so one returned earlier in the retained history may be reused while it still resolves instead of repeating the call — never guess or fabricate them. The directly exposed tools (read, send, send_reply, execute, zzz) and MCP tools are never callable through execute. On failure, do not invent results and do not blindly retry side effects.',
     parameters: ExecuteInputSchema,
     executionMode: 'sequential',
     execute: async (toolCallId, input, signal) => {

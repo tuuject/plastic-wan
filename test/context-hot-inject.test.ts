@@ -949,8 +949,8 @@ describe('long-lived invocation', () => {
         new AbortController().signal,
       );
       expect(outcome).toEqual({ state: 'completed', reason: 'context_limit' });
-      // Exactly one closing turn, and it only carried the send tool.
-      expect(closingTools).toEqual([['send']]);
+      // Exactly one closing turn, and it only carried the send tools.
+      expect(closingTools).toEqual([['send', 'send_reply']]);
       expect(
         fixtureSetup.store.db
           .prepare<[], { count: bigint }>("SELECT COUNT(*) AS count FROM telegram_sends WHERE state = 'success'")

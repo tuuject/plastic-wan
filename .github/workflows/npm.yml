@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'tuuject/plastic-wan'
+    if: github.repository == 'tuuject/surowan'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -63,13 +63,14 @@ jobs:
         run: |
           packages=("$RUNNER_TEMP/npm-release/"*.tgz)
           test "${#packages[@]}" -eq 1
-          npm publish "${packages[0]}" --dry-run --access public --tag "$DIST_TAG" --ignore-scripts
+          npm stage publish "${packages[0]}" --dry-run --access public --tag "$DIST_TAG" --ignore-scripts
 
       # No npm token: npm exchanges this job's OIDC identity with the registry.
-      - name: Publish to npm
+      # The trusted publisher only allows staging; a maintainer approves with 2FA.
+      - name: Stage npm publish
         env:
           DIST_TAG: ${{ steps.release.outputs.tag }}
         run: |
           packages=("$RUNNER_TEMP/npm-release/"*.tgz)
           test "${#packages[@]}" -eq 1
-          npm publish "${packages[0]}" --access public --tag "$DIST_TAG" --ignore-scripts
+          npm stage publish "${packages[0]}" --access public --tag "$DIST_TAG" --ignore-scripts --provenance

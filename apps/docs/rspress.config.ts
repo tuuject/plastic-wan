@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { defineConfig, normalizeHref } from '@rspress/core';
 import buildInfo from './content/public/build-info.json';
 
-const repository = 'https://github.com/tuuject/plastic-wan';
+const repository = 'https://github.com/tuuject/surowan';
 const version = `文档对应源码提交：${buildInfo.commit}${buildInfo.dirty ? '（含未提交修改，仅供本地预览）' : ''}`;
 
 export default defineConfig({
@@ -40,7 +40,7 @@ export default defineConfig({
         '',
         `> ${description}`,
         '',
-        `${version}。源码：https://github.com/tuuject/plastic-wan/commit/${buildInfo.commit}`,
+        `${version}。源码：https://github.com/tuuject/surowan/commit/${buildInfo.commit}`,
         '',
         '先核实用户的代码或镜像版本，再读快速开始与具体任务页。不要读取或转发真实密钥；重启、迁移与覆盖配置前须获得确认。',
         '这是部署文档，不是 Bot 的 System Skills；不保证 Agent 自动发现此索引。',
@@ -77,6 +77,7 @@ export default defineConfig({
           'config.schema.json',
           'examples/config.example.jsonc',
           'examples/system-prompt.example.md',
+          'examples/docker-compose.yml',
         ].map((path) => `${buildInfo.base}${path}`),
       },
       checkAnchors: true,

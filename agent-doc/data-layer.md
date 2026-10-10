@@ -57,14 +57,14 @@ Plastic Wan 使用单个 SQLite 数据库保存消息、调度状态、能力索
 
 - `conversation_contexts.conversation_id` 带 UNIQUE 约束：**每个 Conversation 至多一行 context**。
 - 保留窗口是半开区间 `[head_seq, next_seq)`：`next_seq` 是下一个空位，`head_seq` 是第一条保留行；`context_messages` 以 `(context_id, seq)` 为主键，`seq` 只增不减，被丢弃的行不从编号里移除。
-- `send_count_total` 是该 context 累计的成功实发 `send` 次数，跨 Invocation 累计，`head_seq` 前移时不清零；图片去重返回的 `replayed:true` 只落 toolResult，不增加该计数。
+- `send_count_total` 是该 context 累计的成功实发 `send` 次数（一次成功的 `send_reply` 无论几条都算一次），跨 Invocation 累计，`head_seq` 前移时不清零；图片去重返回的 `replayed:true` 只落 toolResult，不增加该计数。
 - `system_prompt_hash` 是稳定系统提示的 SHA-256。打开 context 时 hash 不一致按「重建」处理：删除该 context 的全部 `context_messages` 与 `context_refs`，`head_seq`/`next_seq` 复位为 1、`send_count_total` 归零、`active_invocation_id` 清空。
 - `active_invocation_id` 指向当前拥有该 context 的 running Invocation，运行结束时清空；Invocation 行本身被清理时置 `NULL`。
 - `last_active_at` 在每次追加行与 `touch`（Invocation 开始/结束）时刷新，是保留清理判定「空闲 Conversation」的依据；`last_gc_at` 记录最近一次 GC 时间。
 - `context_messages.payload_json` 保存**完整 AgentMessage JSON**（含 thinking 与 tool call 结构），可以直接解码重放，而不是从文本反推；`role` 只有 `user`/`assistant`/`toolResult`。
 - `agent_messages` 与 `context_messages` 的分工：前者是审计轨迹（每 Invocation 扁平展开、人可读、把 harness 提醒单独标成 `harness_nudge`），后者是生产 Agent 跨 Invocation 续跑的来源（完整结构与 thinking、按 Conversation 保留），不是 Admin 场景重放输入；两者都由 `agent-runtime` 写入，互不替代。
 - `is_checkpoint` 标记一条注入批次的首条 user 消息；GC 只会把 `head_seq` 推到 checkpoint 行上。
-- `send_seq` 只在「成功实发 `send` 的 toolResult」行上非空（排除图片去重返回），值等于写入时的 `send_count_total + 1`；GC 用它统计保留窗内还剩几次发送。
+- `send_seq` 只在「成功实发 `send` 或 `send_reply` 的 toolResult」行上非空（排除图片去重返回），值等于写入时的 `send_count_total + 1`；GC 用它统计保留窗内还剩几次发送。
 - `est_tokens` 是逐行 Token 估算，供 GC 与收尾判定使用，不是精确计数。
 - `evicted_at` 是软删除标记：GC 不立即物理删除行，只打标记；行保留到在线窗口之后才由 `purgeExpiredData` 真正删除（见「保留清理」）。
 - `invocation_id` 记录写入该行的 Invocation，Invocation 被清理时置 `NULL`，历史行本身不随之删除。
@@ -115,7 +115,7 @@ Alarm 是 `plugin_id = 'alarm'` 的任务投影。`long_tasks.created_by_user_id
 
 ### 工具可见性审计
 
-`invocations.tool_registry_hash` 之外还有 `tool_registry_json`：本次 Invocation 实际展示给模型的完整工具快照（`name`/`label`/`description`）；hash 覆盖名称、描述和参数 Schema，Tool 使用策略变化也会产生新 hash。`model_calls.tools_json` 记录该次请求真正附带的工具名数组——Agent 循环在 context 接近上限时会把工具裁剪到 `send` 和当时可用的 `zzz`，因此同一 Invocation 内不同请求的工具列表可能不同；这两列共同回答“模型当时能看到哪些工具”。
+`invocations.tool_registry_hash` 之外还有 `tool_registry_json`：本次 Invocation 实际展示给模型的完整工具快照（`name`/`label`/`description`）；hash 覆盖名称、描述和参数 Schema，Tool 使用策略变化也会产生新 hash。`model_calls.tools_json` 记录该次请求真正附带的工具名数组——Agent 循环在 context 接近上限时会把工具裁剪到 `send`、`send_reply` 和当时可用的 `zzz`，因此同一 Invocation 内不同请求的工具列表可能不同；这两列共同回答“模型当时能看到哪些工具”。
 
 仅在 `developer.record_model_payloads = true` 时保存模型调用的原始报文快照，缺省关闭。`model_calls.request_json` 不复制 `data:image/*;base64,...` 图片正文；对应字符串替换为包含 MIME、Base64 字符数、解码字节数与 SHA-256 的结构化摘要，真实 Provider 请求不受影响。现有 `response_json` 捕获的是 HTTP status 快照，并非完整流式响应体。关闭仅跳过这些调试快照，正常模型调用、工具、usage、费用、状态与错误审计照常记录；旧快照不自动删除。
 

@@ -8,7 +8,7 @@ import Type from 'typebox';
 import { Value } from 'typebox/value';
 import { ConfigSchema } from '../src/platform/config.ts';
 import { CODE_BLOCK_PATTERN } from './docs-markdown.ts';
-import { deploymentSettings, docsRoot, exampleNames, repositoryRoot } from './docs-prepare.ts';
+import { deploymentSettings, docsRoot, exampleNames, exampleSource, repositoryRoot } from './docs-prepare.ts';
 
 const dist = resolve(docsRoot, 'dist');
 const files = (await readdir(dist, { recursive: true, withFileTypes: true }))
@@ -40,11 +40,7 @@ assert.deepEqual(
   'Schema is stale',
 );
 for (const name of exampleNames) {
-  assert.equal(
-    await read(`examples/${name}`),
-    await readFile(resolve(docsRoot, 'examples', name), 'utf8'),
-    `Stale example: ${name}`,
-  );
+  assert.equal(await read(`examples/${name}`), await readFile(exampleSource(name), 'utf8'), `Stale example: ${name}`);
 }
 
 const origin = siteOrigin || 'https://docs.invalid';

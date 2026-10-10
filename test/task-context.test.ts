@@ -456,7 +456,7 @@ test('bypass receipts still enter a single send-only closing turn at the context
     invocation_outcome: 'completed',
     completion_reason: 'context_limit',
   });
-  expect(tools).toEqual([['send']]);
+  expect(tools).toEqual([['send', 'send_reply']]);
   expect(f.sends).toEqual(['closing result']);
   expect(new ConversationContextStore(f.store).header(1n)?.sendCountTotal).toBe(1n);
 });

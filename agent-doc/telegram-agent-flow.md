@@ -207,7 +207,7 @@ participation 放行 = 未配置 participation || 处于活跃时段 || 更新�
 
 `list_alarm` 的 `items` JSON 经 `execute.call` 的 `text` 封套作为普通工具结果，由既有的 canonical `context_messages` 保存，跨 Invocation、Agent 缓存与进程重启复用，随 checkpoint GC 或话题清空自然遗忘。列表同样受通用结果长度限制，不保证超长列表完整。若历史缺失或不能唯一解析目标，模型应重新调用 `list_alarm`；仍无法确定时应澄清，不能猜 ID。`delete_alarm` 仍按 live caller、plugin、Conversation 与 pending 状态鉴权，不依赖任何旁路存储。
 
-Context 受模型窗口限制：为系统提示、完整 Tool 定义（名称、描述与参数 Schema）、历史、新消息和输出保留空间。Tool description 不只是能力清单，还应说明何时使用、何时不用、必要调用顺序和成功判定。估算输入达到 `context_window × context_stop_ratio` 后进入收尾模式：下一次模型调用只带 `send` 和当时可用的 `zzz`，模型用这一轮把话说完，这一轮结束后运行以 `context_limit` 结束。Pi 在同一个 turn 边界先调 `prepareNextTurnWithContext` 再调 `shouldStopAfterTurn`，所以「进入收尾」和「停止」必须隔开一轮，否则收尾轮根本不会发生。
+Context 受模型窗口限制：为系统提示、完整 Tool 定义（名称、描述与参数 Schema）、历史、新消息和输出保留空间。Tool description 不只是能力清单，还应说明何时使用、何时不用、必要调用顺序和成功判定。估算输入达到 `context_window × context_stop_ratio` 后进入收尾模式：下一次模型调用只带 `send`、`send_reply` 和当时可用的 `zzz`，模型用这一轮把话说完，这一轮结束后运行以 `context_limit` 结束。Pi 在同一个 turn 边界先调 `prepareNextTurnWithContext` 再调 `shouldStopAfterTurn`，所以「进入收尾」和「停止」必须隔开一轮，否则收尾轮根本不会发生。
 
 ## Agent 循环
 
@@ -230,17 +230,17 @@ Invocation 结束时 Agent 实例可以留在 `ConversationRuntime` 缓存里供
 
 工具面分三层：runtime 原语直接暴露、内部能力经 `execute`、MCP Tool 直接暴露。内部能力按需发现，避免每轮请求携带全部定义；这不是放宽授权，Schema、引用和预算仍由 Tool 边界校验。修改能力时先查 [组合根的 `capabilityTools`](../src/application.ts)（按符号名检索）与 [原语装配](../src/orchestration/agent-runtime.ts)，行为验证见 [验证索引](verification.md#静态与单元验证)。
 
-- **原语**：`read`、`send`、`execute`、`zzz`（条件暴露）。它们的定义、Schema 与约束完全由 runtime 提供，不依赖任何 Skill；未读取任何 Skill 也能直接调用。
+- **原语**：`read`、`send`、`send_reply`、`execute`、`zzz`（条件暴露）。它们的定义、Schema 与约束完全由 runtime 提供，不依赖任何 Skill；未读取任何 Skill 也能直接调用。
 - **内部能力注册表**：由 [application.ts](../src/application.ts) 的 `capabilityTools` 装配，完整清单以此为准，不在文档维护副本。其中内置 Agent 插件（[plugins/builtin.ts](../src/plugins/builtin.ts)，当前为 `web-fetch` 与 `alarm`）经 `loadPlugins` 校验 id 后按 Invocation 贡献能力；插件只拿到 `InvocationScope`（活的 Invocation 上下文、deadline、绑定本 Invocation 的 `ToolAudit` 与自身 plugin/Conversation 的 task scope），不持有 Store 或 Runtime。插件能力与其他内部能力走同一条 `execute` 注册、校验、分发与审计路径。模型经 `execute` 的 search/help/call 按需发现与调用；调用前按目标能力的参数 Schema 校验，input 超 32 KiB 拒绝。
 - **MCP Tool**：按配置 allowlist 直接暴露，不进入 `execute` 注册表。
 
-`execute.call` 的结果是 `{text, refs}` 封套：内层 `text` 上限 30 KiB，序列化后的整体上限 32 KiB，超限截断带 `[content truncated]` 标记；`refs` 是本次调用产生的 Conversation Context 级引用 token（目前只有 `search_stickers` 的 `sticker_ref`，带 TTL），只能交给对应消费 Tool 在边界校验后使用。`execute` 拒绝四个原语（`execute_primitive_rejected`）与未知能力（`unknown_capability`），也不会递归调用自己。运行已被 abort 时 `execute.call` 不再 dispatch：内部能力不一定理会 signal（例如 `alarm`），所以在调用之前检查，外层 `tool_calls` 记为 `error`/`aborted`，不产生内层记录。
+`execute.call` 的结果是 `{text, refs}` 封套：内层 `text` 上限 30 KiB，序列化后的整体上限 32 KiB，超限截断带 `[content truncated]` 标记；`refs` 是本次调用产生的 Conversation Context 级引用 token（目前只有 `search_stickers` 的 `sticker_ref`，带 TTL），只能交给对应消费 Tool 在边界校验后使用。`execute` 拒绝原语（`execute_primitive_rejected`）与未知能力（`unknown_capability`），也不会递归调用自己。运行已被 abort 时 `execute.call` 不再 dispatch：内部能力不一定理会 signal（例如 `alarm`），所以在调用之前检查，外层 `tool_calls` 记为 `error`/`aborted`，不产生内层记录。
 
 System Skills 是随 runtime 发布的只读文档包，位于 `src/system-resources/skills/<name>/SKILL.md`，或由内置插件以 Skill 目录声明（如 `src/plugins/web-fetch/skills/web-fetch/`），统一挂载在 `system:///skills/<name>/` 下（Docker 镜像随 `src/` 打包）。`SKILL.md` 头部 frontmatter 声明 `name`（必须等于目录名）与 `description`；Skill 重名（包括插件与内置树之间）或加载失败即启动失败。system prompt 只注入索引（名称、描述、`system:///skills/<name>/SKILL.md` URI）；正文由模型用 `read` 按需读取，即 progressive disclosure。`read` 只接受 `system:///` 绝对 URI 或「相对引用 + base」，路径段校验拒绝 `..`、反斜杠、百分号转义，只允许 `.md`，结果 32 KiB 截断。Skill 是文档不是授权：不能覆盖 Tool 约束、协议或预算。
 
-每次模型请求都会附带完整的工具注册表（名称、label、描述与参数 Schema）。请求发出前把该请求实际附带的工具名写入 `model_calls.tools_json`，Invocation 的可用注册表快照（`name`/`label`/`description`）写入 `invocations.tool_registry_json`——因此可以审计“模型在某一轮到底看到了哪些工具”。context 接近上限时，Agent 循环只保留 `send` 和已经可用的 `zzz` 继续收尾。`developer.record_model_payloads` 只控制调试请求/响应报文；Invocation 场景重放从冻结的公开消息重建，不依赖报文录制，也不保存第二份模型输入（见 [data-layer.md](data-layer.md#工具可见性审计)）。
+每次模型请求都会附带完整的工具注册表（名称、label、描述与参数 Schema）。请求发出前把该请求实际附带的工具名写入 `model_calls.tools_json`，Invocation 的可用注册表快照（`name`/`label`/`description`）写入 `invocations.tool_registry_json`——因此可以审计“模型在某一轮到底看到了哪些工具”。context 接近上限时，Agent 循环只保留 `send`、`send_reply` 和已经可用的 `zzz` 继续收尾。`developer.record_model_payloads` 只控制调试请求/响应报文；Invocation 场景重放从冻结的公开消息重建，不依赖报文录制，也不保存第二份模型输入（见 [data-layer.md](data-layer.md#工具可见性审计)）。
 
-普通 Assistant Message 永不自动发布。模型不调用 `send` 即表示保持沉默，这是正常成功结果。`agent.send_nudge_enabled` 开启时，若本轮没有 Tool Call、私有文本去除首尾空白后非空，且**本批注入**以来尚未调用 `send`，harness 会在会话自然结束前至多注入一次 `steer` 提醒；提醒后仍不调用则静默放行，文本不出 Telegram。提醒的判定必须**早于**注入下一个批次与空闲等待：后两者都会延长这次运行，而草稿只有在自己那批仍是最新批次时才可挽回——排在它们后面会让整段运行期间每个「有草稿又被下一批接上」的批次都静默丢回复（只有真正静默满一个 grace 才会被提醒）。
+普通 Assistant Message 永不自动发布。模型不调用 `send` 或 `send_reply` 即表示保持沉默，这是正常成功结果。`agent.send_nudge_enabled` 开启时，若本轮没有 Tool Call、私有文本去除首尾空白后非空，且**本批注入**以来尚未调用 `send` 或 `send_reply`，harness 会在会话自然结束前至多注入一次 `steer` 提醒；提醒后仍不调用则静默放行，文本不出 Telegram。提醒的判定必须**早于**注入下一个批次与空闲等待：后两者都会延长这次运行，而草稿只有在自己那批仍是最新批次时才可挽回——排在它们后面会让整段运行期间每个「有草稿又被下一批接上」的批次都静默丢回复（只有真正静默满一个 grace 才会被提醒）。
 
 ## 睡眠
 
@@ -276,7 +276,7 @@ Alarm 是第一个 `plugin_id = "alarm"` 的 consumer，通过 `execute.call` �
 
 ## send Tool
 
-`send` 是模型驱动的 Telegram 输出的唯一边界，支持以下形式；确定性的 Bot 命令回复不经过模型，见 [Bot Commands](#bot-commands)：
+`send` 是模型驱动的 Telegram 输出的唯一边界（[`send_reply`](#send_reply) 只是把一次回复拆成几次 `send` 依次发出），支持以下形式；确定性的 Bot 命令回复不经过模型，见 [Bot Commands](#bot-commands)：
 
 - 文本默认按纯文本发送；显式设置 `parse_mode: "MarkdownV2"` 时由 Telegram 按 MarkdownV2 解析。只提供 `text`（以及可选的 `reply_to_message_id`）时，`kind` 默认为 `text`。
 - 配置允许且当前 Conversation Context 授权的 Sticker（`stk_` 引用）。
@@ -300,11 +300,23 @@ Alarm 是第一个 `plugin_id = "alarm"` 的 consumer，通过 `execute.call` �
 
 ### 一条消息对应一个话题
 
-`send` 的 Tool 描述要求「一条消息对应一个话题」：同一批新消息里有多拨人在聊不相关的事情时，模型为每个它选择参与的话题各调用一次 `send`，并分别带上指向该话题内消息的 `reply_to_message_id`，而不是把不相关的内容合进一条消息。没话要说的话题可以不回；单个回答仍然不拆成多条。
+`send` 的 Tool 描述要求「一条消息对应一个话题」：同一批新消息里有多拨人在聊不相关的事情时，模型为每个它选择参与的话题各调用一次 `send`，并分别带上指向该话题内消息的 `reply_to_message_id`，而不是把不相关的内容合进一条消息。没话要说的话题可以不回；单个回答不拆成多次 `send`，需要连续几条（例如先发 Sticker 再接文字，或把中等长度的回答分成几句短消息）时用一次 [`send_reply`](#send_reply)。
 
 话题分线仍只是 Tool 描述层面的倾向，runtime 不推断话题，也不强制 `reply_to_message_id`；但默认配置（`allow_reply_message_multiple_times` 为 `false`/省略）下，显式指向同一消息的重复 Reply 会被上述守卫硬性拒绝，显式开启 `true` 后同一目标可以多次回复。模型从消息头的 `re:N`、`uid:N` 与时间顺序自行推断话题归属；同一个 Forum Topic 内部的多话题仍属于同一个 Conversation。不同回复目标的多次 `send` 各自独立审计、独立计数、独立失败，不能因「一个回答不拆多条」而把不相关的话题合并。
 
 代价是群里会更容易连发若干条，从而更容易撞上 Telegram 自己的群聊发送速率限制；那只是多走一次既有的 429 `retry_after` 重试，不丢消息。
+
+### send_reply
+
+`send_reply` 把一次回复拆成 2–4 条连续消息按顺序发出：`parts` 的每一项是一条消息，字段与 `send` 相同（文本、`kind: "sticker"` + `stk_` 引用、`kind: "image"` + `image_generation_id` 与可选说明），顶层可选 `reply_to_message_id`。它不是第二条发送通道，每一条都走完整的 `send` 管线：
+
+- **先全部检查，再发第一条**：字段与 kind 是否匹配、Reply 目标是否可见、`send_max_text_length` 与 `send_disallow_blank_lines`、Sticker 引用授权、图片 generation 是否属于本 Conversation 且有成品、图片说明长度、abort/deadline，以及本 Chat 滑动窗口剩余额度是否容得下全部条数。任一项不过，整次调用记为一条 `send_reply` 的 `error` Tool Call，不写 `telegram_sends`、不调用 Telegram、不消耗额度。
+- **逐条发送**：第 n 条以 `<tool_call_id>:<n>` 作为自己的 `send` Tool Call 走原有流程（审计、`telegram_sends`、限流计数、429 重试、写入可见历史、完成回执首条文字的 @ 提及）；外层另有一条 `tool_name = 'send_reply'` 的 `tool_calls` 行，成功时 `result_text` 为 `telegram_message_ids=…`。
+- **Reply 只挂在第一条**：顶层 `reply_to_message_id` 只给第一条，后续几条不带 Reply。因此「同一消息只回复一次」守卫只作用于第一条：目标已被回复过时第一条被拒，整次什么都不发。
+- **send 屏障只拦第一条**：第一条发出后，期间到达的新消息不再拦下后面几条（429 等待后也不再判断屏障），避免把一次回复切成两半；新消息按原规则在本轮之后注入。
+- **中途失败**：第 k 条失败（Telegram 错误、结果未知、abort 等）时停止，前面已发出的保留；外层 `send_reply` 行记为 `error`，错误码取自失败那条，`result_text` 记录已发出的 message ID；Tool 结果向模型列出已发出的消息并要求不要重发，剩余条目不尝试。
+- **计数**：每一条都是一行 `telegram_sends`，各自计入 `sends_used` 与 `sends_per_window`；成功的 `send_reply` 在 Conversation Context 中算作**一次**发送（一个 toolResult 带 `send_seq`）。它与 `send` 一样计入 send nudge 判定、收尾模式只保留的工具与 `execute` 不可调用的原语。
+- Scene 重放把它合成为每条一个 `send` 输出（`<id>:<n>`），同样先检查全部条目，第一条受场景内的同一消息只回复一次约束。
 
 ### send 屏障
 

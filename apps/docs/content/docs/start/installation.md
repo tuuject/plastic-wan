@@ -5,15 +5,17 @@ description: 选择 Docker 或宿主机运行塑料碗，并准备运行环境�
 
 # 部署方式与环境要求
 
-## 推荐：从源码构建 Docker 镜像
+## 推荐：Docker 镜像
 
-Dockerfile 已包含 FFmpeg、FFprobe、Python 与 Lottie 转换依赖。检出所需提交后，在仓库根目录构建：
+CI 把镜像发布到 `ghcr.io/tuuject/surowan`，已包含 FFmpeg、FFprobe、Python 与 Lottie 转换依赖。部署步骤见 [快速开始](quick-start.md)，标签选择见 [升级](../operations/upgrade.md#镜像标签)。
+
+需要运行未发布的提交或自行审计镜像时，可以在检出的仓库根目录构建，再把 `docker-compose.yml` 的 `image` 改为 `plasticwan:local`，其余步骤相同：
 
 ```bash
 docker build -t plasticwan:local .
 ```
 
-再使用 [快速开始](quick-start.md) 的 Compose 文件。Compose 会把 `./config` 映射到 `/config`、`./data` 映射到 `/data`；配置中必须使用容器内绝对路径。Admin 端口应仅发布到 `127.0.0.1`，再通过受控反向代理提供远程访问。
+Compose 会把 `./config` 映射到 `/config`、`./data` 映射到 `/data`；配置中必须使用容器内绝对路径。Admin 端口应仅发布到 `127.0.0.1`，再通过受控反向代理提供远程访问。
 
 容器以非特权用户运行，并会整理挂载目录权限。不要同时对相同 `/data` 启动第二个 `serve`；同一数据目录只能有一个轮询实例。
 
@@ -25,20 +27,36 @@ docker build -t plasticwan:local .
 - FFmpeg、FFprobe、Python 与 `lottie_convert.py` 位于服务的 `PATH`；
 - 可写的数据目录、Telegram Token、Provider API key。
 
-安装依赖并验证配置：
+拉取源码，安装依赖并构建图片核心包与管理面板，再复制配置示例：
 
 ```bash
-pnpm install
-node src/cli.ts check-config --config /absolute/path/config.jsonc
+git clone https://github.com/tuuject/surowan.git
+cd surowan
+pnpm install --frozen-lockfile
+pnpm --filter @plasticwan/image-service build
+pnpm run admin:build
+mkdir -p config data
+cp apps/docs/examples/config.example.jsonc config/config.jsonc
+cp apps/docs/examples/system-prompt.example.md config/system-prompt.md
 ```
 
-确认后运行：
+示例配置使用容器路径，需要改为本机路径：`data_dir` 设为 `./data`，`paths.database`、`paths.media_cache`、`paths.backups` 分别设为 `./data/plasticwan.sqlite`、`./data/media-cache`、`./data/backups`。Prompt 路径相对于配置文件目录，不用改。只在本机访问管理面板时，把 `admin.host` 改为 `127.0.0.1`。
+
+在当前终端设置 `TELEGRAM_BOT_TOKEN` 和 `PLASTICWAN_API_KEY`。非 Windows 主机要求配置文件为 `0600`、其父目录为 `0700`：
 
 ```bash
-node src/cli.ts serve --config /absolute/path/config.jsonc
+chmod 700 config data
+chmod 600 config/config.jsonc
 ```
 
-生产环境应由 supervisor、容器平台或 systemd 等外部机制负责重启；仓库不提供服务单元。非 Windows 主机还要求配置文件为 `0600`、其父目录为 `0700`。
+验证配置后运行：
+
+```bash
+node src/cli.ts check-config --config config/config.jsonc
+node src/cli.ts serve --config config/config.jsonc
+```
+
+生产环境应由 supervisor、容器平台或 systemd 等外部机制负责重启；仓库不提供服务单元。
 
 ## 生效与停止
 

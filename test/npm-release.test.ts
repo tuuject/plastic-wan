@@ -8,7 +8,7 @@ import { npmRelease } from '../scripts/npm-release.ts';
 
 const env: NodeJS.ProcessEnv = {
   GITHUB_EVENT_NAME: 'push',
-  GITHUB_REPOSITORY: 'tuuject/plastic-wan',
+  GITHUB_REPOSITORY: 'tuuject/surowan',
   GITHUB_REF: 'refs/heads/main',
   GITHUB_RUN_NUMBER: '123',
   GITHUB_RUN_ATTEMPT: '1',
@@ -57,7 +57,7 @@ describe('npm release selection', () => {
     { GITHUB_EVENT_NAME: 'pull_request' },
     { GITHUB_EVENT_NAME: 'workflow_dispatch' },
     { GITHUB_EVENT_NAME: 'workflow_run' },
-    { GITHUB_REPOSITORY: 'someone/plastic-wan' },
+    { GITHUB_REPOSITORY: 'someone/surowan' },
     { GITHUB_RUN_NUMBER: '0' },
     { GITHUB_RUN_NUMBER: '123\ntag=latest' },
     { GITHUB_RUN_ATTEMPT: '01' },
@@ -92,7 +92,7 @@ describe('npm release selection', () => {
     expect(manifest.publishConfig).toEqual({ access: 'public', registry: 'https://registry.npmjs.org/' });
     expect(manifest.repository).toEqual({
       type: 'git',
-      url: 'git+https://github.com/tuuject/plastic-wan.git',
+      url: 'git+https://github.com/tuuject/surowan.git',
       directory: 'packages/cli',
     });
     expect(manifest.bin).toEqual({ 'plasticwan-utils': './dist/bin.js' });

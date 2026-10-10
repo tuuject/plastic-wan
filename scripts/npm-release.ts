@@ -3,8 +3,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export function npmRelease(env: NodeJS.ProcessEnv): { version: string; tag: 'canary' | 'latest' } {
-  if (env.GITHUB_EVENT_NAME !== 'push' || env.GITHUB_REPOSITORY !== 'tuuject/plastic-wan') {
-    throw new Error('npm releases require a push in tuuject/plastic-wan');
+  if (env.GITHUB_EVENT_NAME !== 'push' || env.GITHUB_REPOSITORY !== 'tuuject/surowan') {
+    throw new Error('npm releases require a push in tuuject/surowan');
   }
   if (env.GITHUB_REF === 'refs/heads/main') {
     const run = env.GITHUB_RUN_NUMBER ?? '';

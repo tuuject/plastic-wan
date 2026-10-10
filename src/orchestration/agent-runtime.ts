@@ -12,8 +12,8 @@ import {
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { capability, createExecuteTool, type ExecutableCapability } from '../capabilities/execute-tool.ts';
 import { createReadTool } from '../capabilities/read-tool.ts';
-import { createSendTool, type TelegramSendApi } from '../capabilities/send-tool.ts';
 import type { MentionTyping } from '../capabilities/mention-typing.ts';
+import { createSendTools, SEND_TOOL_NAMES, type TelegramSendApi } from '../capabilities/send-tool.ts';
 import { createTyping } from '../capabilities/typing.ts';
 import { ContextBuilder, type ContextIdentity, type Injection, type StablePrompt } from '../context/context-builder.ts';
 import { encodeContextMessage, estimateMessageTokens } from '../context/context-codec.ts';
@@ -211,7 +211,7 @@ export class AgentRuntime {
    */
   validateAdditionalTools(context: InvocationContext, additionalTools: readonly AgentTool[], model: Model<Api>): void {
     const config = this.#configStore.current().config;
-    const send = createSendTool({
+    const { send, sendReply } = createSendTools({
       store: this.#store,
       api: this.#telegramApi,
       context,
@@ -227,6 +227,7 @@ export class AgentRuntime {
       [
         createReadTool({ store: this.#store, context, resources: this.#systemResources }),
         send,
+        sendReply,
         createExecuteTool({ audit: createToolAudit(this.#store, context.invocationId), capabilities: [] }),
         ...additionalTools,
       ],
@@ -280,22 +281,24 @@ export class AgentRuntime {
     zzz?: AgentTool,
     holdForNewMessages?: () => boolean,
   ): readonly AgentTool[] {
+    const { send, sendReply } = createSendTools({
+      store: this.#store,
+      api: this.#telegramApi,
+      context: target,
+      capabilities,
+      sendRateLimit: this.#sendRateLimit(config),
+      maxTextLength: config.agent.send_max_text_length,
+      disallowBlankLines: config.agent.send_disallow_blank_lines === true,
+      allowReplyMessageMultipleTimes: config.agent.allow_reply_message_multiple_times === true,
+      deadline,
+      bot: this.#bot,
+      ...(holdForNewMessages === undefined ? {} : { holdForNewMessages }),
+      ...(this.#imageGeneration === undefined ? {} : { imageGeneration: this.#imageGeneration }),
+    });
     return [
       createReadTool({ store: this.#store, context: target, resources: this.#systemResources }),
-      createSendTool({
-        store: this.#store,
-        api: this.#telegramApi,
-        context: target,
-        capabilities,
-        sendRateLimit: this.#sendRateLimit(config),
-        maxTextLength: config.agent.send_max_text_length,
-        disallowBlankLines: config.agent.send_disallow_blank_lines === true,
-        allowReplyMessageMultipleTimes: config.agent.allow_reply_message_multiple_times === true,
-        deadline,
-        bot: this.#bot,
-        ...(holdForNewMessages === undefined ? {} : { holdForNewMessages }),
-        ...(this.#imageGeneration === undefined ? {} : { imageGeneration: this.#imageGeneration }),
-      }),
+      send,
+      sendReply,
       createExecuteTool({
         audit: createToolAudit(this.#store, target.invocationId),
         capabilities: executableCapabilities,
@@ -793,7 +796,9 @@ export class AgentRuntime {
       if (state.estimatedInputTokens >= stopThreshold) {
         state.contextClosing = true;
         state.stopReason = 'context_limit';
-        const closingTools = (nextTools ?? tools).filter((tool) => tool.name === 'send' || tool.name === 'zzz');
+        const closingTools = (nextTools ?? tools).filter(
+          (tool) => SEND_TOOL_NAMES.has(tool.name) || tool.name === 'zzz',
+        );
         return {
           context: {
             ...turn.context,
@@ -935,7 +940,7 @@ export class AgentRuntime {
           .where(eq(invocations.id, invocationId))
           .run();
       }
-      if (event.type === 'tool_execution_end' && event.toolName === 'send') {
+      if (event.type === 'tool_execution_end' && SEND_TOOL_NAMES.has(event.toolName)) {
         state.sendUsed = true;
       }
       if (event.type !== 'message_end') {
@@ -1146,7 +1151,7 @@ export class AgentRuntime {
       countedSend:
         encoded.role === 'toolResult' &&
         message.role === 'toolResult' &&
-        message.toolName === 'send' &&
+        SEND_TOOL_NAMES.has(message.toolName) &&
         message.isError !== true &&
         !(
           message.details !== null &&
