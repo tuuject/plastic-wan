@@ -250,7 +250,7 @@ node src/cli.ts backup --config dev-data/config.jsonc
 
 ## Docker 部署
 
-`.github/workflows/docker.yml` 在推送 `main`、`develop` 分支和 `v*` tag 时构建 `linux/amd64` 与 `linux/arm64` 镜像并推送到 `ghcr.io/tuuject/surowan`：`main` 产出 `main` 与 `0.0.0-next-<UTC 时间戳>` tag，镜像推送成功后创建 `v0.0.0-next-<UTC 时间戳>` tag 与 GitHub Pre-release（`GITHUB_TOKEN` 推送的 tag 不会再触发 workflow）；`develop` 产出 `nightly` 与 `develop` tag，`v*` 产出 `latest` 与 semver tag。
+`.github/workflows/docker.yml` 在推送 `main`、`develop` 分支和 `v*` tag 时都运行 `verify` job，但只有 `main` 与 `v*` tag 构建 `linux/amd64` 与 `linux/arm64` 镜像并推送到 `ghcr.io/tuuject/surowan`：`main` 产出 `main` 与 `0.0.0-next-<UTC 时间戳>` tag，镜像推送成功后创建 `v0.0.0-next-<UTC 时间戳>` tag 与 GitHub Pre-release（`GITHUB_TOKEN` 推送的 tag 不会再触发 workflow）；`develop` 只做验证、不构建镜像，`v*` 产出 `latest` 与 semver tag。
 
 镜像结构（`Dockerfile`，builder 与 runtime 均为 `node:24-bookworm-slim` 两阶段）：
 

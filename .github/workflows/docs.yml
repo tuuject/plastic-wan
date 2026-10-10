@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
 
+# Verification only: the docs site is never deployed from CI.
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -50,6 +52,7 @@ jobs:
           retention-days: 7
 
   image-smoke:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

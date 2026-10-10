@@ -9,7 +9,7 @@ description: 安全升级 Plastic Wan，并区分代码、配置和数据库变�
 
 ## 镜像标签
 
-CI 在每次 push 时自动发布镜像到 `ghcr.io/tuuject/surowan`，标签按来源区分：
+CI 在推送 `main` 分支与 `v*` tag 时自动发布镜像到 `ghcr.io/tuuject/surowan`，标签按来源区分：
 
 | 标签 | 何时更新 |
 | --- | --- |
@@ -17,7 +17,6 @@ CI 在每次 push 时自动发布镜像到 `ghcr.io/tuuject/surowan`，标签按
 | `<version>` / `<major>.<minor>` | 同上；固定具体版本可获得可复现部署 |
 | `main` | 每次推送 `main` 分支，开发滚动版 |
 | `0.0.0-next-<timestamp>` | 每次推送 `main` 时固定某次构建，并创建 GitHub pre-release |
-| `develop` / `nightly` | 推送 `develop` 分支 |
 
 `latest` 只跟随 `v*` 稳定 tag，不跟随 `main`；正式版本对应 GitHub Releases 中的非 pre-release 条目。本地镜像的实际版本可查：
 
