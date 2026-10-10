@@ -4,7 +4,7 @@ import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { PublicModel } from '@plasticwan/image-service';
 import Type, { type TSchema } from 'typebox';
 import { expect, test } from 'vitest';
-import { SendInputSchema } from '../src/capabilities/send-tool.ts';
+import { SendInputSchema, SendReplyInputSchema } from '../src/capabilities/send-tool.ts';
 import { AddMemoryInputSchema, DeleteMemoryInputSchema } from '../src/context/memory.ts';
 import {
   createReplayTools,
@@ -172,6 +172,44 @@ test('send allows repeated reply targets when configured without bypassing scene
   );
   expect(replay.outputs.map((output) => output.reply_to_message_id)).toEqual(['42', '42']);
   expect(replay.dispatches).toHaveLength(2);
+});
+
+test('send_reply synthesizes one send output per part and replies with the first part only', async () => {
+  const replay = createReplayTools(
+    replayInput({ tools: [definition('send', SendInputSchema), definition('send_reply', SendReplyInputSchema)] }),
+    SystemResources.empty(),
+    { replyMessageIds: new Set(['42']), maxTextLength: 20 },
+  );
+  const sendReply = toolOf(replay.tools, 'send_reply');
+  const result = await sendReply.execute('multi', {
+    reply_to_message_id: '42',
+    parts: [{ kind: 'sticker', sticker_ref: 'stk_abc' }, { text: 'first line' }, { text: 'second line' }],
+  });
+  expect(result.content).toEqual([{ type: 'text', text: 'Sent 3 Telegram messages in order: 1, 2, 3' }]);
+  expect(result.details).toEqual({ telegramMessageIds: ['1', '2', '3'] });
+  expect(replay.outputs).toEqual([
+    {
+      tool_call_id: 'multi:1',
+      tool_name: 'send',
+      arguments: { kind: 'sticker', sticker_ref: 'stk_abc', reply_to_message_id: '42' },
+      reply_to_message_id: '42',
+    },
+    { tool_call_id: 'multi:2', tool_name: 'send', arguments: { text: 'first line' }, reply_to_message_id: null },
+    { tool_call_id: 'multi:3', tool_name: 'send', arguments: { text: 'second line' }, reply_to_message_id: null },
+  ]);
+  expect(replay.dispatches).toEqual([{ tool_call_id: 'multi', tool_name: 'send_reply', mode: 'synthetic' }]);
+  // A bad later part rejects the whole reply before any output is recorded.
+  await expect(sendReply.execute('too-long', { parts: [{ text: 'fine' }, { text: 'x'.repeat(21) }] })).rejects.toThrow(
+    'send_reply part 2 text exceeds the current configured length limit',
+  );
+  await expect(sendReply.execute('one-part', { parts: [{ text: 'alone' }] })).rejects.toThrow(
+    'send_reply input does not match the tool schema',
+  );
+  // The first part spends the reply target like a send would.
+  await expect(
+    sendReply.execute('again', { reply_to_message_id: '42', parts: [{ text: 'a' }, { text: 'b' }] }),
+  ).rejects.toThrow('reply_already_sent');
+  expect(replay.outputs).toHaveLength(3);
 });
 
 test('memory capabilities use an in-memory map without a store', async () => {

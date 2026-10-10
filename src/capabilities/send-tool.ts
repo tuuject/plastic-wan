@@ -5,7 +5,7 @@ import { GrammyError, HttpError } from 'grammy';
 import type { MessageEntity } from 'grammy/types';
 import Type, { type Static } from 'typebox';
 import type { CapabilityRefResolver, InvocationContext } from '../platform/invocation-context.ts';
-import { rejectToolCall, type SqliteStore } from '../store/database.ts';
+import { finishToolCall, rejectToolCall, type SqliteStore, startToolCall } from '../store/database.ts';
 import { imageDeliveryState } from '../store/image-delivery.ts';
 import {
   chats,
@@ -19,15 +19,35 @@ import {
   toolCalls,
 } from '../store/schema.ts';
 
+/** What one Telegram message carries; `send` and every `send_reply` part share it. */
+const sendContentProperties = {
+  kind: Type.Optional(Type.Enum({ text: 'text', sticker: 'sticker', image: 'image' })),
+  resend: Type.Optional(Type.Boolean()),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+  parse_mode: Type.Optional(Type.Literal('MarkdownV2')),
+  sticker_ref: Type.Optional(Type.String({ minLength: 1 })),
+  image_generation_id: Type.Optional(Type.String({ pattern: '^[0-9a-f-]{36}$' })),
+};
+const replyToMessageId = Type.Optional(Type.String({ pattern: '^[1-9][0-9]*$' }));
+
 export const SendInputSchema = Type.Object(
+  { ...sendContentProperties, reply_to_message_id: replyToMessageId },
+  { additionalProperties: false },
+);
+
+/** The tools that publish to Telegram; everything else stays private. */
+export const SEND_TOOL_NAMES: ReadonlySet<string> = new Set(['send', 'send_reply']);
+
+/** Most messages one `send_reply` call may publish. */
+export const SEND_REPLY_MAX_PARTS = 4;
+
+export const SendReplyInputSchema = Type.Object(
   {
-    kind: Type.Optional(Type.Enum({ text: 'text', sticker: 'sticker', image: 'image' })),
-    resend: Type.Optional(Type.Boolean()),
-    text: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
-    parse_mode: Type.Optional(Type.Literal('MarkdownV2')),
-    sticker_ref: Type.Optional(Type.String({ minLength: 1 })),
-    image_generation_id: Type.Optional(Type.String({ pattern: '^[0-9a-f-]{36}$' })),
-    reply_to_message_id: Type.Optional(Type.String({ pattern: '^[1-9][0-9]*$' })),
+    parts: Type.Array(Type.Object(sendContentProperties, { additionalProperties: false }), {
+      minItems: 2,
+      maxItems: SEND_REPLY_MAX_PARTS,
+    }),
+    reply_to_message_id: replyToMessageId,
   },
   { additionalProperties: false },
 );
@@ -221,9 +241,29 @@ function escapeMarkdownV2LinkText(text: string): string {
   return text.replace(/[\\_*[\]()~`>#+\-=|{}.!]/g, (character) => `\\${character}`);
 }
 
-export function createSendTool(
-  environment: SendToolEnvironment,
-): AgentTool<typeof SendInputSchema, { telegramMessageId: string; replayed?: boolean }> {
+type SendDetails = { telegramMessageId: string; replayed?: boolean };
+type SendReplyDetails = { telegramMessageIds: string[] };
+
+/** Delivers one message through the full send pipeline: checks, audit, barrier and Telegram. */
+type Deliver = (
+  toolCallId: string,
+  input: Static<typeof SendInputSchema>,
+  signal: AbortSignal | undefined,
+  options: { readonly barrier: boolean },
+) => Promise<{ content: { type: 'text'; text: string }[]; details: SendDetails }>;
+
+export function createSendTool(environment: SendToolEnvironment): AgentTool<typeof SendInputSchema, SendDetails> {
+  return createSendTools(environment).send;
+}
+
+/**
+ * `send` and `send_reply` over one delivery pipeline, so a completion mention
+ * is added once per task whichever tool publishes first.
+ */
+export function createSendTools(environment: SendToolEnvironment): {
+  readonly send: AgentTool<typeof SendInputSchema, SendDetails>;
+  readonly sendReply: AgentTool<typeof SendReplyInputSchema, SendReplyDetails>;
+} {
   const mentionedTasks = new Set<bigint>();
   const replyPolicy =
     environment.allowReplyMessageMultipleTimes === true
@@ -237,382 +277,341 @@ export function createSendTool(
   ]
     .filter((part) => part.length > 0)
     .join(' ');
-  return {
-    name: 'send',
-    label: 'Send to Telegram',
-    description: `Publish exactly one warranted user-visible Telegram message or sticker. Use this only after deciding the new messages or a current task completion require a reply, clarification, or confirmation; do not use it merely because the tool is available, to answer history-only content, or to publish private reasoning. Keep the message concise and self-contained. For text, kind may be omitted; omit parse_mode for plain text, or set parse_mode to MarkdownV2 only when the text is correctly escaped. ${textConstraints} For generated images, use kind:image with image_generation_id from this conversation. Already delivered outputs are not sent again; a replayed result reports the earlier delivery, not a new message. Set resend:true only when a new user message explicitly asks to resend those pictures, never just to handle a completion receipt or retry an unknown outcome. For a sticker, kind must be sticker and sticker_ref must be a stk_ value returned by the search_stickers capability (via execute); img_ refs cannot be sent. Set reply_to_message_id only to a message visible in this conversation, preferring the relevant new message; when several separate discussions are active, set it on every message so each reply is visibly attached to the one it answers. ${replyPolicy} Success means Telegram accepted the send; if the tool fails or reports an unknown outcome, do not claim it was sent and do not blindly retry. One batch of new messages may hold several separate discussions among different people: keep one message to one discussion, calling send once per discussion you choose to answer rather than merging unrelated discussions into a single message, and leave a discussion unanswered when you have nothing to add to it. Still do not split one answer across several messages; repeated sends are rate limited per chat.`,
-    parameters: SendInputSchema,
-    executionMode: 'sequential',
-    execute: async (toolCallId, input, signal) => {
-      const send = narrowSendInput(input);
-      if (send === undefined) {
-        recordRejectedSend(environment, toolCallId, input, 'send_input_invalid');
-        throw new Error('send input fields do not match its kind');
+  const deliver: Deliver = async (toolCallId, input, signal, { barrier }) => {
+    const send = narrowSendInput(input);
+    if (send === undefined) {
+      recordRejectedSend(environment, toolCallId, input, 'send_input_invalid');
+      throw new Error('send input fields do not match its kind');
+    }
+    const replyTarget =
+      send.reply_to_message_id === undefined
+        ? undefined
+        : environment.capabilities.resolveReplyTarget(send.reply_to_message_id);
+    if (send.reply_to_message_id !== undefined && replyTarget === undefined) {
+      recordRejectedSend(environment, toolCallId, input, 'reply_not_visible');
+      throw new Error('reply_to_message_id is not visible in this conversation context');
+    }
+    const targetConversationId = replyTarget?.conversationId ?? environment.context.conversationId;
+    const targetThreadId = replyTarget?.threadId ?? environment.context.threadId;
+    const completion = environment.context.completion;
+    let mention: { readonly text: string; readonly entity: MessageEntity; readonly url: string } | null = null;
+    let sendText = '';
+    if (send.kind === 'text') {
+      if (completion !== null && !mentionedTasks.has(completion.taskId)) {
+        mention = completionMention(completion);
       }
-      const replyTarget =
-        send.reply_to_message_id === undefined
-          ? undefined
-          : environment.capabilities.resolveReplyTarget(send.reply_to_message_id);
-      if (send.reply_to_message_id !== undefined && replyTarget === undefined) {
-        recordRejectedSend(environment, toolCallId, input, 'reply_not_visible');
-        throw new Error('reply_to_message_id is not visible in this conversation context');
+      if (mention === null) {
+        sendText = send.text;
+      } else if (send.parse_mode === 'MarkdownV2') {
+        // Telegram rejects `entities` together with `parse_mode`, so a
+        // MarkdownV2 first contact encodes the target mention as an inline
+        // `[text](tg://user?id=...)` link and keeps parse_mode intact.
+        sendText = `[${escapeMarkdownV2LinkText(mention.text)}](${mention.url}) ${send.text}`;
+      } else {
+        sendText = `${mention.text} ${send.text}`;
       }
-      const targetConversationId = replyTarget?.conversationId ?? environment.context.conversationId;
-      const targetThreadId = replyTarget?.threadId ?? environment.context.threadId;
-      const completion = environment.context.completion;
-      let mention: { readonly text: string; readonly entity: MessageEntity; readonly url: string } | null = null;
-      let sendText = '';
-      if (send.kind === 'text') {
-        if (completion !== null && !mentionedTasks.has(completion.taskId)) {
-          mention = completionMention(completion);
-        }
-        if (mention === null) {
-          sendText = send.text;
-        } else if (send.parse_mode === 'MarkdownV2') {
-          // Telegram rejects `entities` together with `parse_mode`, so a
-          // MarkdownV2 first contact encodes the target mention as an inline
-          // `[text](tg://user?id=...)` link and keeps parse_mode intact.
-          sendText = `[${escapeMarkdownV2LinkText(mention.text)}](${mention.url}) ${send.text}`;
-        } else {
-          sendText = `${mention.text} ${send.text}`;
-        }
-        if (environment.maxTextLength !== undefined && sendText.length > environment.maxTextLength) {
-          recordRejectedSend(environment, toolCallId, input, 'send_text_too_long');
-          throw new Error(
-            `text length ${sendText.length} exceeds the configured limit of ${environment.maxTextLength} characters`,
-          );
-        }
-        if (environment.disallowBlankLines && /\n[ \t]*\n/.test(sendText)) {
-          recordRejectedSend(environment, toolCallId, input, 'send_blank_lines');
-          throw new Error('text must not contain blank lines; separate paragraphs with single newlines');
-        }
-      }
-      const stickerFileId =
-        send.kind === 'sticker' ? environment.capabilities.resolveStickerRef(send.sticker_ref) : undefined;
-      if (send.kind === 'sticker' && stickerFileId === undefined) {
-        recordRejectedSend(environment, toolCallId, input, 'sticker_ref_not_authorized');
-        throw new Error('sticker_ref is not authorized in this conversation context');
-      }
-      let resolvedPictures: ReturnType<NonNullable<SendToolEnvironment['imageGeneration']>['resolve']>;
-      try {
-        resolvedPictures =
-          send.kind === 'image'
-            ? environment.imageGeneration?.resolve(send.image_generation_id, environment.context.conversationId)
-            : undefined;
-      } catch {
-        recordRejectedSend(environment, toolCallId, input, 'image_generation_unavailable');
-        throw new Error('image_generation_unavailable: generated output files could not be read');
-      }
-      let generationPictures =
-        send.kind === 'image' ? (resolvedPictures === undefined ? [] : resolvedPictures) : undefined;
-      if (send.kind === 'image' && resolvedPictures === undefined) {
-        recordRejectedSend(environment, toolCallId, input, 'image_generation_not_authorized');
+      if (environment.maxTextLength !== undefined && sendText.length > environment.maxTextLength) {
+        recordRejectedSend(environment, toolCallId, input, 'send_text_too_long');
         throw new Error(
-          'image_generation_id does not name a finished generation of this conversation; use ids from tool results or receipts here',
+          `text length ${sendText.length} exceeds the configured limit of ${environment.maxTextLength} characters`,
         );
       }
-      if (send.kind === 'image' && (generationPictures?.length ?? 0) === 0) {
-        recordRejectedSend(environment, toolCallId, input, 'image_generation_no_outputs');
-        throw new Error('that generation produced no pictures to send');
+      if (environment.disallowBlankLines && /\n[ \t]*\n/.test(sendText)) {
+        recordRejectedSend(environment, toolCallId, input, 'send_blank_lines');
+        throw new Error('text must not contain blank lines; separate paragraphs with single newlines');
       }
-      if (send.kind === 'image' && (send.text?.length ?? 0) > 1024) {
-        recordRejectedSend(environment, toolCallId, input, 'send_caption_too_long');
-        throw new Error('image caption must not exceed 1024 characters');
+    }
+    const stickerFileId =
+      send.kind === 'sticker' ? environment.capabilities.resolveStickerRef(send.sticker_ref) : undefined;
+    if (send.kind === 'sticker' && stickerFileId === undefined) {
+      recordRejectedSend(environment, toolCallId, input, 'sticker_ref_not_authorized');
+      throw new Error('sticker_ref is not authorized in this conversation context');
+    }
+    let resolvedPictures: ReturnType<NonNullable<SendToolEnvironment['imageGeneration']>['resolve']>;
+    try {
+      resolvedPictures =
+        send.kind === 'image'
+          ? environment.imageGeneration?.resolve(send.image_generation_id, environment.context.conversationId)
+          : undefined;
+    } catch {
+      recordRejectedSend(environment, toolCallId, input, 'image_generation_unavailable');
+      throw new Error('image_generation_unavailable: generated output files could not be read');
+    }
+    let generationPictures =
+      send.kind === 'image' ? (resolvedPictures === undefined ? [] : resolvedPictures) : undefined;
+    if (send.kind === 'image' && resolvedPictures === undefined) {
+      recordRejectedSend(environment, toolCallId, input, 'image_generation_not_authorized');
+      throw new Error(
+        'image_generation_id does not name a finished generation of this conversation; use ids from tool results or receipts here',
+      );
+    }
+    if (send.kind === 'image' && (generationPictures?.length ?? 0) === 0) {
+      recordRejectedSend(environment, toolCallId, input, 'image_generation_no_outputs');
+      throw new Error('that generation produced no pictures to send');
+    }
+    if (send.kind === 'image' && (send.text?.length ?? 0) > 1024) {
+      recordRejectedSend(environment, toolCallId, input, 'send_caption_too_long');
+      throw new Error('image caption must not exceed 1024 characters');
+    }
+    // A cancelled or expired run must not start a side effect: the model may
+    // have queued this call before the abort or deadline landed.
+    if (signal?.aborted === true || Date.now() >= environment.deadline) {
+      const errorCode = signal?.aborted === true ? 'aborted' : 'deadline_exceeded';
+      recordRejectedSend(environment, toolCallId, input, errorCode);
+      throw new Error(`Not sent: ${errorCode}`);
+    }
+    if (send.kind === 'image' && generationPictures !== undefined) {
+      if (send.resend === true && (completion !== null || environment.context.callerUserId === null)) {
+        recordRejectedSend(environment, toolCallId, input, 'image_resend_requires_user');
+        throw new Error('resend:true requires an explicit new user request, not a completion receipt');
       }
-      // A cancelled or expired run must not start a side effect: the model may
-      // have queued this call before the abort or deadline landed.
-      if (signal?.aborted === true || Date.now() >= environment.deadline) {
-        const errorCode = signal?.aborted === true ? 'aborted' : 'deadline_exceeded';
-        recordRejectedSend(environment, toolCallId, input, errorCode);
-        throw new Error(`Not sent: ${errorCode}`);
+      const delivery = imageDeliveryState(environment.store.orm, targetConversationId, send.image_generation_id);
+      // A prior uncertain attempt is not permission to try again, even when a
+      // model asks for a resend. The user must resolve that outcome first.
+      if (delivery.unknownAssets || generationPictures.some((picture) => delivery.uncertain.has(picture.assetId))) {
+        recordRejectedSend(environment, toolCallId, input, 'image_delivery_unknown');
+        throw new Error('An earlier image delivery is pending or has an unknown outcome; do not resend blindly');
       }
-      if (send.kind === 'image' && generationPictures !== undefined) {
-        if (send.resend === true && (completion !== null || environment.context.callerUserId === null)) {
-          recordRejectedSend(environment, toolCallId, input, 'image_resend_requires_user');
-          throw new Error('resend:true requires an explicit new user request, not a completion receipt');
-        }
-        const delivery = imageDeliveryState(environment.store.orm, targetConversationId, send.image_generation_id);
-        // A prior uncertain attempt is not permission to try again, even when a
-        // model asks for a resend. The user must resolve that outcome first.
-        if (delivery.unknownAssets || generationPictures.some((picture) => delivery.uncertain.has(picture.assetId))) {
-          recordRejectedSend(environment, toolCallId, input, 'image_delivery_unknown');
-          throw new Error('An earlier image delivery is pending or has an unknown outcome; do not resend blindly');
-        }
-        if (send.resend !== true) {
-          const messageIds = [
-            ...new Set(
-              generationPictures.flatMap((picture) => {
-                const messageId = delivery.delivered.get(picture.assetId);
-                return messageId === undefined ? [] : [messageId];
-              }),
-            ),
-          ];
-          const firstMessageId = messageIds[0];
-          generationPictures = generationPictures.filter((picture) => !delivery.delivered.has(picture.assetId));
-          if (generationPictures.length === 0 && firstMessageId !== undefined) {
-            const text = `Images already delivered; Telegram delivery message(s): ${messageIds.join(', ')}. No new message was sent.`;
-            const now = new Date().toISOString();
-            environment.store.orm
-              .insert(toolCalls)
-              .values({
-                invocationId: environment.context.invocationId,
-                toolCallId,
-                toolName: 'send',
-                argumentsJson: JSON.stringify(send),
-                state: 'success',
-                sideEffect: false,
-                resultText: text,
-                createdAt: now,
-                finishedAt: now,
-              })
-              .run();
-            return {
-              content: [{ type: 'text', text }],
-              details: { telegramMessageId: firstMessageId, replayed: true },
-            };
-          }
-        }
-      }
-      const rejectDuplicateReply = (): { error: string } | undefined => {
-        if (environment.allowReplyMessageMultipleTimes !== true && send.reply_to_message_id !== undefined) {
-          const previous = environment.store.orm
-            .select({ state: telegramSends.state })
-            .from(telegramSends)
-            .where(
-              and(
-                eq(telegramSends.conversationId, targetConversationId),
-                sql`json_extract(${telegramSends.requestJson}, '$.reply_to_message_id') = ${send.reply_to_message_id}`,
-                sql`${telegramSends.state} IN ('success', 'pending', 'outcome_unknown')`,
-              ),
-            )
-            // A success does not resolve another pending or uncertain attempt.
-            .orderBy(sql`${telegramSends.state} = 'success'`)
-            .limit(1)
-            .get();
-          if (previous !== undefined) {
-            const errorCode = previous.state === 'success' ? 'reply_already_sent' : 'reply_delivery_unknown';
-            recordRejectedSend(environment, toolCallId, input, errorCode);
-            return {
-              error:
-                previous.state === 'success'
-                  ? 'Not sent: reply_already_sent. This message has already been replied to. Do not send another reply or bypass this by omitting or changing reply_to_message_id.'
-                  : 'Not sent: reply_delivery_unknown. An earlier reply to this message is pending or has an unknown outcome. Do not retry or bypass this by omitting or changing reply_to_message_id.',
-            };
-          }
-        }
-        return undefined;
-      };
-      // Reject known duplicates before spending the barrier. The barrier commits
-      // bucket attachments before queueing them in memory, so it must run outside
-      // the send transaction: a later audit failure must not undo those attachments.
-      const duplicate = rejectDuplicateReply();
-      if (duplicate !== undefined) {
-        throw new Error(duplicate.error);
-      }
-      if (environment.holdForNewMessages?.() === true) {
-        recordRejectedSend(environment, toolCallId, input, 'send_barrier');
-        throw new Error(SEND_BARRIER_TEXT);
-      }
-      const pending = environment.store.transaction(() => {
-        // Recheck under the write lock and claim with the pending send atomically.
-        // The retained audit survives context resets and restarts.
-        const duplicate = rejectDuplicateReply();
-        if (duplicate !== undefined) {
-          return duplicate;
-        }
-        const now = new Date().toISOString();
-        const createdToolCall = environment.store.orm
-          .insert(toolCalls)
-          .values({
-            invocationId: environment.context.invocationId,
-            toolCallId,
-            toolName: 'send',
-            argumentsJson: JSON.stringify(send),
-            state: 'pending',
-            sideEffect: true,
-            createdAt: now,
-          })
-          .returning({ id: toolCalls.id })
-          .get();
-        if (createdToolCall === undefined) {
-          throw new Error('tool_calls insert returned no row');
-        }
-        const toolId = createdToolCall.id;
-        if (recentSendCount(environment, new Date()) >= environment.sendRateLimit.sendsPerWindow) {
-          environment.store.orm
-            .update(toolCalls)
-            .set({ state: 'error', errorCode: 'send_rate_limited', finishedAt: now })
-            .where(eq(toolCalls.id, toolId))
-            .run();
-          return {
-            error: `send rate limit of ${environment.sendRateLimit.sendsPerWindow} per ${environment.sendRateLimit.windowSeconds}s window reached`,
-          };
-        }
-        // Audit counters, not a limit: the sliding window above is the brake.
-        // `side_effect_started` marks the invocation from the moment a send is
-        // attempted, which is what turns a crash into `outcome_unknown`.
-        environment.store.orm
-          .update(invocations)
-          .set({ sendsUsed: sql`${invocations.sendsUsed} + 1`, sideEffectStarted: true })
-          .where(eq(invocations.id, environment.context.invocationId))
-          .run();
-        const createdSend = environment.store.orm
-          .insert(telegramSends)
-          .values({
-            toolCallId: toolId,
-            conversationId: targetConversationId,
-            kind: send.kind,
-            requestJson: JSON.stringify({
-              kind: send.kind,
-              reply_to_message_id: send.reply_to_message_id ?? null,
-              ...(send.kind === 'image'
-                ? {
-                    generation_id: send.image_generation_id,
-                    pictures: generationPictures?.length ?? 0,
-                    asset_ids: generationPictures?.map((picture) => picture.assetId) ?? [],
-                    resend: send.resend === true,
-                  }
-                : {}),
+      if (send.resend !== true) {
+        const messageIds = [
+          ...new Set(
+            generationPictures.flatMap((picture) => {
+              const messageId = delivery.delivered.get(picture.assetId);
+              return messageId === undefined ? [] : [messageId];
             }),
-            state: 'pending',
-            createdAt: now,
-          })
-          .returning({ id: telegramSends.id })
-          .get();
-        if (createdSend === undefined) {
-          throw new Error('telegram_sends insert returned no row');
-        }
-        return { toolId, sendId: createdSend.id };
-      });
-      if ('error' in pending) {
-        throw new Error(pending.error);
-      }
-      const sendId = pending.sendId;
-      const options = {
-        ...(targetThreadId === 0n ? {} : { message_thread_id: Number(targetThreadId) }),
-        ...(send.reply_to_message_id === undefined
-          ? {}
-          : { reply_parameters: { message_id: Number(send.reply_to_message_id) } }),
-        ...(send.kind === 'text' && send.parse_mode !== undefined ? { parse_mode: send.parse_mode } : {}),
-        ...(send.kind === 'text' && mention !== null && send.parse_mode !== 'MarkdownV2'
-          ? { entities: [mention.entity] }
-          : {}),
-      };
-      const startedAt = performance.now();
-      let response: TelegramSendResponse;
-      try {
-        while (true) {
-          try {
-            if (send.kind === 'text') {
-              response = await environment.api.sendMessage(environment.context.chatId.toString(), sendText, options);
-              break;
-            }
-            if (stickerFileId !== undefined) {
-              response = await environment.api.sendSticker(
-                environment.context.chatId.toString(),
-                stickerFileId,
-                options,
-              );
-              break;
-            }
-            if (generationPictures !== undefined) {
-              const pictures = generationPictures;
-              const sendPhoto = environment.api.sendGeneratedPhoto;
-              const sendPhotoGroup = environment.api.sendGeneratedPhotoGroup;
-              if (sendPhoto === undefined || sendPhotoGroup === undefined) {
-                throw new Error('picture delivery is not wired into this runtime');
-              }
-              const caption = send.kind === 'image' && send.text !== undefined ? { caption: send.text } : {};
-              const responses =
-                pictures.length === 1
-                  ? [
-                      await sendPhoto(
-                        environment.context.chatId.toString(),
-                        pictures[0]?.bytes ?? new Uint8Array(),
-                        pictures[0]?.fileName ?? 'image.png',
-                        { ...options, ...caption },
-                      ),
-                    ]
-                  : await sendPhotoGroup(
-                      environment.context.chatId.toString(),
-                      pictures.map((picture) => ({ bytes: picture.bytes, fileName: picture.fileName })),
-                      { ...options, ...caption },
-                    );
-              const first = responses[0];
-              if (first === undefined) {
-                throw new Error('Telegram returned no message for the delivered pictures');
-              }
-              response = first;
-              break;
-            }
-            throw new Error('sticker_ref is not authorized in this conversation context');
-          } catch (error) {
-            if (!(error instanceof GrammyError) || error.error_code !== 429) {
-              throw error;
-            }
-            const retryAfter = error.parameters.retry_after;
-            if (retryAfter === undefined || Date.now() + retryAfter * 1000 >= environment.deadline) {
-              throw error;
-            }
-            await delay(retryAfter * 1000, undefined, { signal });
-            // Messages that arrived during the wait make this reply stale, just
-            // as they would have before the first attempt.
-            if (environment.holdForNewMessages?.() === true) {
-              throw new SendHeldBack();
-            }
-          }
-        }
-      } catch (error) {
-        const held = error instanceof SendHeldBack;
-        const unknown = error instanceof HttpError || (error instanceof GrammyError && error.error_code >= 500);
-        const errorCode = held
-          ? 'send_barrier'
-          : error instanceof GrammyError
-            ? `telegram_${error.error_code}`
-            : error instanceof HttpError
-              ? 'telegram_network'
-              : signal?.aborted
-                ? 'aborted'
-                : 'send_error';
-        environment.store.transaction(() => {
+          ),
+        ];
+        const firstMessageId = messageIds[0];
+        generationPictures = generationPictures.filter((picture) => !delivery.delivered.has(picture.assetId));
+        if (generationPictures.length === 0 && firstMessageId !== undefined) {
+          const text = `Images already delivered; Telegram delivery message(s): ${messageIds.join(', ')}. No new message was sent.`;
           const now = new Date().toISOString();
-          const state = unknown ? 'outcome_unknown' : 'error';
           environment.store.orm
-            .update(toolCalls)
-            .set({
-              state,
-              errorCode,
-              durationMs: BigInt(Math.round(performance.now() - startedAt)),
+            .insert(toolCalls)
+            .values({
+              invocationId: environment.context.invocationId,
+              toolCallId,
+              toolName: 'send',
+              argumentsJson: JSON.stringify(send),
+              state: 'success',
+              sideEffect: false,
+              resultText: text,
+              createdAt: now,
               finishedAt: now,
             })
-            .where(eq(toolCalls.id, pending.toolId))
             .run();
-          environment.store.orm
-            .update(telegramSends)
-            .set({ state, errorCode, finishedAt: now })
-            .where(eq(telegramSends.id, sendId))
-            .run();
-        });
-        throw new Error(
-          held
-            ? SEND_BARRIER_TEXT
-            : unknown
-              ? 'Telegram send outcome is unknown'
-              : `Telegram send failed: ${errorCode}`,
-        );
+          return {
+            content: [{ type: 'text', text }],
+            details: { telegramMessageId: firstMessageId, replayed: true },
+          };
+        }
       }
-      if (mention !== null && completion !== null) {
-        mentionedTasks.add(completion.taskId);
+    }
+    const rejectDuplicateReply = (): { error: string } | undefined => {
+      if (environment.allowReplyMessageMultipleTimes !== true && send.reply_to_message_id !== undefined) {
+        const previous = environment.store.orm
+          .select({ state: telegramSends.state })
+          .from(telegramSends)
+          .where(
+            and(
+              eq(telegramSends.conversationId, targetConversationId),
+              sql`json_extract(${telegramSends.requestJson}, '$.reply_to_message_id') = ${send.reply_to_message_id}`,
+              sql`${telegramSends.state} IN ('success', 'pending', 'outcome_unknown')`,
+            ),
+          )
+          // A success does not resolve another pending or uncertain attempt.
+          .orderBy(sql`${telegramSends.state} = 'success'`)
+          .limit(1)
+          .get();
+        if (previous !== undefined) {
+          const errorCode = previous.state === 'success' ? 'reply_already_sent' : 'reply_delivery_unknown';
+          recordRejectedSend(environment, toolCallId, input, errorCode);
+          return {
+            error:
+              previous.state === 'success'
+                ? 'Not sent: reply_already_sent. This message has already been replied to. Do not send another reply or bypass this by omitting or changing reply_to_message_id.'
+                : 'Not sent: reply_delivery_unknown. An earlier reply to this message is pending or has an unknown outcome. Do not retry or bypass this by omitting or changing reply_to_message_id.',
+          };
+        }
       }
-      // Telegram has accepted the message from here on. A failure to record it
-      // must not read as a failed send, or the model would send it again.
+      return undefined;
+    };
+    // Reject known duplicates before spending the barrier. The barrier commits
+    // bucket attachments before queueing them in memory, so it must run outside
+    // the send transaction: a later audit failure must not undo those attachments.
+    const duplicate = rejectDuplicateReply();
+    if (duplicate !== undefined) {
+      throw new Error(duplicate.error);
+    }
+    if (barrier && environment.holdForNewMessages?.() === true) {
+      recordRejectedSend(environment, toolCallId, input, 'send_barrier');
+      throw new Error(SEND_BARRIER_TEXT);
+    }
+    const pending = environment.store.transaction(() => {
+      // Recheck under the write lock and claim with the pending send atomically.
+      // The retained audit survives context resets and restarts.
+      const duplicate = rejectDuplicateReply();
+      if (duplicate !== undefined) {
+        return duplicate;
+      }
       const now = new Date().toISOString();
-      const markAccepted = (): void => {
+      const createdToolCall = environment.store.orm
+        .insert(toolCalls)
+        .values({
+          invocationId: environment.context.invocationId,
+          toolCallId,
+          toolName: 'send',
+          argumentsJson: JSON.stringify(send),
+          state: 'pending',
+          sideEffect: true,
+          createdAt: now,
+        })
+        .returning({ id: toolCalls.id })
+        .get();
+      if (createdToolCall === undefined) {
+        throw new Error('tool_calls insert returned no row');
+      }
+      const toolId = createdToolCall.id;
+      if (recentSendCount(environment, new Date()) >= environment.sendRateLimit.sendsPerWindow) {
+        environment.store.orm
+          .update(toolCalls)
+          .set({ state: 'error', errorCode: 'send_rate_limited', finishedAt: now })
+          .where(eq(toolCalls.id, toolId))
+          .run();
+        return {
+          error: `send rate limit of ${environment.sendRateLimit.sendsPerWindow} per ${environment.sendRateLimit.windowSeconds}s window reached`,
+        };
+      }
+      // Audit counters, not a limit: the sliding window above is the brake.
+      // `side_effect_started` marks the invocation from the moment a send is
+      // attempted, which is what turns a crash into `outcome_unknown`.
+      environment.store.orm
+        .update(invocations)
+        .set({ sendsUsed: sql`${invocations.sendsUsed} + 1`, sideEffectStarted: true })
+        .where(eq(invocations.id, environment.context.invocationId))
+        .run();
+      const createdSend = environment.store.orm
+        .insert(telegramSends)
+        .values({
+          toolCallId: toolId,
+          conversationId: targetConversationId,
+          kind: send.kind,
+          requestJson: JSON.stringify({
+            kind: send.kind,
+            reply_to_message_id: send.reply_to_message_id ?? null,
+            ...(send.kind === 'image'
+              ? {
+                  generation_id: send.image_generation_id,
+                  pictures: generationPictures?.length ?? 0,
+                  asset_ids: generationPictures?.map((picture) => picture.assetId) ?? [],
+                  resend: send.resend === true,
+                }
+              : {}),
+          }),
+          state: 'pending',
+          createdAt: now,
+        })
+        .returning({ id: telegramSends.id })
+        .get();
+      if (createdSend === undefined) {
+        throw new Error('telegram_sends insert returned no row');
+      }
+      return { toolId, sendId: createdSend.id };
+    });
+    if ('error' in pending) {
+      throw new Error(pending.error);
+    }
+    const sendId = pending.sendId;
+    const options = {
+      ...(targetThreadId === 0n ? {} : { message_thread_id: Number(targetThreadId) }),
+      ...(send.reply_to_message_id === undefined
+        ? {}
+        : { reply_parameters: { message_id: Number(send.reply_to_message_id) } }),
+      ...(send.kind === 'text' && send.parse_mode !== undefined ? { parse_mode: send.parse_mode } : {}),
+      ...(send.kind === 'text' && mention !== null && send.parse_mode !== 'MarkdownV2'
+        ? { entities: [mention.entity] }
+        : {}),
+    };
+    const startedAt = performance.now();
+    let response: TelegramSendResponse;
+    try {
+      while (true) {
+        try {
+          if (send.kind === 'text') {
+            response = await environment.api.sendMessage(environment.context.chatId.toString(), sendText, options);
+            break;
+          }
+          if (stickerFileId !== undefined) {
+            response = await environment.api.sendSticker(environment.context.chatId.toString(), stickerFileId, options);
+            break;
+          }
+          if (generationPictures !== undefined) {
+            const pictures = generationPictures;
+            const sendPhoto = environment.api.sendGeneratedPhoto;
+            const sendPhotoGroup = environment.api.sendGeneratedPhotoGroup;
+            if (sendPhoto === undefined || sendPhotoGroup === undefined) {
+              throw new Error('picture delivery is not wired into this runtime');
+            }
+            const caption = send.kind === 'image' && send.text !== undefined ? { caption: send.text } : {};
+            const responses =
+              pictures.length === 1
+                ? [
+                    await sendPhoto(
+                      environment.context.chatId.toString(),
+                      pictures[0]?.bytes ?? new Uint8Array(),
+                      pictures[0]?.fileName ?? 'image.png',
+                      { ...options, ...caption },
+                    ),
+                  ]
+                : await sendPhotoGroup(
+                    environment.context.chatId.toString(),
+                    pictures.map((picture) => ({ bytes: picture.bytes, fileName: picture.fileName })),
+                    { ...options, ...caption },
+                  );
+            const first = responses[0];
+            if (first === undefined) {
+              throw new Error('Telegram returned no message for the delivered pictures');
+            }
+            response = first;
+            break;
+          }
+          throw new Error('sticker_ref is not authorized in this conversation context');
+        } catch (error) {
+          if (!(error instanceof GrammyError) || error.error_code !== 429) {
+            throw error;
+          }
+          const retryAfter = error.parameters.retry_after;
+          if (retryAfter === undefined || Date.now() + retryAfter * 1000 >= environment.deadline) {
+            throw error;
+          }
+          await delay(retryAfter * 1000, undefined, { signal });
+          // Messages that arrived during the wait make this reply stale, just
+          // as they would have before the first attempt.
+          if (barrier && environment.holdForNewMessages?.() === true) {
+            throw new SendHeldBack();
+          }
+        }
+      }
+    } catch (error) {
+      const held = error instanceof SendHeldBack;
+      const unknown = error instanceof HttpError || (error instanceof GrammyError && error.error_code >= 500);
+      const errorCode = held
+        ? 'send_barrier'
+        : error instanceof GrammyError
+          ? `telegram_${error.error_code}`
+          : error instanceof HttpError
+            ? 'telegram_network'
+            : signal?.aborted
+              ? 'aborted'
+              : 'send_error';
+      environment.store.transaction(() => {
+        const now = new Date().toISOString();
+        const state = unknown ? 'outcome_unknown' : 'error';
         environment.store.orm
           .update(toolCalls)
           .set({
-            state: 'success',
-            resultText: `telegram_message_id=${response.message_id}`,
+            state,
+            errorCode,
             durationMs: BigInt(Math.round(performance.now() - startedAt)),
             finishedAt: now,
           })
@@ -620,47 +619,216 @@ export function createSendTool(
           .run();
         environment.store.orm
           .update(telegramSends)
-          .set({
-            state: 'success',
-            telegramMessageId: BigInt(response.message_id),
-            responseJson: JSON.stringify({ message_id: response.message_id }),
-            finishedAt: now,
-          })
+          .set({ state, errorCode, finishedAt: now })
           .where(eq(telegramSends.id, sendId))
           .run();
-      };
+      });
+      throw new Error(
+        held ? SEND_BARRIER_TEXT : unknown ? 'Telegram send outcome is unknown' : `Telegram send failed: ${errorCode}`,
+      );
+    }
+    if (mention !== null && completion !== null) {
+      mentionedTasks.add(completion.taskId);
+    }
+    // Telegram has accepted the message from here on. A failure to record it
+    // must not read as a failed send, or the model would send it again.
+    const now = new Date().toISOString();
+    const markAccepted = (): void => {
+      environment.store.orm
+        .update(toolCalls)
+        .set({
+          state: 'success',
+          resultText: `telegram_message_id=${response.message_id}`,
+          durationMs: BigInt(Math.round(performance.now() - startedAt)),
+          finishedAt: now,
+        })
+        .where(eq(toolCalls.id, pending.toolId))
+        .run();
+      environment.store.orm
+        .update(telegramSends)
+        .set({
+          state: 'success',
+          telegramMessageId: BigInt(response.message_id),
+          responseJson: JSON.stringify({ message_id: response.message_id }),
+          finishedAt: now,
+        })
+        .where(eq(telegramSends.id, sendId))
+        .run();
+    };
+    try {
+      environment.store.transaction(() => {
+        markAccepted();
+        recordOutgoingMessage(environment, response, send, stickerFileId ?? null, targetConversationId, sendText, now);
+      });
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'send_record_failed',
+          invocation_id: environment.context.invocationId.toString(),
+          telegram_message_id: String(response.message_id),
+          error: error instanceof Error ? error.message : String(error),
+          at: new Date().toISOString(),
+        }),
+      );
+      // Keep at least the accepted outcome when only the outgoing-message
+      // record failed; if the store itself is failing, the log is the record.
       try {
-        environment.store.transaction(() => {
-          markAccepted();
-          recordOutgoingMessage(
-            environment,
-            response,
-            send,
-            stickerFileId ?? null,
-            targetConversationId,
-            sendText,
-            now,
-          );
-        });
-      } catch (error) {
-        console.error(
-          JSON.stringify({
-            event: 'send_record_failed',
-            invocation_id: environment.context.invocationId.toString(),
-            telegram_message_id: String(response.message_id),
-            error: error instanceof Error ? error.message : String(error),
-            at: new Date().toISOString(),
-          }),
-        );
-        // Keep at least the accepted outcome when only the outgoing-message
-        // record failed; if the store itself is failing, the log is the record.
-        try {
-          markAccepted();
-        } catch {}
+        markAccepted();
+      } catch {}
+    }
+    return {
+      content: [{ type: 'text', text: `Sent Telegram message ${response.message_id}` }],
+      details: { telegramMessageId: String(response.message_id) },
+    };
+  };
+  const send: AgentTool<typeof SendInputSchema, SendDetails> = {
+    name: 'send',
+    label: 'Send to Telegram',
+    description: `Publish exactly one warranted user-visible Telegram message or sticker. Use this only after deciding the new messages or a current task completion require a reply, clarification, or confirmation; do not use it merely because the tool is available, to answer history-only content, or to publish private reasoning. Keep the message concise and self-contained. For text, kind may be omitted; omit parse_mode for plain text, or set parse_mode to MarkdownV2 only when the text is correctly escaped. ${textConstraints} For generated images, use kind:image with image_generation_id from this conversation. Already delivered outputs are not sent again; a replayed result reports the earlier delivery, not a new message. Set resend:true only when a new user message explicitly asks to resend those pictures, never just to handle a completion receipt or retry an unknown outcome. For a sticker, kind must be sticker and sticker_ref must be a stk_ value returned by the search_stickers capability (via execute); img_ refs cannot be sent. Set reply_to_message_id only to a message visible in this conversation, preferring the relevant new message; when several separate discussions are active, set it on every message so each reply is visibly attached to the one it answers. ${replyPolicy} Success means Telegram accepted the send; if the tool fails or reports an unknown outcome, do not claim it was sent and do not blindly retry. One batch of new messages may hold several separate discussions among different people: keep one message to one discussion, calling send once per discussion you choose to answer rather than merging unrelated discussions into a single message, and leave a discussion unanswered when you have nothing to add to it. Do not split one answer across several send calls: when one answer reads better as a few short consecutive messages, or pairs a sticker or generated picture with text, use send_reply once instead. Repeated sends are rate limited per chat.`,
+    parameters: SendInputSchema,
+    executionMode: 'sequential',
+    execute: (toolCallId, input, signal) => deliver(toolCallId, input, signal, { barrier: true }),
+  };
+  return { send, sendReply: createSendReplyTool(environment, deliver, textConstraints, replyPolicy) };
+}
+
+/**
+ * One reply as several consecutive messages. Every part is checked before the
+ * first goes out, so a predictable rejection never leaves half a reply; each
+ * part then runs the whole `send` pipeline as its own audited call
+ * (`<tool_call_id>:<n>`). Only the first part carries the reply target and
+ * meets the send barrier: once it is out, the rest follow it back to back.
+ */
+function createSendReplyTool(
+  environment: SendToolEnvironment,
+  deliver: Deliver,
+  textConstraints: string,
+  replyPolicy: string,
+): AgentTool<typeof SendReplyInputSchema, SendReplyDetails> {
+  return {
+    name: 'send_reply',
+    label: 'Send a multi-part reply to Telegram',
+    description: `Publish one warranted reply as 2 to ${SEND_REPLY_MAX_PARTS} consecutive Telegram messages, sent in the listed order: for example a sticker and then text, a generated picture and then its explanation, or a medium-length answer that reads more naturally as a few short messages. Use send for a single message; do not pad an answer into parts, and do not use send_reply to merge separate discussions (answer each with its own send). Each part is one message with the same fields as send: text (kind may be omitted, optional parse_mode), kind:sticker with a stk_ sticker_ref, or kind:image with image_generation_id and an optional caption in text. ${textConstraints} reply_to_message_id applies to the first part only; the later parts follow it without a reply. ${replyPolicy} Every part is checked before anything is sent, so a rejection means nothing went out. Once the first part is out the rest follow without waiting for new messages. If a later part fails, the earlier ones stay published and the error lists them: never send those again. Each part counts against the per-chat send rate limit.`,
+    parameters: SendReplyInputSchema,
+    executionMode: 'sequential',
+    execute: async (toolCallId, input, signal) => {
+      const reject = (errorCode: string, message: string): never => {
+        recordRejectedSend(environment, toolCallId, input, errorCode, 'send_reply');
+        throw new Error(`Nothing was sent: ${message}`);
+      };
+      if (input.parts.length < 2 || input.parts.length > SEND_REPLY_MAX_PARTS) {
+        reject('send_input_invalid', `send_reply takes 2 to ${SEND_REPLY_MAX_PARTS} parts; use send for one message`);
       }
+      if (
+        input.reply_to_message_id !== undefined &&
+        environment.capabilities.resolveReplyTarget(input.reply_to_message_id) === undefined
+      ) {
+        reject('reply_not_visible', 'reply_to_message_id is not visible in this conversation context');
+      }
+      for (const [index, part] of input.parts.entries()) {
+        const label = `part ${index + 1}`;
+        const send = narrowSendInput(part);
+        if (send === undefined) {
+          return reject('send_input_invalid', `${label} fields do not match its kind`);
+        }
+        if (send.kind === 'text') {
+          if (environment.maxTextLength !== undefined && send.text.length > environment.maxTextLength) {
+            reject(
+              'send_text_too_long',
+              `${label} text length ${send.text.length} exceeds the configured limit of ${environment.maxTextLength} characters`,
+            );
+          }
+          if (environment.disallowBlankLines && /\n[ \t]*\n/.test(send.text)) {
+            reject('send_blank_lines', `${label} text must not contain blank lines`);
+          }
+        } else if (send.kind === 'sticker') {
+          if (environment.capabilities.resolveStickerRef(send.sticker_ref) === undefined) {
+            reject('sticker_ref_not_authorized', `${label} sticker_ref is not authorized in this conversation context`);
+          }
+        } else {
+          if ((send.text?.length ?? 0) > 1024) {
+            reject('send_caption_too_long', `${label} image caption must not exceed 1024 characters`);
+          }
+          let pictures: ReturnType<NonNullable<SendToolEnvironment['imageGeneration']>['resolve']>;
+          try {
+            pictures = environment.imageGeneration?.resolve(
+              send.image_generation_id,
+              environment.context.conversationId,
+            );
+          } catch {
+            return reject('image_generation_unavailable', `${label} generated output files could not be read`);
+          }
+          if (pictures === undefined || pictures.length === 0) {
+            reject(
+              'image_generation_not_authorized',
+              `${label} image_generation_id does not name a finished generation of this conversation`,
+            );
+          }
+        }
+      }
+      if (signal?.aborted === true || Date.now() >= environment.deadline) {
+        reject(signal?.aborted === true ? 'aborted' : 'deadline_exceeded', 'the run was cancelled or timed out');
+      }
+      const { sendsPerWindow, windowSeconds } = environment.sendRateLimit;
+      if (recentSendCount(environment, new Date()) + input.parts.length > sendsPerWindow) {
+        reject(
+          'send_rate_limited',
+          `${input.parts.length} messages would exceed the send rate limit of ${sendsPerWindow} per ${windowSeconds}s window`,
+        );
+      }
+      const startedAt = performance.now();
+      const auditId = startToolCall(
+        environment.store.orm,
+        environment.context.invocationId,
+        toolCallId,
+        'send_reply',
+        JSON.stringify(input),
+        true,
+      );
+      const sent: string[] = [];
+      for (const [index, part] of input.parts.entries()) {
+        const partCallId = `${toolCallId}:${index + 1}`;
+        const first = index === 0;
+        try {
+          const result = await deliver(
+            partCallId,
+            first && input.reply_to_message_id !== undefined
+              ? { ...part, reply_to_message_id: input.reply_to_message_id }
+              : part,
+            signal,
+            { barrier: first },
+          );
+          sent.push(result.details.telegramMessageId);
+        } catch (error) {
+          const failed = environment.store.orm
+            .select({ errorCode: toolCalls.errorCode })
+            .from(toolCalls)
+            .where(eq(toolCalls.toolCallId, partCallId))
+            .get();
+          finishToolCall(
+            environment.store.orm,
+            auditId,
+            'error',
+            sent.length === 0 ? null : `telegram_message_ids=${sent.join(',')}`,
+            failed?.errorCode ?? 'send_error',
+            { startedAt },
+          );
+          const reason = error instanceof Error ? error.message : String(error);
+          if (sent.length === 0) {
+            throw new Error(`Nothing was sent: part 1 failed. ${reason}`);
+          }
+          const rest = input.parts.length - index - 1;
+          throw new Error(
+            `Parts 1-${index} were published as Telegram messages ${sent.join(', ')}; do not send them again. Part ${index + 1} failed: ${reason}${rest > 0 ? ` The remaining ${rest} part(s) were not attempted.` : ''}`,
+          );
+        }
+      }
+      finishToolCall(environment.store.orm, auditId, 'success', `telegram_message_ids=${sent.join(',')}`, null, {
+        startedAt,
+      });
       return {
-        content: [{ type: 'text', text: `Sent Telegram message ${response.message_id}` }],
-        details: { telegramMessageId: String(response.message_id) },
+        content: [{ type: 'text', text: `Sent ${sent.length} Telegram messages in order: ${sent.join(', ')}` }],
+        details: { telegramMessageIds: sent },
       };
     },
   };
@@ -692,12 +860,13 @@ function recordRejectedSend(
   toolCallId: string,
   input: unknown,
   errorCode: string,
+  toolName: 'send' | 'send_reply' = 'send',
 ): void {
   rejectToolCall(
     environment.store.orm,
     environment.context.invocationId,
     toolCallId,
-    'send',
+    toolName,
     JSON.stringify(input),
     true,
     errorCode,

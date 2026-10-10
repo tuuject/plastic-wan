@@ -11,7 +11,7 @@ import { modelDefinitionSchema, type PublicModel } from '@plasticwan/image-servi
 import { eq } from 'drizzle-orm';
 import { createExecuteTool } from '../capabilities/execute-tool.ts';
 import { createReadTool } from '../capabilities/read-tool.ts';
-import { createSendTool } from '../capabilities/send-tool.ts';
+import { createSendTools } from '../capabilities/send-tool.ts';
 import { ContextBuilder, type StablePrompt } from '../context/context-builder.ts';
 import { estimateMessageTokens } from '../context/context-codec.ts';
 import { ContextRefStore } from '../context/context-refs.ts';
@@ -652,7 +652,7 @@ export class ReplayRunner {
     const blocked = async (): Promise<never> => {
       throw new Error('No production executor is wired');
     };
-    const send = createSendTool({
+    const { send, sendReply } = createSendTools({
       store: this.#options.store,
       context,
       api: { sendMessage: blocked, sendSticker: blocked },
@@ -668,6 +668,7 @@ export class ReplayRunner {
       tools: [
         createReadTool({ store: this.#options.store, context, resources: this.#options.systemResources }),
         send,
+        sendReply,
         createExecuteTool({
           capabilities: [],
           audit: { start: () => ({ succeed: () => {}, fail: () => {} }), reject: () => {} },
