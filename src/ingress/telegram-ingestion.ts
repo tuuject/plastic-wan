@@ -1,6 +1,7 @@
 import { and, eq, sql } from 'drizzle-orm';
 import type { Message, Update } from 'grammy/types';
 import { conversationThreadId, type ParsedCommand, parseBotCommand } from '../orchestration/bot-commands.ts';
+import { mentionsBot } from '../platform/participation.ts';
 import type { RuntimeConfigurationStore } from '../platform/runtime-config.ts';
 import { asRunResult, isChatPaused, resolveChatConfig, type SqliteStore } from '../store/database.ts';
 import { evaluateParticipation, ParticipationRegistry } from '../store/participation.ts';
@@ -60,6 +61,11 @@ export interface IngestResult {
   readonly messageId?: bigint;
   readonly bucketId?: bigint;
   readonly command?: ParsedCommand;
+  /**
+   * Set when a live human message @-mentions the bot and joined a bucket, so
+   * the host can show typing before the bucket window closes.
+   */
+  readonly mention?: { readonly chatId: bigint; readonly threadId: bigint };
 }
 
 export class TelegramIngestion {
@@ -210,9 +216,15 @@ export class TelegramIngestion {
         bucketId = this.#appendToBucket(internalChatId, threadId, stored, receivedAt, decision.bucketCreationAllowed);
       }
     }
+    const mentioned =
+      bucketId !== undefined &&
+      stored.eligibleHuman &&
+      this.#configStore.current().config.telegram.mention_typing_enabled !== false &&
+      mentionsBot(message, { id: this.#botId, username: this.#botUsername });
     return {
       messageId: stored.id,
       ...(bucketId === undefined ? {} : { bucketId }),
+      ...(mentioned ? { mention: { chatId, threadId } } : {}),
     };
   }
 

@@ -16,6 +16,7 @@ import {
   compileParticipation,
   isWithinActiveWindows,
   matchTriggerKind,
+  mentionsBot,
 } from '../src/platform/participation.ts';
 import { type StartupCatchUpApi, runStartupCatchUp } from '../src/startup-catch-up.ts';
 import { SqliteStore, purgeExpiredData } from '../src/store/database.ts';
@@ -238,6 +239,37 @@ describe('participation rules', () => {
     const instant = new Date('2026-08-15T01:30:00.000Z');
     expect(isWithinActiveWindows(shanghai, instant)).toBe(true);
     expect(isWithinActiveWindows(ruleOf({ windows: [DAY_WINDOW] }), instant)).toBe(false);
+  });
+
+  test('mentionsBot compares the @username to this bot only, in text and in captions', () => {
+    const message = (fields: LooseFields) => groupMessage(1, 10, fields).message as Message;
+    const length = BOT_USERNAME.length + 1;
+    expect(mentionsBot(message(mentionText()), BOT_IDENTITY)).toBe(true);
+    expect(
+      mentionsBot(
+        message({ text: `@${BOT_USERNAME.toUpperCase()} hi`, entities: [{ type: 'mention', offset: 0, length }] }),
+        BOT_IDENTITY,
+      ),
+    ).toBe(true);
+    expect(
+      mentionsBot(
+        message({ text: '@Another hi', entities: [{ type: 'mention', offset: 0, length: 8 }] }),
+        BOT_IDENTITY,
+      ),
+    ).toBe(false);
+    // Offsets of caption entities index the caption, never the text.
+    expect(
+      mentionsBot(
+        message({
+          text: 'x'.repeat(40),
+          caption: `@${BOT_USERNAME}`,
+          caption_entities: [{ type: 'mention', offset: 0, length }],
+        }),
+        BOT_IDENTITY,
+      ),
+    ).toBe(true);
+    // Without a username only a text mention of the bot id can match.
+    expect(mentionsBot(message(mentionText()), { id: BigInt(BOT_ID), username: null })).toBe(false);
   });
 
   test('matches mentions, bot replies, and keywords in priority order', () => {

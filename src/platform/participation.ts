@@ -97,7 +97,8 @@ export function matchTriggerKind(message: Message, bot: BotIdentity, keywords: r
   return containsKeyword(message, keywords) ? 'keyword' : null;
 }
 
-function mentionsBot(message: Message, bot: BotIdentity): boolean {
+/** Whether the message @-mentions the bot by username or by a text mention of its id. */
+export function mentionsBot(message: Message, bot: BotIdentity): boolean {
   const username = bot.username?.toLowerCase() ?? null;
   // `entities` offsets index `text`; `caption_entities` offsets index `caption`.
   const sources = [

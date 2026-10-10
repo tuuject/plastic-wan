@@ -153,6 +153,7 @@ command SecretRef：
 - `bucket_window_seconds` 是全局 Agent 会话节拍，单位秒，示例值为 15。`0` 表示有新消息时不额外延迟，但不会创建空会话。deadline 锚点、按 Chat 串行、轮中途不交出批次与 attach 到运行中 Invocation 的规则统一见 [Telegram 与 Agent 流程：会话节拍与 Bucket](telegram-agent-flow.md#会话节拍与-bucket)；运行结束后是否继续等待下一个 Bucket 由 `agent.context.idle_grace_seconds` 决定，见「Conversation Context」。
 - `process_bot_messages` 控制是否处理其他 Bot 的消息。`false` 时其他 Bot 的新消息与编辑只保留 Update 审计，完全不入库。`true` 时它们会入库，但永远不能创建 Bucket、命中 participation 触发或刷新注意力窗口：已有 collecting Bucket 时直接加入；否则暂存，等下一条真人消息创建 Bucket 时，按 Telegram 时间顺序排在该真人消息之前一并收入（仅收未进过任何 Bucket、晚于该 Conversation 上一个 Bucket 起点、且在 `/cut_topic` 截断之后的最新 `agent.history_messages` 条）。这样两个 Bot 无法互相唤醒形成死循环。自己发送的 Update 始终忽略。带 `sender_chat` 的消息（匿名管理员、以频道身份发言、关联频道自动转发）不算 Bot 消息：Telegram 为兼容会在 `from` 里放一个占位 Bot（如 GroupAnonymousBot），实际作者是 `sender_chat`，按真人消息处理。
 - `sticker_trigger_enabled` 可选，默认 `false`。关闭时，单独收到的人类 Sticker 仍会持久化，但不会创建 Bucket 或触发 Invocation；已有 collecting Bucket 时仍会加入。设为 `true` 后，单独的 Sticker 可以创建 Bucket。
+- `mention_typing_enabled` 可选，默认 `true`。真人在群里 @ Bot 且消息进入 Bucket 时，runtime 立即显示“正在输入”，不等待 `bucket_window_seconds` 和模型决策；设为 `false` 后只剩模型自己调用的 `typing`。仅 `@` 触发，Reply Bot 与关键词不触发；暂停、休眠、participation 闸门未放行时不显示。不在热更新白名单中，修改后需要重启。
 - Chat ID 必须是非零安全整数且不可重复。
 - 未配置 `topic_ids`：允许该 Chat 的普通消息与所有 Topic。
 - 配置 `topic_ids`：只允许列出的正整数 Topic ID；未列出的 Topic 被审计为拒绝。
