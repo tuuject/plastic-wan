@@ -98,9 +98,10 @@ test('schema reference covers nested arrays, union policies and required/optiona
 
 test('deployment URL settings reject credentials and malformed base paths', () => {
   expect(deploymentSettings({})).toEqual({ siteOrigin: '', base: '/' });
-  expect(deploymentSettings({ DOCS_SITE_ORIGIN: 'https://docs.example.com', DOCS_BASE_PATH: '/surowan/' })).toEqual(
-    { siteOrigin: 'https://docs.example.com', base: '/surowan/' },
-  );
+  expect(deploymentSettings({ DOCS_SITE_ORIGIN: 'https://docs.example.com', DOCS_BASE_PATH: '/surowan/' })).toEqual({
+    siteOrigin: 'https://docs.example.com',
+    base: '/surowan/',
+  });
   for (const origin of [
     'https://user:pass@docs.example.com',
     'https://docs.example.com/a',
